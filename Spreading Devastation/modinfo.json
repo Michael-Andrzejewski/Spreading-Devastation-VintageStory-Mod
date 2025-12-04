@@ -1,0 +1,15 @@
+{
+    "$schema": "https://moddbcdn.vintagestory.at/schema/modinfo.latest.json",
+    "type": "Code",
+    "modid": "spreadingdevastation",
+    "name": "Spreading Devastation",
+    "authors": [
+        "maaro"
+    ],
+    "description": "Temporal rifts and manually marked blocks spread or heal devastation with customizable range and amount. Use /devastate add or /devastate heal to mark blocks. Devastated blocks slowly regenerate over time. Use /devastate remove all to clear all sources.",
+    "version": "5.0.0",
+    "dependencies": {
+        "game": "1.21.0"
+    }
+}
+

@@ -1,0 +1,26 @@
+## Build results
+bin/
+obj/
+*.dll
+*.pdb
+*.zip
+
+## Visual Studio / Rider
+.vs/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## Rider
+.idea/
+
+## VS Code
+.vscode/
+
+## Temporary files
+*.tmp
+*.temp
+*~
+
