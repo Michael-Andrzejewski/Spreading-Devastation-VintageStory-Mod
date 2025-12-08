@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Security.Cryptography;
 using ProtoBuf;
@@ -57,9 +58,9 @@ namespace SpreadingDevastation
         /// <summary>
         /// Variation in child source range as a fraction of parent range.
         /// Child range = parent range * (1 ± this value)
-        /// E.g., 0.5 means 50-150% of parent range. (default: 0.5)
+        /// E.g., 0.5 means 50-150% of parent range. (default: 0.0 = disabled for legacy spacing)
         /// </summary>
-        public double MetastasisRadiusVariation { get; set; } = 0.5;
+        public double MetastasisRadiusVariation { get; set; } = 0.0;
         
         /// <summary>
         /// Delay in seconds between spawning child sources (default: 120.0)
@@ -76,6 +77,31 @@ namespace SpreadingDevastation
         /// Vertical search range (±blocks) when using pillar strategy for metastasis (default: 5)
         /// </summary>
         public int PillarSearchHeight { get; set; } = 5;
+
+        /// <summary>
+        /// Enable periodic player-directed child spawning (default: true)
+        /// </summary>
+        public bool PlayerDirectedSpawningEnabled { get; set; } = true;
+
+        /// <summary>
+        /// Interval in seconds between player-directed spawn attempts (default: 60)
+        /// </summary>
+        public double PlayerDirectedSpawnIntervalSeconds { get; set; } = 60.0;
+
+        /// <summary>
+        /// Half-angle in degrees for the player-directed spawn cone (default: 25)
+        /// </summary>
+        public double PlayerDirectedConeHalfAngleDegrees { get; set; } = 25.0;
+
+        /// <summary>
+        /// When enabled, sources emit magenta debug particles to visually locate them.
+        /// </summary>
+        public bool DebugMarkSources { get; set; } = false;
+
+        /// <summary>
+        /// Interval in seconds between debug particle bursts at sources.
+        /// </summary>
+        public double DebugMarkIntervalSeconds { get; set; } = 1.5;
     }
 
     public class SpreadingDevastationModSystem : ModSystem
@@ -91,6 +117,44 @@ namespace SpreadingDevastation
 
             [ProtoMember(3)]
             public double LastTime;
+        }
+
+        private void SpawnDebugParticlesAtSources()
+        {
+            if (devastationSources == null || devastationSources.Count == 0) return;
+
+            // Limit to avoid particle spam
+            int maxSources = Math.Min(devastationSources.Count, 150);
+            int step = Math.Max(1, devastationSources.Count / maxSources);
+
+            for (int i = 0; i < devastationSources.Count; i += step)
+            {
+                var src = devastationSources[i];
+                SpawnDebugBurst(src.Pos.ToVec3d());
+            }
+        }
+
+        private void SpawnDebugBurst(Vec3d pos)
+        {
+            SimpleParticleProperties props = new SimpleParticleProperties(
+                8, 12,
+                ColorUtil.ToRgba(255, 255, 0, 255), // Magenta-ish
+                pos.AddCopy(-0.5, 0.1, -0.5),
+                pos.AddCopy(0.5, 0.8, 0.5),
+                new Vec3f(-0.1f, 0.2f, -0.1f),
+                new Vec3f(0.1f, 0.4f, 0.1f),
+                0.8f,
+                -0.03f,
+                0.1f,
+                0.25f,
+                EnumParticleModel.Quad
+            );
+
+            props.AddPos.Set(0, 0.5f, 0);
+            props.SizeEvolve = EvolvingNatFloat.create(EnumTransformFunction.LINEAR, -0.02f);
+            props.RandomVelocityChange = true;
+            props.VertexFlags = 255;
+            sapi.World.SpawnParticles(props, null);
         }
 
         [ProtoContract]
@@ -168,6 +232,9 @@ namespace SpreadingDevastation
         private bool isPaused = false; // When true, all devastation processing stops
         private int nextSourceId = 1; // Counter for generating unique source IDs
         private int cleanupTickCounter = 0; // Counter for periodic cleanup
+        private bool pendingPlayerDirectedSpawn = false; // Flag indicating the next spawn should bias toward player
+        private double nextPlayerDirectedSpawnHour = 0; // Game time (hours) when the next player-directed attempt should be scheduled
+        private double nextDebugMarkHour = 0; // Game time (hours) for next debug particle pass
 
         public override void Start(ICoreAPI api)
         {
@@ -236,6 +303,21 @@ namespace SpreadingDevastation
                     .WithArgs(api.ChatCommands.Parsers.OptionalWord("onoff"))
                     .HandleWith(HandleAirContactCommand)
                 .EndSubCommand()
+                .BeginSubCommand("playerdirection")
+                    .WithDescription("Toggle player-directed child spawning")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("onoff"))
+                    .HandleWith(HandlePlayerDirectionCommand)
+                .EndSubCommand()
+                .BeginSubCommand("playerinterval")
+                    .WithDescription("Set interval (seconds) for player-directed child spawning")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalInt("seconds"))
+                    .HandleWith(HandlePlayerIntervalCommand)
+                .EndSubCommand()
+                .BeginSubCommand("debugmark")
+                    .WithDescription("Toggle magenta debug particles on sources")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("onoff"))
+                    .HandleWith(HandleDebugMarkCommand)
+                .EndSubCommand()
                 .BeginSubCommand("miny")
                     .WithDescription("Set minimum Y level for new sources")
                     .WithArgs(api.ChatCommands.Parsers.OptionalInt("level"))
@@ -257,7 +339,6 @@ namespace SpreadingDevastation
             api.ChatCommands.Create("devastationspeed")
                 .WithDescription("Set devastation spread speed multiplier")
                 .RequiresPrivilege(Privilege.controlserver)
-                .WithArgs(api.ChatCommands.Parsers.OptionalDouble("multiplier"))
                 .HandleWith(HandleSpeedCommand);
             
             api.ChatCommands.Create("devastationconfig")
@@ -282,6 +363,22 @@ namespace SpreadingDevastation
                 }
                 else
                 {
+                    // Auto-fix legacy bug where speed could have been clamped to 0.01 by default
+                    if (Math.Abs(config.SpeedMultiplier - 0.01) < 0.0001)
+                    {
+                        config.SpeedMultiplier = 1.0;
+                        sapi.StoreModConfig(config, "SpreadingDevastationConfig.json");
+                        sapi.Logger.Notification("SpreadingDevastation: Fixed speed multiplier default to 1.0");
+                    }
+
+                    // Auto-migrate variation back to legacy spacing if still at old default (0.5)
+                    if (Math.Abs(config.MetastasisRadiusVariation - 0.5) < 0.0001)
+                    {
+                        config.MetastasisRadiusVariation = 0.0;
+                        sapi.StoreModConfig(config, "SpreadingDevastationConfig.json");
+                        sapi.Logger.Notification("SpreadingDevastation: Reset metastasis radius variation to 0 for legacy spacing");
+                    }
+
                     sapi.Logger.Notification("SpreadingDevastation: Loaded config file");
                 }
             }
@@ -352,14 +449,20 @@ namespace SpreadingDevastation
 
         private TextCommandResult HandleSpeedCommand(TextCommandCallingArgs args)
         {
-            double? speedArg = args.Parsers[0].GetValue() as double?;
-            
-            if (!speedArg.HasValue)
+            string raw = args.RawArgs?.PopWord();
+            if (string.IsNullOrEmpty(raw))
             {
                 return TextCommandResult.Success($"Current devastation speed: {config.SpeedMultiplier:F2}x\nUsage: /devastationspeed <multiplier> (e.g., 0.5 for half speed, 5 for 5x speed)");
             }
-            
-            double newSpeed = Math.Clamp(speedArg.Value, 0.01, 100.0);
+
+            // Try parse using invariant first, then fallback to current culture
+            if (!double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out double newSpeed) &&
+                !double.TryParse(raw, NumberStyles.Float, CultureInfo.CurrentCulture, out newSpeed))
+            {
+                return TextCommandResult.Error("Invalid speed value. Use a number like 0.5, 1, 2, 5, etc.");
+                        }
+
+            newSpeed = Math.Clamp(newSpeed, 0.01, 100.0);
             config.SpeedMultiplier = newSpeed;
             SaveConfig();
             return TextCommandResult.Success($"Devastation speed set to {config.SpeedMultiplier:F2}x");
@@ -390,7 +493,7 @@ namespace SpreadingDevastation
             
             // Parse arguments - they come as pairs: "range" <value> "amount" <value>
             for (int i = 0; i < args.Parsers.Count - 1; i += 2)
-            {
+                {
                 string keyword = args.Parsers[i].GetValue() as string;
                 if (string.IsNullOrEmpty(keyword)) continue;
                 
@@ -398,11 +501,11 @@ namespace SpreadingDevastation
                 if (!value.HasValue) continue;
                 
                 if (keyword == "range")
-                {
+                    {
                     range = Math.Clamp(value.Value, 1, 128);
                 }
                 else if (keyword == "amount")
-                {
+                    {
                     amount = Math.Clamp(value.Value, 1, 100);
                 }
             }
@@ -466,9 +569,9 @@ namespace SpreadingDevastation
                 if (removed > 0)
                 {
                     return TextCommandResult.Success($"Removed devastation source at {pos}");
-                }
-                else
-                {
+            }
+            else
+            {
                     return TextCommandResult.Error("No devastation source found at this location");
                 }
             }
@@ -671,6 +774,80 @@ namespace SpreadingDevastation
             }
         }
 
+        private TextCommandResult HandlePlayerDirectionCommand(TextCommandCallingArgs args)
+        {
+            string onOff = args.Parsers[0].GetValue() as string;
+
+            if (string.IsNullOrEmpty(onOff))
+            {
+                string status = config.PlayerDirectedSpawningEnabled ? "ON" : "OFF";
+                return TextCommandResult.Success($"Player-directed spawning: {status}\nUsage: /devastate playerdirection [on|off]");
+            }
+
+            if (onOff.Equals("on", StringComparison.OrdinalIgnoreCase) || onOff == "1" || onOff.Equals("true", StringComparison.OrdinalIgnoreCase))
+            {
+                config.PlayerDirectedSpawningEnabled = true;
+                SaveConfig();
+                return TextCommandResult.Success("Player-directed spawning ENABLED - every interval one child will try to spawn toward the nearest player");
+            }
+            else if (onOff.Equals("off", StringComparison.OrdinalIgnoreCase) || onOff == "0" || onOff.Equals("false", StringComparison.OrdinalIgnoreCase))
+            {
+                config.PlayerDirectedSpawningEnabled = false;
+                SaveConfig();
+                return TextCommandResult.Success("Player-directed spawning DISABLED - all children spawn randomly");
+            }
+            else
+            {
+                return TextCommandResult.Error("Invalid value. Use: on, off, 1, 0, true, or false");
+            }
+        }
+
+        private TextCommandResult HandlePlayerIntervalCommand(TextCommandCallingArgs args)
+        {
+            int? secondsArg = args.Parsers[0].GetValue() as int?;
+
+            if (!secondsArg.HasValue)
+            {
+                return TextCommandResult.Success($"Current player-directed interval: {config.PlayerDirectedSpawnIntervalSeconds:F0} seconds\nUsage: /devastate playerinterval <seconds>");
+            }
+
+            int seconds = Math.Clamp(secondsArg.Value, 5, 3600);
+            config.PlayerDirectedSpawnIntervalSeconds = seconds;
+            SaveConfig();
+            // Reset the timer to take effect immediately
+            nextPlayerDirectedSpawnHour = 0;
+            return TextCommandResult.Success($"Player-directed spawn interval set to {config.PlayerDirectedSpawnIntervalSeconds:F0} seconds");
+        }
+
+        private TextCommandResult HandleDebugMarkCommand(TextCommandCallingArgs args)
+        {
+            string onOff = args.Parsers[0].GetValue() as string;
+
+            if (string.IsNullOrEmpty(onOff))
+            {
+                string status = config.DebugMarkSources ? "ON" : "OFF";
+                return TextCommandResult.Success($"Debug source marking: {status}\nUsage: /devastate debugmark [on|off]");
+            }
+
+            if (onOff.Equals("on", StringComparison.OrdinalIgnoreCase) || onOff == "1" || onOff.Equals("true", StringComparison.OrdinalIgnoreCase))
+            {
+                config.DebugMarkSources = true;
+                SaveConfig();
+                nextDebugMarkHour = 0; // force immediate mark
+                return TextCommandResult.Success("Debug marking ENABLED - sources will emit magenta particles");
+            }
+            else if (onOff.Equals("off", StringComparison.OrdinalIgnoreCase) || onOff == "0" || onOff.Equals("false", StringComparison.OrdinalIgnoreCase))
+            {
+                config.DebugMarkSources = false;
+                SaveConfig();
+                return TextCommandResult.Success("Debug marking DISABLED");
+            }
+            else
+            {
+                return TextCommandResult.Error("Invalid value. Use: on, off, 1, 0, true, or false");
+            }
+        }
+
         private TextCommandResult HandleMinYCommand(TextCommandCallingArgs args)
         {
             int? levelArg = args.Parsers[0].GetValue() as int?;
@@ -698,6 +875,8 @@ namespace SpreadingDevastation
             sb.AppendLine($"Min Y level: {config.MinYLevel}");
             sb.AppendLine($"Child spawn delay: {config.ChildSpawnDelaySeconds}s");
             sb.AppendLine($"Max failed attempts: {config.MaxFailedSpawnAttempts}");
+            sb.AppendLine($"Player-directed spawning: {(config.PlayerDirectedSpawningEnabled ? "ON" : "OFF")} every {config.PlayerDirectedSpawnIntervalSeconds:F0}s (cone {config.PlayerDirectedConeHalfAngleDegrees:F0}°)");
+            sb.AppendLine($"Debug mark sources: {(config.DebugMarkSources ? "ON" : "OFF")} every {config.DebugMarkIntervalSeconds:F1}s");
             return TextCommandResult.Success(sb.ToString());
         }
 
@@ -793,127 +972,189 @@ namespace SpreadingDevastation
             
             try
             {
+                double currentGameTime = sapi.World.Calendar.TotalHours;
+
+                // Schedule player-directed spawn flags
+                if (config.PlayerDirectedSpawningEnabled)
+                {
+                    if (nextPlayerDirectedSpawnHour == 0)
+                    {
+                        nextPlayerDirectedSpawnHour = currentGameTime + (config.PlayerDirectedSpawnIntervalSeconds / 3600.0);
+                    }
+                    else if (currentGameTime >= nextPlayerDirectedSpawnHour)
+                    {
+                        pendingPlayerDirectedSpawn = true;
+                        nextPlayerDirectedSpawnHour = currentGameTime + (config.PlayerDirectedSpawnIntervalSeconds / 3600.0);
+                    }
+                }
+                else
+                {
+                    pendingPlayerDirectedSpawn = false;
+                }
+
+                if (config.DebugMarkSources)
+                {
+                    if (nextDebugMarkHour == 0)
+                    {
+                        nextDebugMarkHour = currentGameTime + (config.DebugMarkIntervalSeconds / 3600.0);
+                    }
+                    else if (currentGameTime >= nextDebugMarkHour)
+                    {
+                        SpawnDebugParticlesAtSources();
+                        nextDebugMarkHour = currentGameTime + (config.DebugMarkIntervalSeconds / 3600.0);
+                    }
+                }
+
                 // Get the rift system
                 ModSystemRifts riftSystem = sapi.ModLoader.GetModSystem<ModSystemRifts>();
             
-                // Spread from rifts (if rift system exists) - 1 block per rift per tick
-                // Rifts don't use adaptive radius, they always search full 8 blocks
-                if (riftSystem?.riftsById != null)
+            // Spread from rifts (if rift system exists) - 1 block per rift per tick
+            // Rifts don't use adaptive radius, they always search full 8 blocks
+            if (riftSystem?.riftsById != null)
+            {
+                foreach (Rift rift in riftSystem.riftsById.Values)
                 {
-                    foreach (Rift rift in riftSystem.riftsById.Values)
-                    {
-                        SpreadDevastationFromRift(rift.Position, 8, 1);
-                    }
+                    SpreadDevastationFromRift(rift.Position, 8, 1);
                 }
+            }
             
-                // Spread from manual devastation sources
-                List<DevastationSource> toRemove = new List<DevastationSource>();
-                double currentGameTime = sapi.World.Calendar.TotalHours;
-                
-                foreach (DevastationSource source in devastationSources)
+            // Spread from manual devastation sources
+            List<DevastationSource> toRemove = new List<DevastationSource>();
+                bool directedAttemptedThisTick = false;
+
+                bool SpawnWithOptionalBias(DevastationSource src, bool preferDirection, Vec3d target, bool bypassReadiness = false)
                 {
-                    // Check if the block still exists
-                    Block block = sapi.World.BlockAccessor.GetBlock(source.Pos);
-                    if (block == null || block.Id == 0)
+                    bool spawned = TrySpawnSingleChild(src, currentGameTime, preferDirection, target, bypassReadiness);
+                    if (preferDirection)
                     {
-                        // Block was removed, remove from sources
-                        toRemove.Add(source);
-                        continue;
+                        pendingPlayerDirectedSpawn = false;
+                        directedAttemptedThisTick = true;
                     }
+                    return spawned;
+                }
+                
+            foreach (DevastationSource source in devastationSources)
+            {
+                // Check if the block still exists
+                Block block = sapi.World.BlockAccessor.GetBlock(source.Pos);
+                if (block == null || block.Id == 0)
+                {
+                    // Block was removed, remove from sources
+                    toRemove.Add(source);
+                    continue;
+                }
                     
-                    // Spread or heal the specified amount of blocks per tick
-                    int processed = source.IsHealing 
-                        ? HealDevastationAroundPosition(source.Pos.ToVec3d(), source)
-                        : SpreadDevastationAroundPosition(source.Pos.ToVec3d(), source);
-                    
-                    // Track success rate and adjust radius
-                    int effectiveAmount = Math.Max(1, (int)(source.Amount * config.SpeedMultiplier));
-                    source.SuccessfulAttempts += processed;
-                    source.TotalAttempts += effectiveAmount * 5; // We try up to 5 times per block
-                    
-                    // Check every 100 attempts if we should expand
-                    if (source.TotalAttempts >= 100)
+                    // Determine if this source should attempt a player-directed spawn
+                    Vec3d playerTarget = null;
+                    bool preferDirectedForThisSource = pendingPlayerDirectedSpawn && !directedAttemptedThisTick && config.PlayerDirectedSpawningEnabled;
+                    if (preferDirectedForThisSource)
                     {
-                        double successRate = (double)source.SuccessfulAttempts / source.TotalAttempts;
-                        
+                        playerTarget = GetNearestPlayerPosition(source.Pos);
+                        if (playerTarget == null)
+                        {
+                            preferDirectedForThisSource = false;
+                        }
+                    }
+                
+                // Spread or heal the specified amount of blocks per tick
+                int processed = source.IsHealing 
+                    ? HealDevastationAroundPosition(source.Pos.ToVec3d(), source)
+                    : SpreadDevastationAroundPosition(source.Pos.ToVec3d(), source);
+                
+                // Track success rate and adjust radius
+                    int effectiveAmount = Math.Max(1, (int)(source.Amount * config.SpeedMultiplier));
+                source.SuccessfulAttempts += processed;
+                source.TotalAttempts += effectiveAmount * 5; // We try up to 5 times per block
+                
+                // Check every 100 attempts if we should expand
+                if (source.TotalAttempts >= 100)
+                {
+                    double successRate = (double)source.SuccessfulAttempts / source.TotalAttempts;
+                    
                         // If success rate is below threshold, expand the search radius
                         if (successRate < config.LowSuccessThreshold && source.CurrentRadius < source.Range)
-                        {
-                            // Expand faster if really low success rate
+                    {
+                        // Expand faster if really low success rate
                             double expansion = successRate < (config.LowSuccessThreshold / 2) ? 4.0 : 2.0;
-                            source.CurrentRadius = Math.Min(source.CurrentRadius + expansion, source.Range);
-                            source.StallCounter = 0; // Reset stall counter when still expanding
-                        }
-                        // Track stalling: at max radius with very low success rate
+                        source.CurrentRadius = Math.Min(source.CurrentRadius + expansion, source.Range);
+                        source.StallCounter = 0; // Reset stall counter when still expanding
+                    }
+                    // Track stalling: at max radius with very low success rate
                         else if (successRate < config.VeryLowSuccessThreshold && source.CurrentRadius >= source.Range && !source.IsHealing)
+                    {
+                        source.StallCounter++;
+                        
+                        // After 10 stall cycles (plenty of time to try), take action to keep spreading
+                        if (source.StallCounter >= 10)
                         {
-                            source.StallCounter++;
+                            // Always try to spawn metastasis when stalled - this moves the frontier forward
+                                bool spawned = SpawnWithOptionalBias(source, preferDirectedForThisSource, playerTarget);
                             
-                            // After 10 stall cycles (plenty of time to try), take action to keep spreading
-                            if (source.StallCounter >= 10)
+                            if (spawned)
                             {
-                                // Always try to spawn metastasis when stalled - this moves the frontier forward
-                                bool spawned = TrySpawnSingleChild(source, currentGameTime);
-                                
-                                if (spawned)
-                                {
-                                    source.StallCounter = 0;
-                                }
+                                source.StallCounter = 0;
+                            }
                                 else
                                 {
                                     source.FailedSpawnAttempts++;
                                     
                                     if (source.FailedSpawnAttempts >= config.MaxFailedSpawnAttempts)
-                                    {
+                            {
                                         // Tried many times and couldn't find any viable land
-                                        source.IsSaturated = true;
+                                source.IsSaturated = true;
                                     }
-                                }
                             }
                         }
-                        else
-                        {
-                            // Good success rate, reset stall counter
-                            source.StallCounter = 0;
-                        }
-                        
-                        // Reset attempt counters
-                        source.SuccessfulAttempts = 0;
-                        source.TotalAttempts = 0;
+                    }
+                    else
+                    {
+                        // Good success rate, reset stall counter
+                        source.StallCounter = 0;
                     }
                     
-                    // Check for metastasis spawning (only for non-healing sources)
-                    if (!source.IsHealing && !source.IsSaturated)
+                    // Reset attempt counters
+                    source.SuccessfulAttempts = 0;
+                    source.TotalAttempts = 0;
+                }
+                
+                // Check for metastasis spawning (only for non-healing sources)
+                if (!source.IsHealing && !source.IsSaturated)
+                {
+                    // Spawn metastasis when we've devastated enough blocks AND radius has reached max
+                    if (source.BlocksSinceLastMetastasis >= source.MetastasisThreshold && 
+                        source.CurrentRadius >= source.Range)
                     {
-                        // Spawn metastasis when we've devastated enough blocks AND radius has reached max
-                        if (source.BlocksSinceLastMetastasis >= source.MetastasisThreshold && 
-                            source.CurrentRadius >= source.Range)
-                        {
-                            // Check actual saturation in the area
-                            double saturation = CalculateLocalDevastationPercent(source.Pos.ToVec3d(), source.CurrentRadius);
-                            
+                        // Check actual saturation in the area
+                        double saturation = CalculateLocalDevastationPercent(source.Pos.ToVec3d(), source.CurrentRadius);
+                        
                             if (saturation >= config.SaturationThreshold)
-                            {
-                                TrySpawnSingleChild(source, currentGameTime);
+                        {
+                                SpawnWithOptionalBias(source, preferDirectedForThisSource, playerTarget);
                             }
                         }
                     }
-                }
+
+                    // If player-directed spawn is pending and hasn't been attempted yet this tick, force an attempt once
+                    if (preferDirectedForThisSource && !directedAttemptedThisTick && !source.IsHealing && !source.IsSaturated)
+                    {
+                        SpawnWithOptionalBias(source, true, playerTarget, false);
+                    }
+            }
             
-                // Clean up removed sources
-                foreach (var source in toRemove)
-                {
-                    devastationSources.Remove(source);
-                }
+            // Clean up removed sources
+            foreach (var source in toRemove)
+            {
+                devastationSources.Remove(source);
+            }
             
-                // Periodic cleanup: remove saturated sources to free slots for active spreading
-                // Run every ~500 ticks (5 seconds at 10ms tick rate)
-                cleanupTickCounter++;
-                if (cleanupTickCounter >= 500)
-                {
-                    cleanupTickCounter = 0;
-                    CleanupSaturatedSources();
-                }
+            // Periodic cleanup: remove saturated sources to free slots for active spreading
+            // Run every ~500 ticks (5 seconds at 10ms tick rate)
+            cleanupTickCounter++;
+            if (cleanupTickCounter >= 500)
+            {
+                cleanupTickCounter = 0;
+                CleanupSaturatedSources();
+            }
             }
             catch (Exception ex)
             {
@@ -1249,6 +1490,136 @@ namespace SpreadingDevastation
         }
 
         /// <summary>
+        /// Gets the nearest online player's position to a given block position.
+        /// Returns null if no players are online.
+        /// </summary>
+        private Vec3d GetNearestPlayerPosition(BlockPos fromPos)
+        {
+            var players = sapi.World.AllOnlinePlayers;
+            Vec3d nearest = null;
+            double bestDistSq = double.MaxValue;
+
+            foreach (var player in players)
+            {
+                var entity = player?.Entity;
+                if (entity == null) continue;
+
+                Vec3d pos = entity.ServerPos?.XYZ ?? entity.Pos.XYZ;
+                double dx = pos.X - fromPos.X;
+                double dy = pos.Y - fromPos.Y;
+                double dz = pos.Z - fromPos.Z;
+                double distSq = dx * dx + dy * dy + dz * dz;
+
+                if (distSq < bestDistSq)
+            {
+                    bestDistSq = distSq;
+                    nearest = pos;
+                }
+            }
+
+            return nearest;
+        }
+
+        private Vec3d NormalizeVec(Vec3d v)
+        {
+            double len = Math.Sqrt(v.X * v.X + v.Y * v.Y + v.Z * v.Z);
+            if (len < 1e-6) return new Vec3d(0, 1, 0);
+            return new Vec3d(v.X / len, v.Y / len, v.Z / len);
+        }
+
+        private Vec3d CrossVec(Vec3d a, Vec3d b)
+        {
+            return new Vec3d(
+                a.Y * b.Z - a.Z * b.Y,
+                a.Z * b.X - a.X * b.Z,
+                a.X * b.Y - a.Y * b.X
+            );
+        }
+
+        private Vec3d RandomDirectionWithinCone(Vec3d axis, double halfAngleRad)
+        {
+            Vec3d n = NormalizeVec(axis);
+            // Build an orthonormal basis (u, v, n)
+            Vec3d u = Math.Abs(n.X) > 0.1 ? new Vec3d(-n.Z, 0, n.X) : new Vec3d(0, n.Z, -n.Y);
+            u = NormalizeVec(u);
+            Vec3d v = NormalizeVec(CrossVec(n, u));
+
+            double r1 = RandomNumberGenerator.GetInt32(10000) / 10000.0; // 0..1
+            double r2 = RandomNumberGenerator.GetInt32(10000) / 10000.0; // 0..1
+
+            double theta = halfAngleRad * r1; // angle from axis
+            double phi = 2 * Math.PI * r2;    // rotation around axis
+
+            double sinTheta = Math.Sin(theta);
+            double cosTheta = Math.Cos(theta);
+            double cosPhi = Math.Cos(phi);
+            double sinPhi = Math.Sin(phi);
+
+            // direction = n * cos(theta) + u * sin(theta) * cos(phi) + v * sin(theta) * sin(phi)
+            return new Vec3d(
+                n.X * cosTheta + u.X * sinTheta * cosPhi + v.X * sinTheta * sinPhi,
+                n.Y * cosTheta + u.Y * sinTheta * cosPhi + v.Y * sinTheta * sinPhi,
+                n.Z * cosTheta + u.Z * sinTheta * cosPhi + v.Z * sinTheta * sinPhi
+            );
+        }
+
+        /// <summary>
+        /// Attempts to find a spawn position biased toward a target position (player).
+        /// Uses a directional cone and pillar search around the aimed point.
+        /// </summary>
+        private BlockPos FindMetastasisPositionTowardTarget(DevastationSource source, Vec3d targetPos)
+        {
+            Vec3d dir = new Vec3d(targetPos.X - source.Pos.X, targetPos.Y - source.Pos.Y, targetPos.Z - source.Pos.Z);
+            double distToPlayer = Math.Sqrt(dir.X * dir.X + dir.Y * dir.Y + dir.Z * dir.Z);
+            if (distToPlayer < 1e-3) return null;
+
+            dir = NormalizeVec(dir);
+            double halfAngleRad = Math.Max(1.0, config.PlayerDirectedConeHalfAngleDegrees) * Math.PI / 180.0;
+
+            int pillarHeight = config.PillarSearchHeight;
+            int attempts = 24;
+
+            for (int i = 0; i < attempts; i++)
+                {
+                Vec3d coneDir = RandomDirectionWithinCone(dir, halfAngleRad);
+
+                double minDist = Math.Max(source.CurrentRadius * 1.1, 4.0);
+                double maxDist = Math.Min(Math.Max(source.Range * 2.0, minDist + 1.0), 128.0);
+                double suggested = distToPlayer * 0.4; // move ~40% toward the player
+                double distance = Math.Clamp(suggested, minDist, maxDist);
+
+                Vec3d basePos = new Vec3d(
+                    source.Pos.X + coneDir.X * distance,
+                    source.Pos.Y + coneDir.Y * distance,
+                    source.Pos.Z + coneDir.Z * distance
+                );
+
+                BlockPos baseBlock = new BlockPos(
+                    (int)Math.Round(basePos.X),
+                    source.Pos.Y,
+                    (int)Math.Round(basePos.Z)
+                );
+
+                for (int yOffset = -pillarHeight; yOffset <= pillarHeight; yOffset++)
+                {
+                    BlockPos candidate = new BlockPos(baseBlock.X, baseBlock.Y + yOffset, baseBlock.Z);
+
+                    if (candidate.Y < config.MinYLevel) continue;
+                    if (!IsValidMetastasisPosition(candidate)) continue;
+                    if (config.RequireSourceAirContact && !IsAdjacentToAir(candidate)) continue;
+
+                    int nonDevastatedNearby = CountNonDevastatedNearby(candidate, 4);
+                    if (nonDevastatedNearby > 3)
+                        {
+                        return candidate;
+                    }
+                }
+            }
+            
+            return null;
+        }
+
+        /// <summary>
         /// Checks if a position is adjacent to at least one air block.
         /// </summary>
         private bool IsAdjacentToAir(BlockPos pos)
@@ -1279,10 +1650,18 @@ namespace SpreadingDevastation
         /// Tries to spawn a single child source with delay enforcement.
         /// Returns true if a child was spawned.
         /// </summary>
-        private bool TrySpawnSingleChild(DevastationSource parentSource, double currentGameTime)
+        private bool TrySpawnSingleChild(DevastationSource parentSource, double currentGameTime, bool preferPlayerDirection = false, Vec3d playerTarget = null, bool bypassReadiness = false)
         {
             // Don't spawn from healing sources
             if (parentSource.IsHealing) return false;
+
+            if (!bypassReadiness)
+            {
+                // Require readiness unless explicitly bypassed (for forced player-directed attempts)
+                if (parentSource.IsSaturated) return false;
+                if (parentSource.BlocksSinceLastMetastasis < parentSource.MetastasisThreshold) return false;
+                if (parentSource.CurrentRadius < parentSource.Range) return false;
+            }
             
             // Enforce spawn delay (affected by speed multiplier)
             double effectiveDelay = config.ChildSpawnDelaySeconds / Math.Max(0.1, config.SpeedMultiplier);
@@ -1308,8 +1687,18 @@ namespace SpreadingDevastation
                 return false; // Still can't spawn after cleanup
             }
             
-            // Find a position for the new source using pillar strategy
-            BlockPos spawnPos = FindMetastasisPositionPillar(parentSource);
+            // Try player-directed cone first if requested
+            BlockPos spawnPos = null;
+            if (preferPlayerDirection && playerTarget != null)
+            {
+                spawnPos = FindMetastasisPositionTowardTarget(parentSource, playerTarget);
+            }
+
+            // Fallback to pillar search
+            if (spawnPos == null)
+            {
+                spawnPos = FindMetastasisPositionPillar(parentSource);
+            }
             
             if (spawnPos == null)
             {
@@ -1342,22 +1731,22 @@ namespace SpreadingDevastation
             int childRange = CalculateChildRange(parentSource.Range);
             
             // Create the new metastasis source
-            DevastationSource metastasis = new DevastationSource
-            {
-                Pos = spawnPos.Copy(),
+                DevastationSource metastasis = new DevastationSource
+                {
+                    Pos = spawnPos.Copy(),
                 Range = childRange,
-                Amount = parentSource.Amount,
-                CurrentRadius = 3.0, // Start small
-                IsHealing = false,
-                IsMetastasis = true,
-                GenerationLevel = parentSource.GenerationLevel + 1,
+                    Amount = parentSource.Amount,
+                    CurrentRadius = 3.0, // Start small
+                    IsHealing = false,
+                    IsMetastasis = true,
+                    GenerationLevel = parentSource.GenerationLevel + 1,
                 MetastasisThreshold = config.MetastasisThreshold,
-                MaxGenerationLevel = parentSource.MaxGenerationLevel,
-                SourceId = GenerateSourceId(),
-                ParentSourceId = parentSource.SourceId
-            };
-            
-            devastationSources.Add(metastasis);
+                    MaxGenerationLevel = parentSource.MaxGenerationLevel,
+                    SourceId = GenerateSourceId(),
+                    ParentSourceId = parentSource.SourceId
+                };
+                
+                devastationSources.Add(metastasis);
             
             // Update parent
             parentSource.ChildrenSpawned++;
@@ -1365,16 +1754,9 @@ namespace SpreadingDevastation
             parentSource.BlocksSinceLastMetastasis = 0;
             parentSource.FailedSpawnAttempts = 0; // Reset on successful spawn
             
-            // Mark parent as saturated after spawning enough children
-            // This ensures each source contributes to spreading before being replaced
-            if (parentSource.ChildrenSpawned >= 3)
-            {
-                parentSource.IsSaturated = true;
-            }
-            
             return true;
         }
-
+        
         /// <summary>
         /// Calculates child range with variation (50-150% of parent by default).
         /// </summary>
@@ -1417,7 +1799,7 @@ namespace SpreadingDevastation
                 
                 int offsetX = (int)(distance * Math.Cos(angle));
                 int offsetZ = (int)(distance * Math.Sin(angle));
-                
+            
                 // Search at parent's Y level, checking a vertical pillar
                 int baseY = source.Pos.Y;
                 
@@ -1437,7 +1819,7 @@ namespace SpreadingDevastation
                     
                     // Check air contact requirement
                     if (config.RequireSourceAirContact && !IsAdjacentToAir(candidatePos)) continue;
-                    
+            
                     // Score this position - how many non-devastated blocks are nearby?
                     int nonDevastatedNearby = CountNonDevastatedNearby(candidatePos, 4);
                     
@@ -1460,8 +1842,8 @@ namespace SpreadingDevastation
                 .ToList();
             
             return validCandidates.Count > 0 ? validCandidates[0] : null;
-        }
-
+            }
+            
         /// <summary>
         /// Checks if a position is valid for spawning a metastasis source.
         /// </summary>
@@ -1481,7 +1863,7 @@ namespace SpreadingDevastation
         /// Checks if a position is too close to existing devastation sources.
         /// </summary>
         private bool IsTooCloseToExistingSources(BlockPos pos, double minDistance)
-        {
+            {
             foreach (var existingSource in devastationSources)
             {
                 double dist = Math.Sqrt(
