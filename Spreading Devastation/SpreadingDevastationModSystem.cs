@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using ProtoBuf;
 using Vintagestory.API.Common;
+using Vintagestory.API.Config;
 using Vintagestory.API.MathTools;
 using Vintagestory.API.Server;
 using Vintagestory.API.Util;
@@ -295,6 +296,28 @@ namespace SpreadingDevastation
             }
         }
 
+        /// <summary>
+        /// Sends multi-line command output as individual chat messages so the in-game
+        /// chat log can be scrolled, while still returning a result for consoles.
+        /// </summary>
+        private TextCommandResult SendChatLines(TextCommandCallingArgs args, IEnumerable<string> lines, string playerAck = "Details sent to chat (scroll to view)")
+        {
+            var player = args?.Caller?.Player as IServerPlayer;
+            var safeLines = lines?.Where(l => !string.IsNullOrWhiteSpace(l)).ToList() ?? new List<string>();
+
+            if (player != null)
+            {
+                foreach (string line in safeLines)
+                {
+                    player.SendMessage(GlobalConstants.GeneralChatGroup, line, EnumChatType.CommandSuccess);
+                }
+
+                return TextCommandResult.Success(playerAck);
+            }
+
+            return TextCommandResult.Success(string.Join("\n", safeLines));
+        }
+
         #region Command Handlers
 
         /// <summary>
@@ -376,7 +399,11 @@ namespace SpreadingDevastation
 
             if (string.IsNullOrWhiteSpace(rawArg))
             {
-                return TextCommandResult.Success($"Current devastation speed: {config.SpeedMultiplier:F2}x\nUsage: /devastationspeed <multiplier> (e.g., 0.5 for half speed, 5 for 5x speed)");
+                return SendChatLines(args, new[]
+                {
+                    $"Current devastation speed: {config.SpeedMultiplier:F2}x",
+                    "Usage: /devastationspeed <multiplier> (e.g., 0.5 for half speed, 5 for 5x speed)"
+                }, "Speed info sent to chat (scrollable)");
             }
 
             if (!double.TryParse(rawArg, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsedSpeed))
@@ -511,7 +538,7 @@ namespace SpreadingDevastation
             // Check if it's a summary request
             if (arg == "summary")
             {
-                return ShowListSummary();
+                return ShowListSummary(args);
             }
             
             // Parse limit (default to 10)
@@ -524,9 +551,11 @@ namespace SpreadingDevastation
             int originalCount = devastationSources.Count(s => !s.IsMetastasis);
             int metastasisCount = devastationSources.Count(s => s.IsMetastasis);
             int saturatedCount = devastationSources.Count(s => s.IsSaturated);
-            
-            var sb = new System.Text.StringBuilder();
-            sb.AppendLine($"Devastation sources ({devastationSources.Count}/{config.MaxSources} cap, {originalCount} original, {metastasisCount} metastasis, {saturatedCount} saturated):");
+
+            var lines = new List<string>
+            {
+                $"Devastation sources ({devastationSources.Count}/{config.MaxSources} cap, {originalCount} original, {metastasisCount} metastasis, {saturatedCount} saturated):"
+            };
             
             // Sort: active first, then by generation, then by total blocks devastated
             var sortedSources = devastationSources
@@ -543,15 +572,15 @@ namespace SpreadingDevastation
                 string statusLabel = GetSourceStatusLabel(source);
                 string idInfo = !string.IsNullOrEmpty(source.SourceId) ? $"#{source.SourceId}" : "";
                 
-                sb.AppendLine($"  [{type}] [{genInfo}] {statusLabel}{idInfo} {source.Pos} R:{source.CurrentRadius:F0}/{source.Range} Tot:{source.BlocksDevastatedTotal}");
+                lines.Add($"  [{type}] [{genInfo}] {statusLabel}{idInfo} {source.Pos} R:{source.CurrentRadius:F0}/{source.Range} Tot:{source.BlocksDevastatedTotal}");
             }
             
             if (devastationSources.Count > limit)
             {
-                sb.AppendLine($"  ... and {devastationSources.Count - limit} more. Use '/devastate list {limit + 10}' or '/devastate list summary'");
+                lines.Add($"  ... and {devastationSources.Count - limit} more. Use '/devastate list {limit + 10}' or '/devastate list summary'");
             }
             
-            return TextCommandResult.Success(sb.ToString());
+            return SendChatLines(args, lines, "Devastation sources listed in chat (scroll to read)");
         }
 
         private string GetSourceStatusLabel(DevastationSource source)
@@ -578,7 +607,7 @@ namespace SpreadingDevastation
             }
         }
 
-        private TextCommandResult ShowListSummary()
+        private TextCommandResult ShowListSummary(TextCommandCallingArgs args)
         {
             int protectedCount = devastationSources.Count(s => s.IsProtected);
             int metastasisCount = devastationSources.Count(s => s.IsMetastasis);
@@ -588,15 +617,17 @@ namespace SpreadingDevastation
                 (s.BlocksSinceLastMetastasis < s.MetastasisThreshold || s.CurrentRadius < s.Range));
             int seedingCount = devastationSources.Count(s => !s.IsSaturated && !s.IsHealing && 
                 s.BlocksSinceLastMetastasis >= s.MetastasisThreshold && s.CurrentRadius >= s.Range);
-            
-            var sb = new System.Text.StringBuilder();
-            sb.AppendLine($"=== Devastation Summary ({devastationSources.Count}/{config.MaxSources} cap) ===");
-            sb.AppendLine($"  Protected (manual): {protectedCount} (never auto-removed)");
-            sb.AppendLine($"  Metastasis children: {metastasisCount}");
-            sb.AppendLine($"  Healing sources: {healingCount}");
-            sb.AppendLine($"  Growing: {growingCount}");
-            sb.AppendLine($"  Seeding (ready to spawn): {seedingCount}");
-            sb.AppendLine($"  Saturated (done): {saturatedCount}");
+
+            var lines = new List<string>
+            {
+                $"=== Devastation Summary ({devastationSources.Count}/{config.MaxSources} cap) ===",
+                $"  Protected (manual): {protectedCount} (never auto-removed)",
+                $"  Metastasis children: {metastasisCount}",
+                $"  Healing sources: {healingCount}",
+                $"  Growing: {growingCount}",
+                $"  Seeding (ready to spawn): {seedingCount}",
+                $"  Saturated (done): {saturatedCount}"
+            };
             
             // Group by generation level
             var byGeneration = devastationSources
@@ -606,7 +637,7 @@ namespace SpreadingDevastation
             
             if (byGeneration.Count > 0)
             {
-                sb.AppendLine("  By Generation:");
+                lines.Add("  By Generation:");
                 foreach (var gen in byGeneration)
                 {
                     int growing = gen.Count(s => !s.IsSaturated && (s.BlocksSinceLastMetastasis < s.MetastasisThreshold || s.CurrentRadius < s.Range));
@@ -614,20 +645,20 @@ namespace SpreadingDevastation
                     int sat = gen.Count(s => s.IsSaturated);
                     long totalBlocks = gen.Sum(s => (long)s.BlocksDevastatedTotal);
                     string genLabel = gen.Key == 0 ? "Origin" : $"Gen {gen.Key}";
-                    sb.AppendLine($"    {genLabel}: {gen.Count()} ({growing} growing, {seeding} seeding, {sat} saturated) - {totalBlocks:N0} blocks");
+                    lines.Add($"    {genLabel}: {gen.Count()} ({growing} growing, {seeding} seeding, {sat} saturated) - {totalBlocks:N0} blocks");
                 }
             }
             
             // Total stats
             long grandTotalBlocks = devastationSources.Sum(s => (long)s.BlocksDevastatedTotal);
-            sb.AppendLine($"  Total blocks devastated: {grandTotalBlocks:N0}");
+            lines.Add($"  Total blocks devastated: {grandTotalBlocks:N0}");
             
             if (devastationSources.Count >= config.MaxSources)
             {
-                sb.AppendLine("  ⚠ At source cap - oldest sources will be removed for new metastasis");
+                lines.Add("  ⚠ At source cap - oldest sources will be removed for new metastasis");
             }
             
-            return TextCommandResult.Success(sb.ToString());
+            return SendChatLines(args, lines, "Devastation summary sent to chat (scrollable)");
         }
 
         private TextCommandResult HandleMaxSourcesCommand(TextCommandCallingArgs args)
@@ -636,7 +667,12 @@ namespace SpreadingDevastation
             
             if (!maxArg.HasValue)
             {
-                return TextCommandResult.Success($"Current max sources cap: {config.MaxSources}\nActive sources: {devastationSources.Count}/{config.MaxSources}\nUsage: /devastate maxsources <number> (e.g., 20, 50, 100)");
+                return SendChatLines(args, new[]
+                {
+                    $"Current max sources cap: {config.MaxSources}",
+                    $"Active sources: {devastationSources.Count}/{config.MaxSources}",
+                    "Usage: /devastate maxsources <number> (e.g., 20, 50, 100)"
+                }, "Max sources info sent to chat");
             }
             
             int newMax = Math.Clamp(maxArg.Value, 1, 1000);
@@ -658,7 +694,11 @@ namespace SpreadingDevastation
             
             if (!attemptsArg.HasValue)
             {
-                return TextCommandResult.Success($"Current max failed spawn attempts: {config.MaxFailedSpawnAttempts}\nUsage: /devastate maxattempts <number> (e.g., 5, 10, 20)");
+                return SendChatLines(args, new[]
+                {
+                    $"Current max failed spawn attempts: {config.MaxFailedSpawnAttempts}",
+                    "Usage: /devastate maxattempts <number> (e.g., 5, 10, 20)"
+                }, "Max attempts info sent to chat");
             }
             
             int newAttempts = Math.Clamp(attemptsArg.Value, 1, 100);
@@ -675,7 +715,11 @@ namespace SpreadingDevastation
             if (string.IsNullOrEmpty(onOff))
             {
                 string status = config.RequireSourceAirContact ? "ON" : "OFF";
-                return TextCommandResult.Success($"Surface spreading (air contact): {status}\nUsage: /devastate aircontact [on|off]");
+                return SendChatLines(args, new[]
+                {
+                    $"Surface spreading (air contact): {status}",
+                    "Usage: /devastate aircontact [on|off]"
+                }, "Air contact setting sent to chat");
             }
             
             if (onOff.ToLower() == "on" || onOff == "1" || onOff.ToLower() == "true")
@@ -703,7 +747,11 @@ namespace SpreadingDevastation
             if (string.IsNullOrEmpty(onOff))
             {
                 string status = config.ShowSourceMarkers ? "ON" : "OFF";
-                return TextCommandResult.Success($"Source markers: {status}\nUsage: /devastate markers [on|off]");
+                return SendChatLines(args, new[]
+                {
+                    $"Source markers: {status}",
+                    "Usage: /devastate markers [on|off]"
+                }, "Marker setting sent to chat");
             }
 
             if (onOff.Equals("on", StringComparison.OrdinalIgnoreCase) || onOff == "1" || onOff.Equals("true", StringComparison.OrdinalIgnoreCase))
@@ -730,7 +778,11 @@ namespace SpreadingDevastation
             
             if (!levelArg.HasValue)
             {
-                return TextCommandResult.Success($"Current minimum Y level: {config.MinYLevel}\nUsage: /devastate miny <level> (e.g., 0, -64, 50)");
+                return SendChatLines(args, new[]
+                {
+                    $"Current minimum Y level: {config.MinYLevel}",
+                    "Usage: /devastate miny <level> (e.g., 0, -64, 50)"
+                }, "Min Y info sent to chat");
             }
             
             config.MinYLevel = levelArg.Value;
@@ -742,16 +794,18 @@ namespace SpreadingDevastation
         private TextCommandResult HandleStatusCommand(TextCommandCallingArgs args)
         {
             string statusText = isPaused ? "PAUSED" : "RUNNING";
-            var sb = new System.Text.StringBuilder();
-            sb.AppendLine($"Devastation status: {statusText}");
-            sb.AppendLine($"Speed multiplier: {config.SpeedMultiplier:F2}x");
-            sb.AppendLine($"Active sources: {devastationSources.Count}/{config.MaxSources}");
-            sb.AppendLine($"Tracked blocks for regen: {regrowingBlocks?.Count ?? 0}");
-            sb.AppendLine($"Surface spreading: {(config.RequireSourceAirContact ? "ON" : "OFF")}");
-            sb.AppendLine($"Min Y level: {config.MinYLevel}");
-            sb.AppendLine($"Child spawn delay: {config.ChildSpawnDelaySeconds}s");
-            sb.AppendLine($"Max failed attempts: {config.MaxFailedSpawnAttempts}");
-            return TextCommandResult.Success(sb.ToString());
+            var lines = new List<string>
+            {
+                $"Devastation status: {statusText}",
+                $"Speed multiplier: {config.SpeedMultiplier:F2}x",
+                $"Active sources: {devastationSources.Count}/{config.MaxSources}",
+                $"Tracked blocks for regen: {regrowingBlocks?.Count ?? 0}",
+                $"Surface spreading: {(config.RequireSourceAirContact ? "ON" : "OFF")}",
+                $"Min Y level: {config.MinYLevel}",
+                $"Child spawn delay: {config.ChildSpawnDelaySeconds}s",
+                $"Max failed attempts: {config.MaxFailedSpawnAttempts}"
+            };
+            return SendChatLines(args, lines, "Status sent to chat (scrollable)");
         }
 
         #endregion
@@ -874,8 +928,8 @@ namespace SpreadingDevastation
                         continue;
                     }
 
-                    // Debug marker: lightweight magenta particles at source position
-                    SpawnSourceMarkerParticles(source.Pos);
+                    // Debug marker: color-coded particles at source position
+                    SpawnSourceMarkerParticles(source);
                     
                     // Spread or heal the specified amount of blocks per tick
                     int processed = source.IsHealing 
@@ -1767,9 +1821,9 @@ namespace SpreadingDevastation
         }
 
         /// <summary>
-        /// Spawns a small burst of magenta particles at a source block to help visualize/debug sources.
+        /// Spawns a small burst of color-coded particles at a source block to help visualize/debug sources.
         /// </summary>
-        private void SpawnSourceMarkerParticles(BlockPos pos)
+        private void SpawnSourceMarkerParticles(DevastationSource source)
         {
             if (sapi == null) return;
             if (config != null && !config.ShowSourceMarkers) return;
@@ -1777,13 +1831,17 @@ namespace SpreadingDevastation
             // Emit more frequently for stronger visibility (about 50% of ticks)
             if (sapi.World.Rand.NextDouble() > 0.5) return;
 
+            // Color coding: blue = new/growing, green = seeding, red = saturated
+            int markerColor = GetSourceMarkerColor(source);
+
+            BlockPos pos = source.Pos;
             Vec3d center = pos.ToVec3d().Add(0.5, 0.7, 0.5);
 
             SimpleParticleProperties props = new SimpleParticleProperties
             {
                 MinQuantity = 3,
                 AddQuantity = 4,
-                Color = ColorUtil.ToRgba(255, 60, 255, 255), // Brighter magenta glow
+                Color = markerColor,
                 MinPos = new Vec3d(
                     center.X - 0.05,
                     center.Y - 0.05,
@@ -1800,6 +1858,32 @@ namespace SpreadingDevastation
             };
 
             sapi.World.SpawnParticles(props);
+        }
+
+        /// <summary>
+        /// Returns an RGBA color for debug markers based on source status.
+        /// Blue = new/growing, Green = seeding, Red = saturated.
+        /// </summary>
+        private int GetSourceMarkerColor(DevastationSource source)
+        {
+            // Saturated: fully done spreading
+            if (source.IsSaturated)
+            {
+                return ColorUtil.ToRgba(255, 255, 80, 80); // red
+            }
+
+            // Seeding: either currently spawning children or ready to spawn
+            bool readyToSeed = !source.IsHealing &&
+                               source.CurrentRadius >= source.Range &&
+                               source.BlocksSinceLastMetastasis >= source.MetastasisThreshold;
+
+            if (readyToSeed || source.ChildrenSpawned > 0 || source.IsMetastasis)
+            {
+                return ColorUtil.ToRgba(255, 80, 255, 120); // green
+            }
+
+            // Default: new/growing
+            return ColorUtil.ToRgba(255, 80, 160, 255); // blue
         }
     }
 }
