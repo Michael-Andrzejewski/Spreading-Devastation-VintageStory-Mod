@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Security.Cryptography;
 using ProtoBuf;
-using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.MathTools;
 using Vintagestory.API.Server;
@@ -169,7 +168,6 @@ namespace SpreadingDevastation
         private bool isPaused = false; // When true, all devastation processing stops
         private int nextSourceId = 1; // Counter for generating unique source IDs
         private int cleanupTickCounter = 0; // Counter for periodic cleanup
-        private int markerTickCounter = 0; // Controls how often we spawn source marker particles
 
         public override void Start(ICoreAPI api)
         {
@@ -795,9 +793,6 @@ namespace SpreadingDevastation
             
             try
             {
-                markerTickCounter++;
-                bool spawnMarkersThisTick = markerTickCounter % 10 == 0; // Every ~100ms
-
                 // Get the rift system
                 ModSystemRifts riftSystem = sapi.ModLoader.GetModSystem<ModSystemRifts>();
             
@@ -824,12 +819,6 @@ namespace SpreadingDevastation
                         // Block was removed, remove from sources
                         toRemove.Add(source);
                         continue;
-                    }
-
-                    // Spawn a visible debugging marker so sources are easy to spot
-                    if (spawnMarkersThisTick)
-                    {
-                        SpawnSourceMarkerParticles(source);
                     }
                     
                     // Spread or heal the specified amount of blocks per tick
@@ -1719,37 +1708,6 @@ namespace SpreadingDevastation
             }
 
             return devastatedBlock != "";
-        }
-
-        /// <summary>
-        /// Spawns a small cluster of glowing magenta particles above a source block to visually mark it.
-        /// Throttled to every ~100ms in the main tick loop.
-        /// </summary>
-        private void SpawnSourceMarkerParticles(DevastationSource source)
-        {
-            // Center the particles roughly above the block center
-            Vec3d center = source.Pos.ToVec3d().Add(0.5, 0.75, 0.5);
-
-            SimpleParticleProperties props = new SimpleParticleProperties
-            {
-                MinQuantity = 2,
-                AddQuantity = 1,
-                MinPos = center.AddCopy(-0.05, -0.05, -0.05),
-                AddPos = new Vec3d(0.1, 0.1, 0.1),
-                MinVelocity = new Vec3f(-0.02f, 0.05f, -0.02f),
-                AddVelocity = new Vec3f(0.04f, 0.05f, 0.04f),
-                LifeLength = 0.7f,
-                GravityEffect = 0f,
-                MinSize = 0.08f,
-                MaxSize = 0.14f,
-                ParticleModel = EnumParticleModel.Quad,
-                ShouldDieInLiquid = false,
-                WithTerrainCollision = false,
-                Color = ColorUtil.ToRgba(220, 255, 0, 255), // Magenta glow
-                VertexFlags = 255 // Brighten to stand out
-            };
-
-            sapi.World.SpawnParticles(props);
         }
     }
 }
