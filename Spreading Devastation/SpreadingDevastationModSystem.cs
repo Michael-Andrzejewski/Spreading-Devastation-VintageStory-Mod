@@ -61,6 +61,21 @@ namespace SpreadingDevastation
         /// E.g., 0.5 means 50-150% of parent range. (default: 0.5)
         /// </summary>
         public double MetastasisRadiusVariation { get; set; } = 0.5;
+
+        /// <summary>
+        /// Only allow child spawns when the parent is probing at its outer ring (default: true)
+        /// </summary>
+        public bool SpawnChildrenAtEdgeOnly { get; set; } = true;
+
+        /// <summary>
+        /// Child spawn distance multiplier range relative to parent range (default: 0.5 to 1.5)
+        /// </summary>
+        public double ChildRangeMinMultiplier { get; set; } = 0.5;
+
+        /// <summary>
+        /// Child spawn distance multiplier range relative to parent range (default: 0.5 to 1.5)
+        /// </summary>
+        public double ChildRangeMaxMultiplier { get; set; } = 1.5;
         
         /// <summary>
         /// Delay in seconds between spawning child sources (default: 120.0)
@@ -82,6 +97,11 @@ namespace SpreadingDevastation
         /// Show magenta debug particles on devastation sources to visualize them (default: true)
         /// </summary>
         public bool ShowSourceMarkers { get; set; } = true;
+
+        /// <summary>
+        /// Failed devastate attempts (at outer ring) before a source becomes saturated (default: 1000)
+        /// </summary>
+        public int SaturationFailedAttemptLimit { get; set; } = 1000;
     }
 
     public class SpreadingDevastationModSystem : ModSystem
@@ -165,6 +185,9 @@ namespace SpreadingDevastation
             
             [ProtoMember(21)]
             public int FailedSpawnAttempts = 0; // Count of failed metastasis spawn attempts
+
+            [ProtoMember(22)]
+            public int FailedDevastateAttempts = 0; // Count of failed devastate attempts due to existing devastation (for saturation)
         }
 
         private ICoreServerAPI sapi;
@@ -351,10 +374,26 @@ namespace SpreadingDevastation
                     .WithArgs(api.ChatCommands.Parsers.OptionalWord("onoff"))
                     .HandleWith(HandleMarkersCommand)
                 .EndSubCommand()
+                .BeginSubCommand("childrangevar")
+                    .WithDescription("Set child spawn distance multipliers (e.g., 0.5 1.5 of parent range)")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("minmult"),
+                              api.ChatCommands.Parsers.OptionalWord("maxmult"))
+                    .HandleWith(HandleChildRangeVarCommand)
+                .EndSubCommand()
+                .BeginSubCommand("childedge")
+                    .WithDescription("Toggle spawning children only at the outer ring")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("onoff"))
+                    .HandleWith(HandleChildEdgeCommand)
+                .EndSubCommand()
                 .BeginSubCommand("miny")
                     .WithDescription("Set minimum Y level for new sources")
                     .WithArgs(api.ChatCommands.Parsers.OptionalInt("level"))
                     .HandleWith(HandleMinYCommand)
+                .EndSubCommand()
+                .BeginSubCommand("satlimit")
+                    .WithDescription("Set failed-devastate attempts before saturation")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalInt("count"))
+                    .HandleWith(HandleSaturationLimitCommand)
                 .EndSubCommand()
                 .BeginSubCommand("stop")
                     .WithDescription("Pause all devastation spreading")
@@ -388,6 +427,85 @@ namespace SpreadingDevastation
             config.SpeedMultiplier = newSpeed;
             SaveConfig();
             return TextCommandResult.Success($"Devastation speed set to {config.SpeedMultiplier:F2}x");
+        }
+
+        private TextCommandResult HandleSaturationLimitCommand(TextCommandCallingArgs args)
+        {
+            int? limitArg = args.Parsers[0].GetValue() as int?;
+
+            if (!limitArg.HasValue)
+            {
+                return TextCommandResult.Success($"Current saturation failed-attempt limit: {config.SaturationFailedAttemptLimit}\nUsage: /devastate satlimit <count> (e.g., 1000)");
+            }
+
+            int newLimit = Math.Clamp(limitArg.Value, 100, 100000);
+            config.SaturationFailedAttemptLimit = newLimit;
+            SaveConfig();
+
+            return TextCommandResult.Success($"Saturation failed-attempt limit set to {config.SaturationFailedAttemptLimit}");
+        }
+
+        private TextCommandResult HandleChildRangeVarCommand(TextCommandCallingArgs args)
+        {
+            string rawMin = args.Parsers[0].GetValue() as string;
+            string rawMax = args.Parsers[1].GetValue() as string;
+
+            if (string.IsNullOrWhiteSpace(rawMin) || string.IsNullOrWhiteSpace(rawMax))
+            {
+                return TextCommandResult.Success(
+                    $"Current child spawn distance multipliers: min {config.ChildRangeMinMultiplier:F2}, max {config.ChildRangeMaxMultiplier:F2}\n" +
+                    "Usage: /devastate childrangevar <min> <max> (e.g., 0.5 1.5 for 50-150% of parent range)");
+            }
+
+            if (!double.TryParse(rawMin, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsedMin) ||
+                !double.TryParse(rawMax, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsedMax))
+            {
+                return TextCommandResult.Error("Invalid numbers. Usage: /devastate childrangevar <min> <max> (e.g., 0.5 1.5)");
+            }
+
+            double minClamped = Math.Clamp(parsedMin, 0.1, 3.0);
+            double maxClamped = Math.Clamp(parsedMax, 0.1, 3.0);
+
+            if (maxClamped < minClamped)
+            {
+                return TextCommandResult.Error("Max multiplier must be >= min multiplier.");
+            }
+
+            config.ChildRangeMinMultiplier = minClamped;
+            config.ChildRangeMaxMultiplier = maxClamped;
+            SaveConfig();
+
+            return TextCommandResult.Success(
+                $"Child spawn distance multipliers set to min {config.ChildRangeMinMultiplier:F2}, max {config.ChildRangeMaxMultiplier:F2} " +
+                $"(child source distance ≈ {config.ChildRangeMinMultiplier * 100:F0}%-{config.ChildRangeMaxMultiplier * 100:F0}% of parent range)");
+        }
+
+        private TextCommandResult HandleChildEdgeCommand(TextCommandCallingArgs args)
+        {
+            string onOff = args.Parsers[0].GetValue() as string;
+
+            if (string.IsNullOrEmpty(onOff))
+            {
+                string status = config.SpawnChildrenAtEdgeOnly ? "ON" : "OFF";
+                return TextCommandResult.Success($"Spawn children only at outer ring: {status}\nUsage: /devastate childedge [on|off]");
+            }
+
+            if (onOff.Equals("on", StringComparison.OrdinalIgnoreCase) || onOff == "1" || onOff.Equals("true", StringComparison.OrdinalIgnoreCase))
+            {
+                config.SpawnChildrenAtEdgeOnly = true;
+                SaveConfig();
+                return TextCommandResult.Success("Child spawning restricted to outer ring");
+            }
+            else if (onOff.Equals("off", StringComparison.OrdinalIgnoreCase) || onOff == "0" || onOff.Equals("false", StringComparison.OrdinalIgnoreCase))
+            {
+                config.SpawnChildrenAtEdgeOnly = false;
+                SaveConfig();
+                return TextCommandResult.Success("Child spawning allowed at any radius");
+            }
+            else
+            {
+                return TextCommandResult.Error("Invalid value. Use: on, off, 1, 0, true, or false");
+            }
         }
 
         private TextCommandResult HandleAddCommand(TextCommandCallingArgs args, bool isHealing)
@@ -561,8 +679,8 @@ namespace SpreadingDevastation
                 return "[saturated]";
             }
             
-            bool readyToSeed = source.BlocksSinceLastMetastasis >= source.MetastasisThreshold && 
-                              source.CurrentRadius >= source.Range;
+            int nextChildThreshold = (source.ChildrenSpawned + 1) * source.MetastasisThreshold;
+            bool readyToSeed = source.BlocksDevastatedTotal >= nextChildThreshold;
             
             if (source.ChildrenSpawned > 0)
             {
@@ -584,10 +702,10 @@ namespace SpreadingDevastation
             int metastasisCount = devastationSources.Count(s => s.IsMetastasis);
             int saturatedCount = devastationSources.Count(s => s.IsSaturated);
             int healingCount = devastationSources.Count(s => s.IsHealing);
-            int growingCount = devastationSources.Count(s => !s.IsSaturated && !s.IsHealing && 
-                (s.BlocksSinceLastMetastasis < s.MetastasisThreshold || s.CurrentRadius < s.Range));
-            int seedingCount = devastationSources.Count(s => !s.IsSaturated && !s.IsHealing && 
-                s.BlocksSinceLastMetastasis >= s.MetastasisThreshold && s.CurrentRadius >= s.Range);
+            int growingCount = devastationSources.Count(s => !s.IsSaturated && !s.IsHealing &&
+                s.BlocksDevastatedTotal < (s.ChildrenSpawned + 1) * s.MetastasisThreshold);
+            int seedingCount = devastationSources.Count(s => !s.IsSaturated && !s.IsHealing &&
+                s.BlocksDevastatedTotal >= (s.ChildrenSpawned + 1) * s.MetastasisThreshold);
             
             var sb = new System.Text.StringBuilder();
             sb.AppendLine($"=== Devastation Summary ({devastationSources.Count}/{config.MaxSources} cap) ===");
@@ -609,8 +727,8 @@ namespace SpreadingDevastation
                 sb.AppendLine("  By Generation:");
                 foreach (var gen in byGeneration)
                 {
-                    int growing = gen.Count(s => !s.IsSaturated && (s.BlocksSinceLastMetastasis < s.MetastasisThreshold || s.CurrentRadius < s.Range));
-                    int seeding = gen.Count(s => !s.IsSaturated && s.BlocksSinceLastMetastasis >= s.MetastasisThreshold && s.CurrentRadius >= s.Range);
+                    int growing = gen.Count(s => !s.IsSaturated && s.BlocksDevastatedTotal < (s.ChildrenSpawned + 1) * s.MetastasisThreshold);
+                    int seeding = gen.Count(s => !s.IsSaturated && s.BlocksDevastatedTotal >= (s.ChildrenSpawned + 1) * s.MetastasisThreshold);
                     int sat = gen.Count(s => s.IsSaturated);
                     long totalBlocks = gen.Sum(s => (long)s.BlocksDevastatedTotal);
                     string genLabel = gen.Key == 0 ? "Origin" : $"Gen {gen.Key}";
@@ -900,33 +1018,6 @@ namespace SpreadingDevastation
                             source.CurrentRadius = Math.Min(source.CurrentRadius + expansion, source.Range);
                             source.StallCounter = 0; // Reset stall counter when still expanding
                         }
-                        // Track stalling: at max radius with very low success rate
-                        else if (successRate < config.VeryLowSuccessThreshold && source.CurrentRadius >= source.Range && !source.IsHealing)
-                        {
-                            source.StallCounter++;
-                            
-                            // After 10 stall cycles (plenty of time to try), take action to keep spreading
-                            if (source.StallCounter >= 10)
-                            {
-                                // Always try to spawn metastasis when stalled - this moves the frontier forward
-                                bool spawned = TrySpawnSingleChild(source, currentGameTime);
-                                
-                                if (spawned)
-                                {
-                                    source.StallCounter = 0;
-                                }
-                                else
-                                {
-                                    source.FailedSpawnAttempts++;
-                                    
-                                    if (source.FailedSpawnAttempts >= config.MaxFailedSpawnAttempts)
-                                    {
-                                        // Tried many times and couldn't find any viable land
-                                        source.IsSaturated = true;
-                                    }
-                                }
-                            }
-                        }
                         else
                         {
                             // Good success rate, reset stall counter
@@ -941,17 +1032,13 @@ namespace SpreadingDevastation
                     // Check for metastasis spawning (only for non-healing sources)
                     if (!source.IsHealing && !source.IsSaturated)
                     {
-                        // Spawn metastasis when we've devastated enough blocks AND radius has reached max
-                        if (source.BlocksSinceLastMetastasis >= source.MetastasisThreshold && 
-                            source.CurrentRadius >= source.Range)
+                        int nextChildThreshold = (source.ChildrenSpawned + 1) * source.MetastasisThreshold;
+                        bool readyToSeed = source.BlocksDevastatedTotal >= nextChildThreshold;
+                        bool edgeOk = !config.SpawnChildrenAtEdgeOnly || source.CurrentRadius >= source.Range;
+
+                        if (readyToSeed && edgeOk)
                         {
-                            // Check actual saturation in the area
-                            double saturation = CalculateLocalDevastationPercent(source.Pos.ToVec3d(), source.CurrentRadius);
-                            
-                            if (saturation >= config.SaturationThreshold)
-                            {
-                                TrySpawnSingleChild(source, currentGameTime);
-                            }
+                            TrySpawnChildBurst(source, currentGameTime, 10);
                         }
                     }
                 }
@@ -960,6 +1047,17 @@ namespace SpreadingDevastation
                 foreach (var source in toRemove)
                 {
                     devastationSources.Remove(source);
+                }
+
+                // If everything is saturated (no growing/seeding non-healing sources), kick one saturated source forward
+                bool hasActiveNonSaturated = devastationSources.Any(s => !s.IsHealing && !s.IsSaturated);
+                if (!hasActiveNonSaturated)
+                {
+                    var saturatedSource = devastationSources.FirstOrDefault(s => !s.IsHealing && s.IsSaturated);
+                    if (saturatedSource != null)
+                    {
+                        TrySpawnEdgeChildForSaturatedSource(saturatedSource, currentGameTime);
+                    }
                 }
             
                 // Periodic cleanup: remove saturated sources to free slots for active spreading
@@ -1097,6 +1195,17 @@ namespace SpreadingDevastation
                 // Check if already devastated
                 if (IsAlreadyDevastated(block))
                 {
+                    // Only count failures when probing the outer ring at max radius
+                    bool atMaxRadius = source.CurrentRadius >= source.Range;
+                    bool nearEdge = distance >= Math.Max(0.0, source.CurrentRadius - 1.0);
+                    if (atMaxRadius && nearEdge)
+                    {
+                        source.FailedDevastateAttempts++;
+                        if (source.FailedDevastateAttempts >= config.SaturationFailedAttemptLimit)
+                        {
+                            source.IsSaturated = true;
+                        }
+                    }
                     continue; // Already devastated, try again
                 }
 
@@ -1341,7 +1450,7 @@ namespace SpreadingDevastation
             if (parentSource.IsHealing) return false;
             
             // Enforce spawn delay (affected by speed multiplier)
-            double effectiveDelay = config.ChildSpawnDelaySeconds / Math.Max(0.1, config.SpeedMultiplier);
+            double effectiveDelay = config.ChildSpawnDelaySeconds / config.SpeedMultiplier;
             double delayInHours = effectiveDelay / 3600.0; // Convert seconds to hours
             
             if (parentSource.LastChildSpawnTime > 0)
@@ -1421,14 +1530,140 @@ namespace SpreadingDevastation
             parentSource.BlocksSinceLastMetastasis = 0;
             parentSource.FailedSpawnAttempts = 0; // Reset on successful spawn
             
-            // Mark parent as saturated after spawning enough children
-            // This ensures each source contributes to spreading before being replaced
-            if (parentSource.ChildrenSpawned >= 3)
-            {
-                parentSource.IsSaturated = true;
-            }
-            
             return true;
+        }
+
+        /// <summary>
+        /// Attempts a burst of child spawns (up to attemptCount) when seeding conditions are met.
+        /// Enforces the spawn delay once per burst.
+        /// </summary>
+        private void TrySpawnChildBurst(DevastationSource source, double currentGameTime, int attemptCount)
+        {
+            if (attemptCount <= 0) return;
+            if (source.IsHealing || source.IsSaturated) return;
+
+            // Enforce spawn delay once per burst
+            double effectiveDelay = config.ChildSpawnDelaySeconds / config.SpeedMultiplier;
+            double delayInHours = effectiveDelay / 3600.0;
+
+            if (source.LastChildSpawnTime > 0)
+            {
+                double timeSinceLastSpawn = currentGameTime - source.LastChildSpawnTime;
+                if (timeSinceLastSpawn < delayInHours)
+                {
+                    return;
+                }
+            }
+
+            bool spawned = false;
+            for (int i = 0; i < attemptCount; i++)
+            {
+                if (TrySpawnSingleChild(source, currentGameTime))
+                {
+                    spawned = true;
+                    break;
+                }
+            }
+
+            // Apply cooldown after a burst, even if no spawn succeeded
+            source.LastChildSpawnTime = currentGameTime;
+
+            if (!spawned)
+            {
+                source.FailedSpawnAttempts += attemptCount;
+            }
+        }
+
+        /// <summary>
+        /// When all sources are saturated, push the frontier by spawning a child at the edge of the saturated source's radius.
+        /// </summary>
+        private void TrySpawnEdgeChildForSaturatedSource(DevastationSource source, double currentGameTime)
+        {
+            if (source == null || source.IsHealing || !source.IsSaturated) return;
+
+            double effectiveDelay = config.ChildSpawnDelaySeconds / config.SpeedMultiplier;
+            double delayInHours = effectiveDelay / 3600.0;
+
+            if (source.LastChildSpawnTime > 0)
+            {
+                double timeSinceLastSpawn = currentGameTime - source.LastChildSpawnTime;
+                if (timeSinceLastSpawn < delayInHours)
+                {
+                    return; // Still on cooldown
+                }
+            }
+
+            if (devastationSources.Count >= config.MaxSources)
+            {
+                RemoveOldestSources(1);
+            }
+
+            if (devastationSources.Count >= config.MaxSources)
+            {
+                return;
+            }
+
+            BlockPos spawnPos = null;
+            int attempts = 6;
+            double minDist = Math.Max(1.0, source.Range * config.ChildRangeMinMultiplier);
+            double maxDist = Math.Max(minDist, source.Range * config.ChildRangeMaxMultiplier);
+            for (int i = 0; i < attempts; i++)
+            {
+                // Random horizontal direction, slight vertical variance
+                double angle = RandomNumberGenerator.GetInt32(360) * Math.PI / 180.0;
+                double dist = minDist + (RandomNumberGenerator.GetInt32(1000) / 1000.0) * (maxDist - minDist);
+                int offsetX = (int)Math.Round(dist * Math.Cos(angle));
+                int offsetZ = (int)Math.Round(dist * Math.Sin(angle));
+                int offsetY = RandomNumberGenerator.GetInt32(3) - 1; // -1,0,1 small vertical wobble
+
+                BlockPos candidatePos = new BlockPos(
+                    source.Pos.X + offsetX,
+                    source.Pos.Y + offsetY,
+                    source.Pos.Z + offsetZ
+                );
+
+                if (candidatePos.Y < config.MinYLevel) continue;
+                if (!IsValidMetastasisPosition(candidatePos)) continue;
+                if (config.RequireSourceAirContact && !IsAdjacentToAir(candidatePos)) continue;
+                if (IsTooCloseToExistingSources(candidatePos, source.Range * 0.5)) continue;
+
+                spawnPos = candidatePos;
+                break;
+            }
+
+            // Apply cooldown even if we failed to find a spot, to avoid spamming every tick
+            source.LastChildSpawnTime = currentGameTime;
+
+            if (spawnPos == null) return;
+
+            if (string.IsNullOrEmpty(source.SourceId))
+            {
+                source.SourceId = GenerateSourceId();
+            }
+
+            int childRange = CalculateChildRange(source.Range);
+
+            DevastationSource metastasis = new DevastationSource
+            {
+                Pos = spawnPos.Copy(),
+                Range = childRange,
+                Amount = source.Amount,
+                CurrentRadius = 3.0,
+                IsHealing = false,
+                IsMetastasis = true,
+                GenerationLevel = source.GenerationLevel + 1,
+                MetastasisThreshold = config.MetastasisThreshold,
+                MaxGenerationLevel = source.MaxGenerationLevel,
+                SourceId = GenerateSourceId(),
+                ParentSourceId = source.SourceId
+            };
+
+            devastationSources.Add(metastasis);
+
+            source.ChildrenSpawned++;
+            source.BlocksSinceLastMetastasis = 0;
+            source.FailedSpawnAttempts = 0;
+            source.FailedDevastateAttempts = 0;
         }
 
         /// <summary>
@@ -1437,9 +1672,9 @@ namespace SpreadingDevastation
         private int CalculateChildRange(int parentRange)
         {
             double variation = config.MetastasisRadiusVariation;
-            double minMultiplier = 1.0 - variation;
-            double maxMultiplier = 1.0 + variation;
-            
+            double minMultiplier = Math.Max(0.1, 1.0 - variation);
+            double maxMultiplier = Math.Max(minMultiplier, 1.0 + variation);
+
             // Generate random multiplier between min and max
             double multiplier = minMultiplier + (RandomNumberGenerator.GetInt32(1001) / 1000.0) * (maxMultiplier - minMultiplier);
             
@@ -1457,9 +1692,8 @@ namespace SpreadingDevastation
             int pillarHeight = config.PillarSearchHeight;
             int probeCount = 32;
             
-            // Search beyond the current radius, but not too far
-            double searchMinRadius = source.CurrentRadius * 1.2; // Start just beyond devastated area
-            double searchMaxRadius = source.Range * 2; // Search up to 2x the range
+            double minDist = Math.Max(1.0, source.Range * config.ChildRangeMinMultiplier);
+            double maxDist = Math.Max(minDist, source.Range * config.ChildRangeMaxMultiplier);
             
             List<BlockPos> candidates = new List<BlockPos>();
             
@@ -1468,8 +1702,8 @@ namespace SpreadingDevastation
                 // Generate random angle
                 double angle = RandomNumberGenerator.GetInt32(360) * Math.PI / 180.0;
                 
-                // Generate distance between searchMinRadius and searchMaxRadius
-                double distance = searchMinRadius + (RandomNumberGenerator.GetInt32(1000) / 1000.0) * (searchMaxRadius - searchMinRadius);
+                // Generate distance between configured min/max multipliers of parent range
+                double distance = minDist + (RandomNumberGenerator.GetInt32(1000) / 1000.0) * (maxDist - minDist);
                 
                 int offsetX = (int)(distance * Math.Cos(angle));
                 int offsetZ = (int)(distance * Math.Sin(angle));
@@ -1620,29 +1854,30 @@ namespace SpreadingDevastation
             List<BlockPos> candidates = new List<BlockPos>();
             List<BlockPos> selected = new List<BlockPos>();
             
-            // Search at multiple distance rings, starting further out
-            int[] searchDistances = new int[] { 
-                source.Range * 2, 
-                source.Range * 4, 
-                source.Range * 6,
-                source.Range * 8 
-            };
+            double minDist = Math.Max(1.0, source.Range * config.ChildRangeMinMultiplier);
+            double maxDist = Math.Max(minDist, source.Range * config.ChildRangeMaxMultiplier);
             
-            foreach (int searchDist in searchDistances)
+            // Probe around within the configured ring; allow a modest expansion if nothing found
+            double[] ringExpansions = new double[] { 1.0, 1.5, 2.0 };
+
+            foreach (double ringExp in ringExpansions)
             {
-                // Cap maximum search distance to prevent searching too far
-                int cappedDist = Math.Min(searchDist, 128);
+                double ringMin = Math.Min(128, minDist * ringExp);
+                double ringMax = Math.Min(128, maxDist * ringExp);
+                if (ringMax < ringMin) ringMax = ringMin;
+
                 int probeCount = count * 16; // More probes for long-range search
                 
                 for (int i = 0; i < probeCount; i++)
                 {
-                    // Generate random position at this distance
+                    // Generate random position within ring
                     double angle = RandomNumberGenerator.GetInt32(360) * Math.PI / 180.0;
                     double angleY = (RandomNumberGenerator.GetInt32(60) - 30) * Math.PI / 180.0; // Flatter angle for long-range
+                    double dist = ringMin + (RandomNumberGenerator.GetInt32(1000) / 1000.0) * (ringMax - ringMin);
                     
-                    int offsetX = (int)(cappedDist * Math.Cos(angle) * Math.Cos(angleY));
-                    int offsetY = (int)(cappedDist * Math.Sin(angleY));
-                    int offsetZ = (int)(cappedDist * Math.Sin(angle) * Math.Cos(angleY));
+                    int offsetX = (int)(dist * Math.Cos(angle) * Math.Cos(angleY));
+                    int offsetY = (int)(dist * Math.Sin(angleY));
+                    int offsetZ = (int)(dist * Math.Sin(angle) * Math.Cos(angleY));
                     
                     BlockPos candidatePos = new BlockPos(
                         source.Pos.X + offsetX,
