@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Globalization;
 using System.Security.Cryptography;
 using ProtoBuf;
 using Vintagestory.API.Common;
@@ -76,6 +77,11 @@ namespace SpreadingDevastation
         /// Vertical search range (±blocks) when using pillar strategy for metastasis (default: 5)
         /// </summary>
         public int PillarSearchHeight { get; set; } = 5;
+        
+        /// <summary>
+        /// Show magenta debug particles on devastation sources to visualize them (default: true)
+        /// </summary>
+        public bool ShowSourceMarkers { get; set; } = true;
     }
 
     public class SpreadingDevastationModSystem : ModSystem
@@ -191,73 +197,14 @@ namespace SpreadingDevastation
             api.Event.SaveGameLoaded += OnSaveGameLoading;
             api.Event.GameWorldSave += OnSaveGameSaving;
             
-            // Register commands using the modern ChatCommand API
-            api.ChatCommands.Create("devastate")
-                .WithDescription("Manage devastation sources")
-                .RequiresPrivilege(Privilege.controlserver)
-                .BeginSubCommand("add")
-                    .WithDescription("Add a devastation source at the block you're looking at")
-                    .WithArgs(api.ChatCommands.Parsers.OptionalWordRange("range", "range"), 
-                              api.ChatCommands.Parsers.OptionalInt("rangeValue"),
-                              api.ChatCommands.Parsers.OptionalWordRange("amount", "amount"),
-                              api.ChatCommands.Parsers.OptionalInt("amountValue"))
-                    .HandleWith(args => HandleAddCommand(args, false))
-                .EndSubCommand()
-                .BeginSubCommand("heal")
-                    .WithDescription("Add a healing source at the block you're looking at")
-                    .WithArgs(api.ChatCommands.Parsers.OptionalWordRange("range", "range"),
-                              api.ChatCommands.Parsers.OptionalInt("rangeValue"),
-                              api.ChatCommands.Parsers.OptionalWordRange("amount", "amount"),
-                              api.ChatCommands.Parsers.OptionalInt("amountValue"))
-                    .HandleWith(args => HandleAddCommand(args, true))
-                .EndSubCommand()
-                .BeginSubCommand("remove")
-                    .WithDescription("Remove devastation sources")
-                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("target"))
-                    .HandleWith(HandleRemoveCommand)
-                .EndSubCommand()
-                .BeginSubCommand("list")
-                    .WithDescription("List devastation sources")
-                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("countOrSummary"))
-                    .HandleWith(HandleListCommand)
-                .EndSubCommand()
-                .BeginSubCommand("maxsources")
-                    .WithDescription("Set maximum number of sources")
-                    .WithArgs(api.ChatCommands.Parsers.OptionalInt("count"))
-                    .HandleWith(HandleMaxSourcesCommand)
-                .EndSubCommand()
-                .BeginSubCommand("maxattempts")
-                    .WithDescription("Set max failed spawn attempts before saturation")
-                    .WithArgs(api.ChatCommands.Parsers.OptionalInt("count"))
-                    .HandleWith(HandleMaxAttemptsCommand)
-                .EndSubCommand()
-                .BeginSubCommand("aircontact")
-                    .WithDescription("Toggle surface spreading (require air contact for new sources)")
-                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("onoff"))
-                    .HandleWith(HandleAirContactCommand)
-                .EndSubCommand()
-                .BeginSubCommand("miny")
-                    .WithDescription("Set minimum Y level for new sources")
-                    .WithArgs(api.ChatCommands.Parsers.OptionalInt("level"))
-                    .HandleWith(HandleMinYCommand)
-                .EndSubCommand()
-                .BeginSubCommand("stop")
-                    .WithDescription("Pause all devastation spreading")
-                    .HandleWith(args => { isPaused = true; return TextCommandResult.Success("Devastation spreading STOPPED. Use '/devastate start' to resume."); })
-                .EndSubCommand()
-                .BeginSubCommand("start")
-                    .WithDescription("Resume devastation spreading")
-                    .HandleWith(args => { isPaused = false; return TextCommandResult.Success("Devastation spreading STARTED."); })
-                .EndSubCommand()
-                .BeginSubCommand("status")
-                    .WithDescription("Show current devastation status")
-                    .HandleWith(HandleStatusCommand)
-                .EndSubCommand();
+            // Register commands using the modern ChatCommand API (with shorthand alias)
+            RegisterDevastateCommand(api, "devastate");
+            RegisterDevastateCommand(api, "dv");
             
             api.ChatCommands.Create("devastationspeed")
                 .WithDescription("Set devastation spread speed multiplier")
                 .RequiresPrivilege(Privilege.controlserver)
-                .WithArgs(api.ChatCommands.Parsers.OptionalDouble("multiplier"))
+                .WithArgs(api.ChatCommands.Parsers.OptionalWord("multiplier"))
                 .HandleWith(HandleSpeedCommand);
             
             api.ChatCommands.Create("devastationconfig")
@@ -350,16 +297,94 @@ namespace SpreadingDevastation
 
         #region Command Handlers
 
+        /// <summary>
+        /// Registers the devastate command tree under the provided command name (e.g., "devastate" and alias "dv").
+        /// </summary>
+        private void RegisterDevastateCommand(ICoreServerAPI api, string commandName)
+        {
+            api.ChatCommands.Create(commandName)
+                .WithDescription("Manage devastation sources")
+                .RequiresPrivilege(Privilege.controlserver)
+                .BeginSubCommand("add")
+                    .WithDescription("Add a devastation source at the block you're looking at")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWordRange("range", "range"),
+                              api.ChatCommands.Parsers.OptionalInt("rangeValue"),
+                              api.ChatCommands.Parsers.OptionalWordRange("amount", "amount"),
+                              api.ChatCommands.Parsers.OptionalInt("amountValue"))
+                    .HandleWith(args => HandleAddCommand(args, false))
+                .EndSubCommand()
+                .BeginSubCommand("heal")
+                    .WithDescription("Add a healing source at the block you're looking at")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWordRange("range", "range"),
+                              api.ChatCommands.Parsers.OptionalInt("rangeValue"),
+                              api.ChatCommands.Parsers.OptionalWordRange("amount", "amount"),
+                              api.ChatCommands.Parsers.OptionalInt("amountValue"))
+                    .HandleWith(args => HandleAddCommand(args, true))
+                .EndSubCommand()
+                .BeginSubCommand("remove")
+                    .WithDescription("Remove devastation sources")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("target"))
+                    .HandleWith(HandleRemoveCommand)
+                .EndSubCommand()
+                .BeginSubCommand("list")
+                    .WithDescription("List devastation sources")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("countOrSummary"))
+                    .HandleWith(HandleListCommand)
+                .EndSubCommand()
+                .BeginSubCommand("maxsources")
+                    .WithDescription("Set maximum number of sources")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalInt("count"))
+                    .HandleWith(HandleMaxSourcesCommand)
+                .EndSubCommand()
+                .BeginSubCommand("maxattempts")
+                    .WithDescription("Set max failed spawn attempts before saturation")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalInt("count"))
+                    .HandleWith(HandleMaxAttemptsCommand)
+                .EndSubCommand()
+                .BeginSubCommand("aircontact")
+                    .WithDescription("Toggle surface spreading (require air contact for new sources)")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("onoff"))
+                    .HandleWith(HandleAirContactCommand)
+                .EndSubCommand()
+                .BeginSubCommand("markers")
+                    .WithDescription("Toggle magenta source markers for debugging")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("onoff"))
+                    .HandleWith(HandleMarkersCommand)
+                .EndSubCommand()
+                .BeginSubCommand("miny")
+                    .WithDescription("Set minimum Y level for new sources")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalInt("level"))
+                    .HandleWith(HandleMinYCommand)
+                .EndSubCommand()
+                .BeginSubCommand("stop")
+                    .WithDescription("Pause all devastation spreading")
+                    .HandleWith(args => { isPaused = true; return TextCommandResult.Success("Devastation spreading STOPPED. Use '/devastate start' to resume."); })
+                .EndSubCommand()
+                .BeginSubCommand("start")
+                    .WithDescription("Resume devastation spreading")
+                    .HandleWith(args => { isPaused = false; return TextCommandResult.Success("Devastation spreading STARTED."); })
+                .EndSubCommand()
+                .BeginSubCommand("status")
+                    .WithDescription("Show current devastation status")
+                    .HandleWith(HandleStatusCommand)
+                .EndSubCommand();
+        }
+
         private TextCommandResult HandleSpeedCommand(TextCommandCallingArgs args)
         {
-            double? speedArg = args.Parsers[0].GetValue() as double?;
-            
-            if (!speedArg.HasValue)
+            string rawArg = args.Parsers[0].GetValue() as string;
+
+            if (string.IsNullOrWhiteSpace(rawArg))
             {
                 return TextCommandResult.Success($"Current devastation speed: {config.SpeedMultiplier:F2}x\nUsage: /devastationspeed <multiplier> (e.g., 0.5 for half speed, 5 for 5x speed)");
             }
-            
-            double newSpeed = Math.Clamp(speedArg.Value, 0.01, 100.0);
+
+            if (!double.TryParse(rawArg, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsedSpeed))
+            {
+                return TextCommandResult.Error("Invalid number. Usage: /devastationspeed <multiplier> (e.g., 0.5, 1, 5)");
+            }
+
+            double newSpeed = Math.Clamp(parsedSpeed, 0.01, 100.0);
             config.SpeedMultiplier = newSpeed;
             SaveConfig();
             return TextCommandResult.Success($"Devastation speed set to {config.SpeedMultiplier:F2}x");
@@ -671,6 +696,34 @@ namespace SpreadingDevastation
             }
         }
 
+        private TextCommandResult HandleMarkersCommand(TextCommandCallingArgs args)
+        {
+            string onOff = args.Parsers[0].GetValue() as string;
+
+            if (string.IsNullOrEmpty(onOff))
+            {
+                string status = config.ShowSourceMarkers ? "ON" : "OFF";
+                return TextCommandResult.Success($"Source markers: {status}\nUsage: /devastate markers [on|off]");
+            }
+
+            if (onOff.Equals("on", StringComparison.OrdinalIgnoreCase) || onOff == "1" || onOff.Equals("true", StringComparison.OrdinalIgnoreCase))
+            {
+                config.ShowSourceMarkers = true;
+                SaveConfig();
+                return TextCommandResult.Success("Source markers ENABLED");
+            }
+            else if (onOff.Equals("off", StringComparison.OrdinalIgnoreCase) || onOff == "0" || onOff.Equals("false", StringComparison.OrdinalIgnoreCase))
+            {
+                config.ShowSourceMarkers = false;
+                SaveConfig();
+                return TextCommandResult.Success("Source markers DISABLED");
+            }
+            else
+            {
+                return TextCommandResult.Error("Invalid value. Use: on, off, 1, 0, true, or false");
+            }
+        }
+
         private TextCommandResult HandleMinYCommand(TextCommandCallingArgs args)
         {
             int? levelArg = args.Parsers[0].GetValue() as int?;
@@ -820,6 +873,9 @@ namespace SpreadingDevastation
                         toRemove.Add(source);
                         continue;
                     }
+
+                    // Debug marker: lightweight magenta particles at source position
+                    SpawnSourceMarkerParticles(source.Pos);
                     
                     // Spread or heal the specified amount of blocks per tick
                     int processed = source.IsHealing 
@@ -1708,6 +1764,42 @@ namespace SpreadingDevastation
             }
 
             return devastatedBlock != "";
+        }
+
+        /// <summary>
+        /// Spawns a small burst of magenta particles at a source block to help visualize/debug sources.
+        /// </summary>
+        private void SpawnSourceMarkerParticles(BlockPos pos)
+        {
+            if (sapi == null) return;
+            if (config != null && !config.ShowSourceMarkers) return;
+
+            // Emit more frequently for stronger visibility (about 50% of ticks)
+            if (sapi.World.Rand.NextDouble() > 0.5) return;
+
+            Vec3d center = pos.ToVec3d().Add(0.5, 0.7, 0.5);
+
+            SimpleParticleProperties props = new SimpleParticleProperties
+            {
+                MinQuantity = 3,
+                AddQuantity = 4,
+                Color = ColorUtil.ToRgba(255, 60, 255, 255), // Brighter magenta glow
+                MinPos = new Vec3d(
+                    center.X - 0.05,
+                    center.Y - 0.05,
+                    center.Z - 0.05),
+                AddPos = new Vec3d(0.2, 0.2, 0.2),
+                MinVelocity = new Vec3f(-0.03f, 0.07f, -0.03f),
+                AddVelocity = new Vec3f(0.06f, 0.06f, 0.06f),
+                LifeLength = 0.7f,
+                GravityEffect = -0.03f, // Slight lift for a floating look
+                MinSize = 0.12f,
+                MaxSize = 0.22f,
+                ShouldDieInLiquid = false,
+                ParticleModel = EnumParticleModel.Quad
+            };
+
+            sapi.World.SpawnParticles(props);
         }
     }
 }
