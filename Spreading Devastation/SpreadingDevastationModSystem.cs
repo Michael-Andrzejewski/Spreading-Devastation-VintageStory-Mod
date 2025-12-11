@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using ProtoBuf;
 using Vintagestory.API.Common;
+using Vintagestory.API.Common.Entities;
 using Vintagestory.API.Config;
 using Vintagestory.API.MathTools;
 using Vintagestory.API.Server;
@@ -83,6 +84,33 @@ namespace SpreadingDevastation
         /// Show magenta debug particles on devastation sources to visualize them (default: true)
         /// </summary>
         public bool ShowSourceMarkers { get; set; } = true;
+
+        // === Devastated Chunk Settings ===
+
+        /// <summary>
+        /// Interval in game hours between enemy spawns in devastated chunks (default: 0.5)
+        /// </summary>
+        public double ChunkSpawnIntervalHours { get; set; } = 0.5;
+
+        /// <summary>
+        /// Temporal stability drain rate per 500ms tick when player is in devastated chunk (default: 0.001)
+        /// </summary>
+        public double ChunkStabilityDrainRate { get; set; } = 0.001;
+
+        /// <summary>
+        /// Whether devastated chunks can spread to nearby chunks (default: true)
+        /// </summary>
+        public bool ChunkSpreadEnabled { get; set; } = true;
+
+        /// <summary>
+        /// Chance (0.0-1.0) for a devastated chunk to spread each check interval (default: 0.05 = 5%)
+        /// </summary>
+        public double ChunkSpreadChance { get; set; } = 0.05;
+
+        /// <summary>
+        /// Base interval in seconds between chunk spread checks (default: 60). Affected by SpeedMultiplier.
+        /// </summary>
+        public double ChunkSpreadIntervalSeconds { get; set; } = 60.0;
     }
 
     public class SpreadingDevastationModSystem : ModSystem
@@ -168,13 +196,46 @@ namespace SpreadingDevastation
             public int FailedSpawnAttempts = 0; // Count of failed metastasis spawn attempts
         }
 
+        [ProtoContract]
+        public class DevastatedChunk
+        {
+            [ProtoMember(1)]
+            public int ChunkX;
+
+            [ProtoMember(2)]
+            public int ChunkZ;
+
+            [ProtoMember(3)]
+            public double DevastationLevel = 0.0; // 0.0 to 1.0, percentage of blocks devastated
+
+            [ProtoMember(4)]
+            public double MarkedTime; // Game time when chunk was first marked
+
+            [ProtoMember(5)]
+            public bool IsFullyDevastated = false; // True when all convertible blocks are devastated
+
+            [ProtoMember(6)]
+            public double LastSpawnTime = 0; // Last time an entity was spawned in this chunk
+
+            [ProtoMember(7)]
+            public int BlocksDevastated = 0; // Count of blocks devastated in this chunk
+
+            // Helper to get chunk key for dictionary lookup
+            public long ChunkKey => ((long)ChunkX << 32) | (uint)ChunkZ;
+
+            public static long MakeChunkKey(int chunkX, int chunkZ) => ((long)chunkX << 32) | (uint)chunkZ;
+        }
+
         private ICoreServerAPI sapi;
         private List<RegrowingBlocks> regrowingBlocks;
         private List<DevastationSource> devastationSources;
+        private Dictionary<long, DevastatedChunk> devastatedChunks; // Chunk-based devastation tracking
         private SpreadingDevastationConfig config;
         private bool isPaused = false; // When true, all devastation processing stops
         private int nextSourceId = 1; // Counter for generating unique source IDs
         private int cleanupTickCounter = 0; // Counter for periodic cleanup
+        private const int CHUNK_SIZE = 32; // VS chunk size in blocks
+        private double lastChunkSpreadCheckTime = 0; // Track last chunk spread check
 
         public override void Start(ICoreAPI api)
         {
@@ -190,9 +251,12 @@ namespace SpreadingDevastation
             
             // Check for rifts and manual sources every 10ms (10x faster - 100 times per second)
             api.Event.RegisterGameTickListener(SpreadDevastationFromRifts, 10);
-            
+
             // Check for block regeneration every 1000ms (once per second)
             api.Event.RegisterGameTickListener(RegenerateBlocks, 1000);
+
+            // Process devastated chunks (spawning and rapid spreading) every 500ms
+            api.Event.RegisterGameTickListener(ProcessDevastatedChunks, 500);
             
             // Save/load events
             api.Event.SaveGameLoaded += OnSaveGameLoading;
@@ -201,12 +265,6 @@ namespace SpreadingDevastation
             // Register commands using the modern ChatCommand API (with shorthand alias)
             RegisterDevastateCommand(api, "devastate");
             RegisterDevastateCommand(api, "dv");
-            
-            api.ChatCommands.Create("devastationspeed")
-                .WithDescription("Set devastation spread speed multiplier")
-                .RequiresPrivilege(Privilege.controlserver)
-                .WithArgs(api.ChatCommands.Parsers.OptionalWord("multiplier"))
-                .HandleWith(HandleSpeedCommand);
             
             api.ChatCommands.Create("devastationconfig")
                 .WithDescription("Reload configuration from file")
@@ -258,24 +316,37 @@ namespace SpreadingDevastation
             {
                 byte[] data = sapi.WorldManager.SaveGame.GetData("regrowingBlocks");
                 regrowingBlocks = data == null ? new List<RegrowingBlocks>() : SerializerUtil.Deserialize<List<RegrowingBlocks>>(data);
-                
+
                 byte[] sourcesData = sapi.WorldManager.SaveGame.GetData("devastationSources");
                 devastationSources = sourcesData == null ? new List<DevastationSource>() : SerializerUtil.Deserialize<List<DevastationSource>>(sourcesData);
-                
+
                 byte[] pausedData = sapi.WorldManager.SaveGame.GetData("devastationPaused");
                 isPaused = pausedData == null ? false : SerializerUtil.Deserialize<bool>(pausedData);
-                
+
                 byte[] nextIdData = sapi.WorldManager.SaveGame.GetData("devastationNextSourceId");
                 nextSourceId = nextIdData == null ? 1 : SerializerUtil.Deserialize<int>(nextIdData);
-                
-                sapi.Logger.Notification($"SpreadingDevastation: Loaded {devastationSources?.Count ?? 0} sources, {regrowingBlocks?.Count ?? 0} regrowing blocks");
+
+                // Load devastated chunks
+                byte[] chunksData = sapi.WorldManager.SaveGame.GetData("devastatedChunks");
+                devastatedChunks = new Dictionary<long, DevastatedChunk>();
+                if (chunksData != null)
+                {
+                    var chunkList = SerializerUtil.Deserialize<List<DevastatedChunk>>(chunksData);
+                    foreach (var chunk in chunkList)
+                    {
+                        devastatedChunks[chunk.ChunkKey] = chunk;
+                    }
+                }
+
+                sapi.Logger.Notification($"SpreadingDevastation: Loaded {devastationSources?.Count ?? 0} sources, {regrowingBlocks?.Count ?? 0} regrowing blocks, {devastatedChunks?.Count ?? 0} devastated chunks");
             }
             catch (Exception ex)
             {
                 sapi.Logger.Error($"SpreadingDevastation: Error loading save data: {ex.Message}");
-                // Initialize empty lists if loading failed
+                // Initialize empty collections if loading failed
                 regrowingBlocks = regrowingBlocks ?? new List<RegrowingBlocks>();
                 devastationSources = devastationSources ?? new List<DevastationSource>();
+                devastatedChunks = devastatedChunks ?? new Dictionary<long, DevastatedChunk>();
             }
         }
 
@@ -287,8 +358,12 @@ namespace SpreadingDevastation
                 sapi.WorldManager.SaveGame.StoreData("devastationSources", SerializerUtil.Serialize(devastationSources ?? new List<DevastationSource>()));
                 sapi.WorldManager.SaveGame.StoreData("devastationPaused", SerializerUtil.Serialize(isPaused));
                 sapi.WorldManager.SaveGame.StoreData("devastationNextSourceId", SerializerUtil.Serialize(nextSourceId));
-                
-                sapi.Logger.VerboseDebug($"SpreadingDevastation: Saved {devastationSources?.Count ?? 0} sources, {regrowingBlocks?.Count ?? 0} regrowing blocks");
+
+                // Save devastated chunks as a list
+                var chunkList = devastatedChunks?.Values.ToList() ?? new List<DevastatedChunk>();
+                sapi.WorldManager.SaveGame.StoreData("devastatedChunks", SerializerUtil.Serialize(chunkList));
+
+                sapi.Logger.VerboseDebug($"SpreadingDevastation: Saved {devastationSources?.Count ?? 0} sources, {regrowingBlocks?.Count ?? 0} regrowing blocks, {devastatedChunks?.Count ?? 0} devastated chunks");
             }
             catch (Exception ex)
             {
@@ -390,6 +465,17 @@ namespace SpreadingDevastation
                 .BeginSubCommand("status")
                     .WithDescription("Show current devastation status")
                     .HandleWith(HandleStatusCommand)
+                .EndSubCommand()
+                .BeginSubCommand("speed")
+                    .WithDescription("Set devastation spread speed multiplier")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("multiplier"))
+                    .HandleWith(HandleSpeedCommand)
+                .EndSubCommand()
+                .BeginSubCommand("chunk")
+                    .WithDescription("Mark the chunk you're looking at as devastated, or configure chunk settings")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("action"),
+                              api.ChatCommands.Parsers.OptionalWord("value"))
+                    .HandleWith(HandleChunkCommand)
                 .EndSubCommand();
         }
 
@@ -402,13 +488,13 @@ namespace SpreadingDevastation
                 return SendChatLines(args, new[]
                 {
                     $"Current devastation speed: {config.SpeedMultiplier:F2}x",
-                    "Usage: /devastationspeed <multiplier> (e.g., 0.5 for half speed, 5 for 5x speed)"
+                    "Usage: /dv speed <multiplier> (e.g., 0.5 for half speed, 5 for 5x speed)"
                 }, "Speed info sent to chat (scrollable)");
             }
 
             if (!double.TryParse(rawArg, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsedSpeed))
             {
-                return TextCommandResult.Error("Invalid number. Usage: /devastationspeed <multiplier> (e.g., 0.5, 1, 5)");
+                return TextCommandResult.Error("Invalid number. Usage: /dv speed <multiplier> (e.g., 0.5, 1, 5)");
             }
 
             double newSpeed = Math.Clamp(parsedSpeed, 0.01, 100.0);
@@ -806,6 +892,204 @@ namespace SpreadingDevastation
                 $"Max failed attempts: {config.MaxFailedSpawnAttempts}"
             };
             return SendChatLines(args, lines, "Status sent to chat (scrollable)");
+        }
+
+        private TextCommandResult HandleChunkCommand(TextCommandCallingArgs args)
+        {
+            string action = args.Parsers[0].GetValue() as string;
+            string value = args.Parsers[1].GetValue() as string;
+
+            // Handle configuration commands first (don't require looking at a block)
+            if (action == "spawn")
+            {
+                if (string.IsNullOrEmpty(value))
+                {
+                    return SendChatLines(args, new[]
+                    {
+                        $"Current chunk spawn interval: {config.ChunkSpawnIntervalHours:F2} game hours",
+                        "Usage: /dv chunk spawn <hours> (e.g., 0.5 for every 30 in-game minutes)"
+                    }, "Spawn interval info sent to chat");
+                }
+
+                if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double hours))
+                {
+                    return TextCommandResult.Error("Invalid number. Usage: /dv chunk spawn <hours>");
+                }
+
+                config.ChunkSpawnIntervalHours = Math.Clamp(hours, 0.01, 100.0);
+                SaveConfig();
+                return TextCommandResult.Success($"Chunk enemy spawn interval set to {config.ChunkSpawnIntervalHours:F2} game hours");
+            }
+            else if (action == "drain")
+            {
+                if (string.IsNullOrEmpty(value))
+                {
+                    return SendChatLines(args, new[]
+                    {
+                        $"Current stability drain rate: {config.ChunkStabilityDrainRate:F4} per 500ms tick",
+                        $"(~{config.ChunkStabilityDrainRate * 2 * 100:F2}% per second)",
+                        "Usage: /dv chunk drain <rate> (e.g., 0.001 for ~0.2%/sec, 0.01 for ~2%/sec)"
+                    }, "Drain rate info sent to chat");
+                }
+
+                if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double rate))
+                {
+                    return TextCommandResult.Error("Invalid number. Usage: /dv chunk drain <rate>");
+                }
+
+                config.ChunkStabilityDrainRate = Math.Clamp(rate, 0.0, 1.0);
+                SaveConfig();
+                return TextCommandResult.Success($"Chunk stability drain rate set to {config.ChunkStabilityDrainRate:F4} (~{config.ChunkStabilityDrainRate * 2 * 100:F2}%/sec)");
+            }
+            else if (action == "spread")
+            {
+                if (string.IsNullOrEmpty(value))
+                {
+                    string status = config.ChunkSpreadEnabled ? "ON" : "OFF";
+                    return SendChatLines(args, new[]
+                    {
+                        $"Chunk spread: {status}",
+                        $"Spread chance: {config.ChunkSpreadChance * 100:F1}% every {config.ChunkSpreadIntervalSeconds:F0}s (at 1x speed)",
+                        "Usage: /dv chunk spread [on|off]"
+                    }, "Spread setting sent to chat");
+                }
+
+                if (value.Equals("on", StringComparison.OrdinalIgnoreCase) || value == "1" || value.Equals("true", StringComparison.OrdinalIgnoreCase))
+                {
+                    config.ChunkSpreadEnabled = true;
+                    SaveConfig();
+                    return TextCommandResult.Success("Chunk spreading ENABLED - devastated chunks can spread to neighbors");
+                }
+                else if (value.Equals("off", StringComparison.OrdinalIgnoreCase) || value == "0" || value.Equals("false", StringComparison.OrdinalIgnoreCase))
+                {
+                    config.ChunkSpreadEnabled = false;
+                    SaveConfig();
+                    return TextCommandResult.Success("Chunk spreading DISABLED - devastated chunks will not spread");
+                }
+                else
+                {
+                    return TextCommandResult.Error("Invalid value. Use: on, off, 1, 0, true, or false");
+                }
+            }
+            else if (action == "spreadchance")
+            {
+                if (string.IsNullOrEmpty(value))
+                {
+                    return SendChatLines(args, new[]
+                    {
+                        $"Current spread chance: {config.ChunkSpreadChance * 100:F1}%",
+                        $"Check interval: {config.ChunkSpreadIntervalSeconds:F0}s (at 1x speed)",
+                        "Usage: /dv chunk spreadchance <percent> (e.g., 5 for 5%)"
+                    }, "Spread chance info sent to chat");
+                }
+
+                if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double percent))
+                {
+                    return TextCommandResult.Error("Invalid number. Usage: /dv chunk spreadchance <percent>");
+                }
+
+                config.ChunkSpreadChance = Math.Clamp(percent / 100.0, 0.0, 1.0);
+                SaveConfig();
+                return TextCommandResult.Success($"Chunk spread chance set to {config.ChunkSpreadChance * 100:F1}%");
+            }
+            else if (action == "list")
+            {
+                if (devastatedChunks.Count == 0)
+                {
+                    return TextCommandResult.Success("No devastated chunks");
+                }
+
+                var lines = new List<string> { $"Devastated chunks ({devastatedChunks.Count}):" };
+                foreach (var chunk in devastatedChunks.Values.Take(20))
+                {
+                    string status = chunk.IsFullyDevastated ? "fully devastated" : $"{chunk.DevastationLevel:P0} devastated";
+                    lines.Add($"  ({chunk.ChunkX}, {chunk.ChunkZ}): {status}, {chunk.BlocksDevastated} blocks");
+                }
+                if (devastatedChunks.Count > 20)
+                {
+                    lines.Add($"  ... and {devastatedChunks.Count - 20} more");
+                }
+                return SendChatLines(args, lines, "Chunk list sent to chat");
+            }
+            else if (action == "remove")
+            {
+                // Remove requires looking at a block OR "all" value
+                if (value == "all")
+                {
+                    int count = devastatedChunks.Count;
+                    devastatedChunks.Clear();
+                    return TextCommandResult.Success($"Removed all {count} devastated chunks");
+                }
+
+                IServerPlayer player = args.Caller.Player as IServerPlayer;
+                if (player == null) return TextCommandResult.Error("This command must be run by a player");
+
+                BlockSelection blockSel = player.CurrentBlockSelection;
+                if (blockSel == null)
+                {
+                    return TextCommandResult.Error("Look at a block to remove its chunk, or use '/dv chunk remove all'");
+                }
+
+                BlockPos pos = blockSel.Position;
+                int chunkX = pos.X / CHUNK_SIZE;
+                int chunkZ = pos.Z / CHUNK_SIZE;
+                long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
+
+                if (devastatedChunks.ContainsKey(chunkKey))
+                {
+                    devastatedChunks.Remove(chunkKey);
+                    return TextCommandResult.Success($"Removed devastated chunk at ({chunkX}, {chunkZ})");
+                }
+                else
+                {
+                    return TextCommandResult.Error($"Chunk at ({chunkX}, {chunkZ}) is not marked as devastated");
+                }
+            }
+            else
+            {
+                // Default action: mark chunk as devastated (requires looking at a block)
+                IServerPlayer player = args.Caller.Player as IServerPlayer;
+                if (player == null) return TextCommandResult.Error("This command must be run by a player");
+
+                BlockSelection blockSel = player.CurrentBlockSelection;
+                if (blockSel == null)
+                {
+                    // No block selected - show help
+                    return SendChatLines(args, new[]
+                    {
+                        "Chunk commands:",
+                        "  /dv chunk - Mark looked-at chunk as devastated",
+                        "  /dv chunk remove [all] - Remove devastation from chunk",
+                        "  /dv chunk list - List all devastated chunks",
+                        "  /dv chunk spawn <hours> - Set enemy spawn interval",
+                        "  /dv chunk drain <rate> - Set stability drain rate",
+                        "  /dv chunk spread [on|off] - Toggle chunk spreading",
+                        "  /dv chunk spreadchance <percent> - Set spread chance"
+                    }, "Chunk help sent to chat");
+                }
+
+                BlockPos pos = blockSel.Position;
+                int chunkX = pos.X / CHUNK_SIZE;
+                int chunkZ = pos.Z / CHUNK_SIZE;
+                long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
+
+                if (devastatedChunks.ContainsKey(chunkKey))
+                {
+                    return TextCommandResult.Error($"Chunk at ({chunkX}, {chunkZ}) is already marked as devastated");
+                }
+
+                var newChunk = new DevastatedChunk
+                {
+                    ChunkX = chunkX,
+                    ChunkZ = chunkZ,
+                    MarkedTime = sapi.World.Calendar.TotalHours,
+                    DevastationLevel = 0.0,
+                    IsFullyDevastated = false
+                };
+
+                devastatedChunks[chunkKey] = newChunk;
+                return TextCommandResult.Success($"Marked chunk at ({chunkX}, {chunkZ}) as devastated. Corrupted entities will spawn and devastation will spread rapidly.");
+            }
         }
 
         #endregion
@@ -1885,5 +2169,320 @@ namespace SpreadingDevastation
             // Default: new/growing
             return ColorUtil.ToRgba(255, 80, 160, 255); // blue
         }
+
+        #region Chunk-Based Devastation
+
+        /// <summary>
+        /// Processes all devastated chunks - spawns corrupted entities and spreads devastation rapidly.
+        /// </summary>
+        private void ProcessDevastatedChunks(float dt)
+        {
+            if (isPaused || sapi == null || devastatedChunks == null || devastatedChunks.Count == 0) return;
+
+            try
+            {
+                double currentTime = sapi.World.Calendar.TotalHours;
+
+                // Drain temporal stability from players in devastated chunks
+                DrainPlayerTemporalStability(dt);
+
+                // Check for chunk spreading to nearby chunks
+                TrySpreadToNearbyChunks(currentTime);
+
+                foreach (var chunk in devastatedChunks.Values.ToList()) // ToList() to allow modification during iteration
+                {
+                    // Spawn corrupted entities periodically
+                    TrySpawnCorruptedEntitiesInChunk(chunk, currentTime);
+
+                    // Rapidly spread devastation within the chunk
+                    SpreadDevastationInChunk(chunk);
+                }
+            }
+            catch (Exception ex)
+            {
+                sapi.Logger.Error($"SpreadingDevastation: Error processing devastated chunks: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Drains temporal stability from players standing in devastated chunks.
+        /// Acts as if they're in an unstable temporal region.
+        /// </summary>
+        private void DrainPlayerTemporalStability(float dt)
+        {
+            foreach (IServerPlayer player in sapi.World.AllOnlinePlayers.Cast<IServerPlayer>())
+            {
+                if (player.Entity == null) continue;
+
+                // Check if player is in a devastated chunk
+                int chunkX = (int)player.Entity.Pos.X / CHUNK_SIZE;
+                int chunkZ = (int)player.Entity.Pos.Z / CHUNK_SIZE;
+                long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
+
+                if (!devastatedChunks.ContainsKey(chunkKey)) continue;
+
+                // Get the temporal stability behavior
+                var stabilityBehavior = player.Entity.GetBehavior<EntityBehaviorTemporalStabilityAffected>();
+                if (stabilityBehavior == null) continue;
+
+                // Drain stability at configured rate (default 0.001 per 500ms tick = ~0.2% per second)
+                double drainRate = config.ChunkStabilityDrainRate;
+                double currentStability = stabilityBehavior.OwnStability;
+                double newStability = Math.Max(0, currentStability - drainRate);
+
+                stabilityBehavior.OwnStability = newStability;
+            }
+        }
+
+        /// <summary>
+        /// Checks if devastated chunks should spread to nearby chunks.
+        /// Base interval is 60 seconds, affected by speed multiplier.
+        /// </summary>
+        private void TrySpreadToNearbyChunks(double currentTime)
+        {
+            if (!config.ChunkSpreadEnabled || devastatedChunks.Count == 0) return;
+
+            // Calculate effective interval (base 60 seconds, divided by speed multiplier)
+            // At 1x speed: check every 60 seconds
+            // At 100x speed: check every 0.6 seconds
+            double effectiveIntervalHours = (config.ChunkSpreadIntervalSeconds / 3600.0) / Math.Max(0.01, config.SpeedMultiplier);
+
+            if (currentTime - lastChunkSpreadCheckTime < effectiveIntervalHours) return;
+            lastChunkSpreadCheckTime = currentTime;
+
+            // Check each devastated chunk for spreading (limit to prevent overwhelming the system)
+            var chunksToAdd = new List<DevastatedChunk>();
+            int maxNewChunksPerCheck = 3; // Limit new chunks per check to prevent database overwhelm
+
+            foreach (var chunk in devastatedChunks.Values)
+            {
+                // Stop if we've already queued enough new chunks
+                if (chunksToAdd.Count >= maxNewChunksPerCheck) break;
+
+                // Roll for spread chance
+                if (sapi.World.Rand.NextDouble() >= config.ChunkSpreadChance) continue;
+
+                // Try to spread to a random adjacent chunk
+                int[] adjacentOffsets = new int[] { -1, 0, 1 };
+                int offsetX = adjacentOffsets[sapi.World.Rand.Next(3)];
+                int offsetZ = adjacentOffsets[sapi.World.Rand.Next(3)];
+
+                // Don't spread to self
+                if (offsetX == 0 && offsetZ == 0) continue;
+
+                int newChunkX = chunk.ChunkX + offsetX;
+                int newChunkZ = chunk.ChunkZ + offsetZ;
+                long newChunkKey = DevastatedChunk.MakeChunkKey(newChunkX, newChunkZ);
+
+                // Skip if already devastated or already queued
+                if (devastatedChunks.ContainsKey(newChunkKey)) continue;
+                if (chunksToAdd.Any(c => c.ChunkKey == newChunkKey)) continue;
+
+                // Create new devastated chunk
+                var newChunk = new DevastatedChunk
+                {
+                    ChunkX = newChunkX,
+                    ChunkZ = newChunkZ,
+                    MarkedTime = currentTime,
+                    DevastationLevel = 0.0,
+                    IsFullyDevastated = false
+                };
+
+                chunksToAdd.Add(newChunk);
+            }
+
+            // Add new chunks after iteration
+            foreach (var newChunk in chunksToAdd)
+            {
+                devastatedChunks[newChunk.ChunkKey] = newChunk;
+                sapi.Logger.VerboseDebug($"SpreadingDevastation: Chunk ({newChunk.ChunkX}, {newChunk.ChunkZ}) became devastated from spread");
+            }
+        }
+
+        /// <summary>
+        /// Attempts to spawn corrupted entities in a devastated chunk.
+        /// </summary>
+        private void TrySpawnCorruptedEntitiesInChunk(DevastatedChunk chunk, double currentTime)
+        {
+            // Spawn at configured interval (default 0.5 game hours)
+            if (currentTime - chunk.LastSpawnTime < config.ChunkSpawnIntervalHours) return;
+
+            // Only spawn if there are players nearby (within 3 chunks)
+            bool playerNearby = false;
+            int chunkCenterX = chunk.ChunkX * CHUNK_SIZE + CHUNK_SIZE / 2;
+            int chunkCenterZ = chunk.ChunkZ * CHUNK_SIZE + CHUNK_SIZE / 2;
+
+            foreach (IServerPlayer player in sapi.World.AllOnlinePlayers.Cast<IServerPlayer>())
+            {
+                if (player.Entity == null) continue;
+                double distX = Math.Abs(player.Entity.Pos.X - chunkCenterX);
+                double distZ = Math.Abs(player.Entity.Pos.Z - chunkCenterZ);
+                if (distX < CHUNK_SIZE * 3 && distZ < CHUNK_SIZE * 3)
+                {
+                    playerNearby = true;
+                    break;
+                }
+            }
+
+            if (!playerNearby) return;
+
+            chunk.LastSpawnTime = currentTime;
+
+            // Find a valid spawn position in the chunk
+            BlockPos spawnPos = FindSpawnPositionInChunk(chunk);
+            if (spawnPos == null) return;
+
+            // Randomly choose between corrupted drifter and corrupted locust
+            string entityCode = sapi.World.Rand.NextDouble() < 0.7 ? "drifter-corrupt" : "locust-corrupt";
+
+            try
+            {
+                EntityProperties entityType = sapi.World.GetEntityType(new AssetLocation("game", entityCode));
+                if (entityType == null)
+                {
+                    sapi.Logger.Warning($"SpreadingDevastation: Entity type '{entityCode}' not found");
+                    return;
+                }
+
+                Entity entity = sapi.World.ClassRegistry.CreateEntity(entityType);
+                entity.ServerPos.SetPos(spawnPos.X + 0.5, spawnPos.Y + 1, spawnPos.Z + 0.5);
+                entity.Pos.SetFrom(entity.ServerPos);
+                sapi.World.SpawnEntity(entity);
+            }
+            catch (Exception ex)
+            {
+                sapi.Logger.Warning($"SpreadingDevastation: Failed to spawn {entityCode}: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Finds a valid spawn position within a devastated chunk.
+        /// </summary>
+        private BlockPos FindSpawnPositionInChunk(DevastatedChunk chunk)
+        {
+            int startX = chunk.ChunkX * CHUNK_SIZE;
+            int startZ = chunk.ChunkZ * CHUNK_SIZE;
+
+            // Try up to 10 random positions
+            for (int attempt = 0; attempt < 10; attempt++)
+            {
+                int x = startX + sapi.World.Rand.Next(CHUNK_SIZE);
+                int z = startZ + sapi.World.Rand.Next(CHUNK_SIZE);
+
+                // Find the surface Y
+                int y = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(x, 0, z));
+                if (y <= 0) continue;
+
+                BlockPos pos = new BlockPos(x, y, z);
+                Block block = sapi.World.BlockAccessor.GetBlock(pos);
+                Block aboveBlock = sapi.World.BlockAccessor.GetBlock(pos.UpCopy());
+
+                // Need solid ground with air above
+                if (block != null && block.Id != 0 && aboveBlock != null && aboveBlock.Id == 0)
+                {
+                    return pos;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Rapidly spreads devastation within a chunk.
+        /// </summary>
+        private void SpreadDevastationInChunk(DevastatedChunk chunk)
+        {
+            if (chunk.IsFullyDevastated) return;
+
+            int startX = chunk.ChunkX * CHUNK_SIZE;
+            int startZ = chunk.ChunkZ * CHUNK_SIZE;
+
+            // Scale with speed multiplier: base 10 blocks per 500ms tick = 20/sec at 1x speed
+            int blocksToProcess = Math.Max(1, (int)(10 * config.SpeedMultiplier));
+            int successCount = 0;
+            int attempts = 0;
+            int maxAttempts = blocksToProcess * 5;
+
+            while (successCount < blocksToProcess && attempts < maxAttempts)
+            {
+                attempts++;
+
+                // Random position within chunk
+                int x = startX + sapi.World.Rand.Next(CHUNK_SIZE);
+                int z = startZ + sapi.World.Rand.Next(CHUNK_SIZE);
+
+                // Get terrain height and work from above surface (plants/grass) down into ground
+                int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(x, 0, z));
+                if (surfaceY <= 0) continue;
+
+                // Check blocks from surface+3 (tall plants) down to surface-10 (underground)
+                // This ensures we hit grass, bushes, flowers, and other vegetation above the terrain
+                int yOffset = sapi.World.Rand.Next(14) - 3; // Range: -3 to +10, so y = surface+3 to surface-10
+                int y = surfaceY - yOffset;
+                if (y < 1) y = 1;
+
+                BlockPos targetPos = new BlockPos(x, y, z);
+                Block block = sapi.World.BlockAccessor.GetBlock(targetPos);
+
+                if (block == null || block.Id == 0) continue;
+                if (IsAlreadyDevastated(block)) continue;
+
+                string devastatedBlock, regeneratesTo;
+                if (TryGetDevastatedForm(block, out devastatedBlock, out regeneratesTo))
+                {
+                    Block newBlock = sapi.World.GetBlock(new AssetLocation("game", devastatedBlock));
+                    if (newBlock != null)
+                    {
+                        sapi.World.BlockAccessor.SetBlock(newBlock.Id, targetPos);
+
+                        // Track for regeneration
+                        regrowingBlocks.Add(new RegrowingBlocks
+                        {
+                            Pos = targetPos,
+                            Out = regeneratesTo,
+                            LastTime = sapi.World.Calendar.TotalHours
+                        });
+
+                        successCount++;
+                        chunk.BlocksDevastated++;
+                    }
+                }
+            }
+
+            // Update devastation level estimate
+            // Rough estimate: a chunk surface area is 32x32 = 1024 blocks, times ~10 depth = ~10000 convertible blocks
+            chunk.DevastationLevel = Math.Min(1.0, chunk.BlocksDevastated / 5000.0);
+
+            // Mark as fully devastated if success rate drops very low
+            if (attempts >= maxAttempts && successCount == 0)
+            {
+                chunk.IsFullyDevastated = true;
+            }
+        }
+
+        /// <summary>
+        /// Helper to check if a block position is within a devastated chunk.
+        /// </summary>
+        private bool IsInDevastatedChunk(BlockPos pos)
+        {
+            int chunkX = pos.X / CHUNK_SIZE;
+            int chunkZ = pos.Z / CHUNK_SIZE;
+            long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
+            return devastatedChunks.ContainsKey(chunkKey);
+        }
+
+        /// <summary>
+        /// Gets the devastated chunk for a block position, or null if not devastated.
+        /// </summary>
+        private DevastatedChunk GetDevastatedChunkAt(BlockPos pos)
+        {
+            int chunkX = pos.X / CHUNK_SIZE;
+            int chunkZ = pos.Z / CHUNK_SIZE;
+            long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
+            devastatedChunks.TryGetValue(chunkKey, out DevastatedChunk chunk);
+            return chunk;
+        }
+
+        #endregion
     }
 }
