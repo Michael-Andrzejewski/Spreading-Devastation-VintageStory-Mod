@@ -4,12 +4,12 @@
     "modid": "spreadingdevastation",
     "name": "Spreading Devastation",
     "authors": [
-        "maaro"
+        "Soareverix"
     ],
     "description": "Temporal rifts and manually marked blocks spread or heal devastation with customizable range and amount. Use /devastate add or /devastate heal to mark blocks. Devastated blocks slowly regenerate over time. Use /devastate remove all to clear all sources.",
-    "version": "5.0.0",
+    "version": "1.0.0",
     "dependencies": {
-        "game": "1.21.0"
+        "game": "1.21.5"
     }
 }
 
