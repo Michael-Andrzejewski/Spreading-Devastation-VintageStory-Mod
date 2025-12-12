@@ -38,10 +38,7 @@ namespace SpreadingDevastation
         
         /// <summary>Blocks to devastate before spawning metastasis (default: 300)</summary>
         public int MetastasisThreshold { get; set; } = 300;
-        
-        /// <summary>Hours before devastated blocks regenerate (default: 60.0)</summary>
-        public double RegenerationHours { get; set; } = 60.0;
-        
+
         /// <summary>Local saturation percentage to trigger metastasis spawn (default: 0.75)</summary>
         public double SaturationThreshold { get; set; } = 0.75;
         
@@ -89,9 +86,38 @@ namespace SpreadingDevastation
         // === Devastated Chunk Settings ===
 
         /// <summary>
-        /// Interval in game hours between enemy spawns in devastated chunks (default: 0.5)
+        /// Minimum interval in game hours between enemy spawns in devastated chunks (default: 0.5)
+        /// Actual spawn time is randomized between this and ChunkSpawnIntervalMaxHours.
         /// </summary>
-        public double ChunkSpawnIntervalHours { get; set; } = 0.5;
+        public double ChunkSpawnIntervalMinHours { get; set; } = 0.5;
+
+        /// <summary>
+        /// Maximum interval in game hours between enemy spawns in devastated chunks (default: 1.0)
+        /// Actual spawn time is randomized between ChunkSpawnIntervalMinHours and this.
+        /// </summary>
+        public double ChunkSpawnIntervalMaxHours { get; set; } = 1.0;
+
+        /// <summary>
+        /// Cooldown in game hours after a spawn before the next spawn can occur (default: 4.0)
+        /// This is a hard minimum regardless of the random interval.
+        /// </summary>
+        public double ChunkSpawnCooldownHours { get; set; } = 4.0;
+
+        /// <summary>
+        /// Minimum distance in blocks from the nearest player for mob spawns (default: 16)
+        /// </summary>
+        public int ChunkSpawnMinDistance { get; set; } = 16;
+
+        /// <summary>
+        /// Maximum distance in blocks from the nearest player for mob spawns (default: 48)
+        /// </summary>
+        public int ChunkSpawnMaxDistance { get; set; } = 48;
+
+        /// <summary>
+        /// Maximum number of mobs that can be spawned in a single chunk (default: 3)
+        /// Once this limit is reached, no more spawns will occur in that chunk.
+        /// </summary>
+        public int ChunkSpawnMaxMobsPerChunk { get; set; } = 3;
 
         /// <summary>
         /// Temporal stability drain rate per 500ms tick when player is in devastated chunk (default: 0.001)
@@ -268,6 +294,12 @@ namespace SpreadingDevastation
             [ProtoMember(16)]
             public bool IsUnrepairable = false; // True if chunk has been abandoned after too many failed repairs
 
+            [ProtoMember(17)]
+            public int MobsSpawned = 0; // Count of mobs spawned in this chunk
+
+            [ProtoMember(18)]
+            public double NextSpawnTime = 0; // Game time when next spawn is allowed (randomized interval)
+
             // Helper to get chunk key for dictionary lookup
             public long ChunkKey => ((long)ChunkX << 32) | (uint)ChunkZ;
 
@@ -323,11 +355,8 @@ namespace SpreadingDevastation
             // Load config
             LoadConfig();
             
-            // Check for rifts and manual sources every 10ms (10x faster - 100 times per second)
+            // Check for manual sources every 10ms (100 times per second)
             api.Event.RegisterGameTickListener(SpreadDevastationFromRifts, 10);
-
-            // Check for block regeneration every 1000ms (once per second)
-            api.Event.RegisterGameTickListener(RegenerateBlocks, 1000);
 
             // Process devastated chunks (spawning and rapid spreading) every 500ms
             api.Event.RegisterGameTickListener(ProcessDevastatedChunks, 500);
@@ -980,19 +1009,140 @@ namespace SpreadingDevastation
                 {
                     return SendChatLines(args, new[]
                     {
-                        $"Current chunk spawn interval: {config.ChunkSpawnIntervalHours:F2} game hours",
-                        "Usage: /dv chunk spawn <hours> (e.g., 0.5 for every 30 in-game minutes)"
-                    }, "Spawn interval info sent to chat");
+                        "=== Mob Spawn Settings ===",
+                        $"Spawn interval: {config.ChunkSpawnIntervalMinHours:F2}-{config.ChunkSpawnIntervalMaxHours:F2} game hours (random)",
+                        $"Cooldown after spawn: {config.ChunkSpawnCooldownHours:F2} game hours",
+                        $"Distance from player: {config.ChunkSpawnMinDistance}-{config.ChunkSpawnMaxDistance} blocks",
+                        $"Max mobs per chunk: {config.ChunkSpawnMaxMobsPerChunk}",
+                        "",
+                        "Subcommands:",
+                        "  /dv chunk spawn interval <min> <max> - Set random interval range (hours)",
+                        "  /dv chunk spawn cooldown <hours> - Set cooldown after spawn",
+                        "  /dv chunk spawn distance <min> <max> - Set spawn distance from player",
+                        "  /dv chunk spawn maxmobs <count> - Set max mobs per chunk",
+                        "  /dv chunk spawn reset - Reset mob counts in all chunks"
+                    }, "Spawn settings sent to chat");
                 }
 
-                if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double hours))
+                // Parse subcommand
+                string[] parts = value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                string subCmd = parts.Length > 0 ? parts[0].ToLowerInvariant() : "";
+
+                if (subCmd == "interval")
                 {
-                    return TextCommandResult.Error("Invalid number. Usage: /dv chunk spawn <hours>");
-                }
+                    if (parts.Length < 3)
+                    {
+                        return SendChatLines(args, new[]
+                        {
+                            $"Current interval: {config.ChunkSpawnIntervalMinHours:F2}-{config.ChunkSpawnIntervalMaxHours:F2} game hours",
+                            "Usage: /dv chunk spawn interval <min> <max>",
+                            "Example: /dv chunk spawn interval 0.5 1.0 (30-60 in-game minutes)"
+                        }, "Interval info sent to chat");
+                    }
 
-                config.ChunkSpawnIntervalHours = Math.Clamp(hours, 0.01, 100.0);
-                SaveConfig();
-                return TextCommandResult.Success($"Chunk enemy spawn interval set to {config.ChunkSpawnIntervalHours:F2} game hours");
+                    if (!double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out double minHours) ||
+                        !double.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out double maxHours))
+                    {
+                        return TextCommandResult.Error("Invalid numbers. Usage: /dv chunk spawn interval <min> <max>");
+                    }
+
+                    if (minHours > maxHours)
+                    {
+                        (minHours, maxHours) = (maxHours, minHours); // Swap if reversed
+                    }
+
+                    config.ChunkSpawnIntervalMinHours = Math.Clamp(minHours, 0.01, 100.0);
+                    config.ChunkSpawnIntervalMaxHours = Math.Clamp(maxHours, 0.01, 100.0);
+                    SaveConfig();
+                    return TextCommandResult.Success($"Spawn interval set to {config.ChunkSpawnIntervalMinHours:F2}-{config.ChunkSpawnIntervalMaxHours:F2} game hours");
+                }
+                else if (subCmd == "cooldown")
+                {
+                    if (parts.Length < 2)
+                    {
+                        return SendChatLines(args, new[]
+                        {
+                            $"Current cooldown: {config.ChunkSpawnCooldownHours:F2} game hours",
+                            "Usage: /dv chunk spawn cooldown <hours>",
+                            "Example: /dv chunk spawn cooldown 4 (4 hour minimum between spawns)"
+                        }, "Cooldown info sent to chat");
+                    }
+
+                    if (!double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out double cooldown))
+                    {
+                        return TextCommandResult.Error("Invalid number. Usage: /dv chunk spawn cooldown <hours>");
+                    }
+
+                    config.ChunkSpawnCooldownHours = Math.Clamp(cooldown, 0.0, 100.0);
+                    SaveConfig();
+                    return TextCommandResult.Success($"Spawn cooldown set to {config.ChunkSpawnCooldownHours:F2} game hours");
+                }
+                else if (subCmd == "distance")
+                {
+                    if (parts.Length < 3)
+                    {
+                        return SendChatLines(args, new[]
+                        {
+                            $"Current distance: {config.ChunkSpawnMinDistance}-{config.ChunkSpawnMaxDistance} blocks from player",
+                            "Usage: /dv chunk spawn distance <min> <max>",
+                            "Example: /dv chunk spawn distance 16 48"
+                        }, "Distance info sent to chat");
+                    }
+
+                    if (!int.TryParse(parts[1], out int minDist) || !int.TryParse(parts[2], out int maxDist))
+                    {
+                        return TextCommandResult.Error("Invalid numbers. Usage: /dv chunk spawn distance <min> <max>");
+                    }
+
+                    if (minDist > maxDist)
+                    {
+                        (minDist, maxDist) = (maxDist, minDist); // Swap if reversed
+                    }
+
+                    config.ChunkSpawnMinDistance = Math.Clamp(minDist, 1, 256);
+                    config.ChunkSpawnMaxDistance = Math.Clamp(maxDist, 1, 256);
+                    SaveConfig();
+                    return TextCommandResult.Success($"Spawn distance set to {config.ChunkSpawnMinDistance}-{config.ChunkSpawnMaxDistance} blocks from player");
+                }
+                else if (subCmd == "maxmobs")
+                {
+                    if (parts.Length < 2)
+                    {
+                        return SendChatLines(args, new[]
+                        {
+                            $"Current max mobs per chunk: {config.ChunkSpawnMaxMobsPerChunk}",
+                            "Usage: /dv chunk spawn maxmobs <count>",
+                            "Example: /dv chunk spawn maxmobs 5"
+                        }, "Max mobs info sent to chat");
+                    }
+
+                    if (!int.TryParse(parts[1], out int maxMobs))
+                    {
+                        return TextCommandResult.Error("Invalid number. Usage: /dv chunk spawn maxmobs <count>");
+                    }
+
+                    config.ChunkSpawnMaxMobsPerChunk = Math.Clamp(maxMobs, 0, 100);
+                    SaveConfig();
+                    return TextCommandResult.Success($"Max mobs per chunk set to {config.ChunkSpawnMaxMobsPerChunk}");
+                }
+                else if (subCmd == "reset")
+                {
+                    int resetCount = 0;
+                    foreach (var chunk in devastatedChunks.Values)
+                    {
+                        if (chunk.MobsSpawned > 0)
+                        {
+                            chunk.MobsSpawned = 0;
+                            chunk.NextSpawnTime = 0;
+                            resetCount++;
+                        }
+                    }
+                    return TextCommandResult.Success($"Reset mob counts in {resetCount} chunks. Spawning can resume.");
+                }
+                else
+                {
+                    return TextCommandResult.Error("Unknown spawn subcommand. Use: interval, cooldown, distance, maxmobs, reset");
+                }
             }
             else if (action == "drain")
             {
@@ -1417,7 +1567,7 @@ namespace SpreadingDevastation
                         "  /dv chunk perf - Show performance stats",
                         "  /dv chunk repair - Queue all stuck chunks for repair",
                         "  /dv chunk unrepairable [list|clear|remove] - Manage unrepairable chunks",
-                        "  /dv chunk spawn <hours> - Set enemy spawn interval",
+                        "  /dv chunk spawn - Show mob spawn settings and subcommands",
                         "  /dv chunk drain <rate> - Set stability drain rate",
                         "  /dv chunk spread [on|off] - Toggle chunk spreading",
                         "  /dv chunk spreadchance <percent> - Set spread chance"
@@ -1476,81 +1626,6 @@ namespace SpreadingDevastation
         private string GenerateSourceId()
         {
             return (nextSourceId++).ToString();
-        }
-
-        private void RegenerateBlocks(float dt)
-        {
-            if (sapi == null || regrowingBlocks == null || regrowingBlocks.Count == 0)
-            {
-                return;
-            }
-
-            try
-            {
-                List<RegrowingBlocks> blocksToRemove = new List<RegrowingBlocks>();
-                double currentHours = sapi.World.Calendar.TotalHours;
-                
-                // Rate limit: only regenerate up to 50 blocks per tick to prevent lag spikes from time manipulation
-                int maxRegenPerTick = 50;
-                int regeneratedCount = 0;
-                
-                // Check each devastated block to see if it's time to regenerate
-                foreach (RegrowingBlocks regrowingBlock in regrowingBlocks)
-                {
-                    if (regeneratedCount >= maxRegenPerTick) break;
-                    
-                    // Skip blocks with invalid data
-                    if (regrowingBlock.Pos == null) 
-                    {
-                        blocksToRemove.Add(regrowingBlock);
-                        continue;
-                    }
-                    
-                    // Regenerate after configured hours
-                    // Also handle time going backwards gracefully (if LastTime > currentHours, reset it)
-                    double timeDiff = currentHours - regrowingBlock.LastTime;
-                    
-                    // If time went backwards significantly (e.g., time manipulation), update the LastTime
-                    if (timeDiff < -24.0) // More than a day backwards
-                    {
-                        regrowingBlock.LastTime = currentHours;
-                        continue;
-                    }
-                    
-                    if (timeDiff > config.RegenerationHours)
-                    {
-                        if (regrowingBlock.Out == "none")
-                        {
-                            // Replace with air
-                            sapi.World.BlockAccessor.SetBlock(0, regrowingBlock.Pos);
-                        }
-                        else
-                        {
-                            // Replace with the original block type
-                            Block block = sapi.World.GetBlock(new AssetLocation("game", regrowingBlock.Out));
-                            if (block != null && block.Id != 0)
-                            {
-                                sapi.World.BlockAccessor.SetBlock(block.Id, regrowingBlock.Pos);
-                            }
-                            // If block not found, still remove from list to prevent infinite loops
-                        }
-                        
-                        blocksToRemove.Add(regrowingBlock);
-                        regeneratedCount++;
-                    }
-                }
-
-                // Remove regenerated blocks from the tracking list
-                foreach (RegrowingBlocks item in blocksToRemove)
-                {
-                    regrowingBlocks.Remove(item);
-                }
-            }
-            catch (Exception ex)
-            {
-                // Log but don't crash the server
-                sapi.Logger.Error("SpreadingDevastation: Error in RegenerateBlocks: " + ex.Message);
-            }
         }
 
         private void SpreadDevastationFromRifts(float dt)
@@ -2873,36 +2948,73 @@ namespace SpreadingDevastation
 
         /// <summary>
         /// Attempts to spawn corrupted entities in a devastated chunk.
+        /// Spawns at a random interval, with cooldown, within configured distance of nearest player.
         /// </summary>
         private void TrySpawnCorruptedEntitiesInChunk(DevastatedChunk chunk, double currentTime)
         {
-            // Spawn at configured interval (default 0.5 game hours)
-            if (currentTime - chunk.LastSpawnTime < config.ChunkSpawnIntervalHours) return;
+            // Check cooldown first - if cooldown has passed, reset the mob counter
+            if (chunk.LastSpawnTime > 0)
+            {
+                double timeSinceLastSpawn = currentTime - chunk.LastSpawnTime;
+                if (timeSinceLastSpawn >= config.ChunkSpawnCooldownHours)
+                {
+                    // Cooldown passed - reset mob counter to allow new spawns
+                    chunk.MobsSpawned = 0;
+                }
+                else
+                {
+                    // Still in cooldown - no spawning allowed
+                    return;
+                }
+            }
 
-            // Only spawn if there are players nearby (within 3 chunks)
-            bool playerNearby = false;
+            // Check if we've hit the max mobs limit for this spawn cycle
+            if (chunk.MobsSpawned >= config.ChunkSpawnMaxMobsPerChunk) return;
+
+            // Check if we've reached the next scheduled spawn time
+            if (chunk.NextSpawnTime > 0 && currentTime < chunk.NextSpawnTime) return;
+
+            // Find the nearest player within spawn range
+            IServerPlayer nearestPlayer = null;
+            double nearestDistanceSq = double.MaxValue;
             int chunkCenterX = chunk.ChunkX * CHUNK_SIZE + CHUNK_SIZE / 2;
             int chunkCenterZ = chunk.ChunkZ * CHUNK_SIZE + CHUNK_SIZE / 2;
 
             foreach (IServerPlayer player in sapi.World.AllOnlinePlayers.Cast<IServerPlayer>())
             {
                 if (player.Entity == null) continue;
-                double distX = Math.Abs(player.Entity.Pos.X - chunkCenterX);
-                double distZ = Math.Abs(player.Entity.Pos.Z - chunkCenterZ);
-                if (distX < CHUNK_SIZE * 3 && distZ < CHUNK_SIZE * 3)
+                double distX = player.Entity.Pos.X - chunkCenterX;
+                double distZ = player.Entity.Pos.Z - chunkCenterZ;
+                double distSq = distX * distX + distZ * distZ;
+
+                // Player must be within max spawn distance of chunk center
+                if (distSq < config.ChunkSpawnMaxDistance * config.ChunkSpawnMaxDistance && distSq < nearestDistanceSq)
                 {
-                    playerNearby = true;
-                    break;
+                    nearestDistanceSq = distSq;
+                    nearestPlayer = player;
                 }
             }
 
-            if (!playerNearby) return;
+            if (nearestPlayer == null) return;
 
-            chunk.LastSpawnTime = currentTime;
-
-            // Find a valid spawn position in the chunk
-            BlockPos spawnPos = FindSpawnPositionInChunk(chunk);
+            // Find a valid spawn position near the player (within min-max distance)
+            BlockPos spawnPos = FindSpawnPositionNearPlayer(nearestPlayer, config.ChunkSpawnMinDistance, config.ChunkSpawnMaxDistance);
             if (spawnPos == null) return;
+
+            // Verify the spawn position is within a devastated chunk
+            int spawnChunkX = spawnPos.X / CHUNK_SIZE;
+            int spawnChunkZ = spawnPos.Z / CHUNK_SIZE;
+            long spawnChunkKey = DevastatedChunk.MakeChunkKey(spawnChunkX, spawnChunkZ);
+            if (!devastatedChunks.ContainsKey(spawnChunkKey)) return;
+
+            // Update spawn tracking
+            chunk.LastSpawnTime = currentTime;
+            chunk.MobsSpawned++;
+
+            // Schedule next spawn with random interval
+            double randomInterval = config.ChunkSpawnIntervalMinHours +
+                sapi.World.Rand.NextDouble() * (config.ChunkSpawnIntervalMaxHours - config.ChunkSpawnIntervalMinHours);
+            chunk.NextSpawnTime = currentTime + Math.Max(randomInterval, config.ChunkSpawnCooldownHours);
 
             // Randomly choose between corrupted drifter and corrupted locust
             string entityCode = sapi.World.Rand.NextDouble() < 0.7 ? "drifter-corrupt" : "locust-corrupt";
@@ -2928,7 +3040,45 @@ namespace SpreadingDevastation
         }
 
         /// <summary>
-        /// Finds a valid spawn position within a devastated chunk.
+        /// Finds a valid spawn position near a player within the specified distance range.
+        /// </summary>
+        private BlockPos FindSpawnPositionNearPlayer(IServerPlayer player, int minDistance, int maxDistance)
+        {
+            if (player?.Entity == null) return null;
+
+            double playerX = player.Entity.Pos.X;
+            double playerZ = player.Entity.Pos.Z;
+
+            // Try up to 20 random positions in the ring around the player
+            for (int attempt = 0; attempt < 20; attempt++)
+            {
+                // Generate random angle and distance within the ring
+                double angle = sapi.World.Rand.NextDouble() * 2 * Math.PI;
+                double distance = minDistance + sapi.World.Rand.NextDouble() * (maxDistance - minDistance);
+
+                int x = (int)(playerX + Math.Cos(angle) * distance);
+                int z = (int)(playerZ + Math.Sin(angle) * distance);
+
+                // Find the surface Y
+                int y = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(x, 0, z));
+                if (y <= 0) continue;
+
+                BlockPos pos = new BlockPos(x, y, z);
+                Block block = sapi.World.BlockAccessor.GetBlock(pos);
+                Block aboveBlock = sapi.World.BlockAccessor.GetBlock(pos.UpCopy());
+
+                // Need solid ground with air above
+                if (block != null && block.Id != 0 && aboveBlock != null && aboveBlock.Id == 0)
+                {
+                    return pos;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Finds a valid spawn position within a devastated chunk (legacy fallback).
         /// </summary>
         private BlockPos FindSpawnPositionInChunk(DevastatedChunk chunk)
         {
@@ -3736,29 +3886,6 @@ namespace SpreadingDevastation
             }
 
             return edgeFrontier;
-        }
-
-        /// <summary>
-        /// Helper to check if a block position is within a devastated chunk.
-        /// </summary>
-        private bool IsInDevastatedChunk(BlockPos pos)
-        {
-            int chunkX = pos.X / CHUNK_SIZE;
-            int chunkZ = pos.Z / CHUNK_SIZE;
-            long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
-            return devastatedChunks.ContainsKey(chunkKey);
-        }
-
-        /// <summary>
-        /// Gets the devastated chunk for a block position, or null if not devastated.
-        /// </summary>
-        private DevastatedChunk GetDevastatedChunkAt(BlockPos pos)
-        {
-            int chunkX = pos.X / CHUNK_SIZE;
-            int chunkZ = pos.Z / CHUNK_SIZE;
-            long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
-            devastatedChunks.TryGetValue(chunkKey, out DevastatedChunk chunk);
-            return chunk;
         }
 
         #endregion

@@ -6,8 +6,8 @@
     "authors": [
         "Soareverix"
     ],
-    "description": "Temporal rifts and manually marked blocks spread or heal devastation with customizable range and amount. Use /devastate add or /devastate heal to mark blocks. Devastated blocks slowly regenerate over time. Use /devastate remove all to clear all sources.",
-    "version": "1.0.0",
+    "description": "Manually marked blocks spread or heal devastation with customizable range and amount. Use /devastate add or /devastate heal to mark blocks. Use /devastate remove all to clear all sources.",
+    "version": "1.0.1",
     "dependencies": {
         "game": "1.21.5"
     }
