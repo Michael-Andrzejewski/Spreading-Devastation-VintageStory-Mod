@@ -118,6 +118,19 @@ namespace SpreadingDevastation
         /// Set to -1 to disable depth limiting.
         /// </summary>
         public int ChunkMaxDepthBelowSurface { get; set; } = 10;
+
+        /// <summary>
+        /// Maximum number of blocks that devastation can "bleed" past chunk edges into non-devastated chunks (default: 3).
+        /// This creates organic, uneven borders instead of straight lines along chunk boundaries.
+        /// Set to 0 to disable edge bleeding.
+        /// </summary>
+        public int ChunkEdgeBleedDepth { get; set; } = 3;
+
+        /// <summary>
+        /// Chance (0.0-1.0) for each edge block to bleed into the adjacent chunk (default: 0.3 = 30%).
+        /// Lower values create more sparse, irregular borders.
+        /// </summary>
+        public double ChunkEdgeBleedChance { get; set; } = 0.3;
     }
 
     public class SpreadingDevastationModSystem : ModSystem
@@ -233,10 +246,27 @@ namespace SpreadingDevastation
             [ProtoMember(9)]
             public bool FrontierInitialized = false; // Whether the frontier has been seeded with starting position
 
+            [ProtoMember(10)]
+            public List<BleedBlock> BleedFrontier = new List<BleedBlock>(); // Blocks bleeding into adjacent non-devastated chunks
+
             // Helper to get chunk key for dictionary lookup
             public long ChunkKey => ((long)ChunkX << 32) | (uint)ChunkZ;
 
             public static long MakeChunkKey(int chunkX, int chunkZ) => ((long)chunkX << 32) | (uint)chunkZ;
+        }
+
+        /// <summary>
+        /// Represents a block that has "bled" outside its source chunk into a non-devastated chunk.
+        /// These blocks have a limited infection budget and can only spread a few more times.
+        /// </summary>
+        [ProtoContract]
+        public class BleedBlock
+        {
+            [ProtoMember(1)]
+            public BlockPos Pos;
+
+            [ProtoMember(2)]
+            public int RemainingSpread; // How many more blocks this can infect (decrements with each spread)
         }
 
         private ICoreServerAPI sapi;
@@ -2688,11 +2718,23 @@ namespace SpreadingDevastation
                 {
                     chunk.DevastationFrontier.Add(newBlock);
                 }
+
+                // Check if this new block is at a chunk edge - if so, potentially start a bleed
+                if (config.ChunkEdgeBleedDepth > 0 && sapi.World.Rand.NextDouble() < config.ChunkEdgeBleedChance)
+                {
+                    TryStartEdgeBleed(chunk, newBlock, startX, startZ, endX, endZ);
+                }
             }
 
             foreach (var oldBlock in blocksToRemoveFromFrontier)
             {
                 chunk.DevastationFrontier.RemoveAll(p => p.X == oldBlock.X && p.Y == oldBlock.Y && p.Z == oldBlock.Z);
+            }
+
+            // Process bleed frontier - spread limited devastation into adjacent non-devastated chunks
+            if (chunk.BleedFrontier != null && chunk.BleedFrontier.Count > 0)
+            {
+                ProcessBleedFrontier(chunk);
             }
 
             // Prune frontier if it gets too large (keep blocks closer to center)
@@ -2714,6 +2756,232 @@ namespace SpreadingDevastation
             if (chunk.DevastationFrontier.Count == 0)
             {
                 chunk.IsFullyDevastated = true;
+            }
+        }
+
+        /// <summary>
+        /// Checks if a newly devastated block is at a chunk edge and starts a bleed into the adjacent chunk if so.
+        /// </summary>
+        private void TryStartEdgeBleed(DevastatedChunk chunk, BlockPos edgeBlock, int startX, int startZ, int endX, int endZ)
+        {
+            if (chunk.BleedFrontier == null)
+            {
+                chunk.BleedFrontier = new List<BleedBlock>();
+            }
+
+            // Check each horizontal cardinal direction to see if we're at an edge
+            // Only bleed horizontally (not up/down)
+            BlockPos[] horizontalOffsets = new BlockPos[]
+            {
+                new BlockPos(1, 0, 0),   // East
+                new BlockPos(-1, 0, 0),  // West
+                new BlockPos(0, 0, 1),   // South
+                new BlockPos(0, 0, -1)   // North
+            };
+
+            foreach (var offset in horizontalOffsets)
+            {
+                BlockPos adjacentPos = new BlockPos(
+                    edgeBlock.X + offset.X,
+                    edgeBlock.Y,
+                    edgeBlock.Z + offset.Z
+                );
+
+                // Check if the adjacent position is outside this chunk
+                if (adjacentPos.X >= startX && adjacentPos.X < endX &&
+                    adjacentPos.Z >= startZ && adjacentPos.Z < endZ)
+                {
+                    continue; // Still inside chunk, not an edge
+                }
+
+                // Check if the adjacent chunk is NOT devastated
+                int adjacentChunkX = adjacentPos.X / CHUNK_SIZE;
+                int adjacentChunkZ = adjacentPos.Z / CHUNK_SIZE;
+                // Handle negative coordinates
+                if (adjacentPos.X < 0) adjacentChunkX = (adjacentPos.X + 1) / CHUNK_SIZE - 1;
+                if (adjacentPos.Z < 0) adjacentChunkZ = (adjacentPos.Z + 1) / CHUNK_SIZE - 1;
+
+                long adjacentChunkKey = DevastatedChunk.MakeChunkKey(adjacentChunkX, adjacentChunkZ);
+
+                if (devastatedChunks.ContainsKey(adjacentChunkKey))
+                {
+                    continue; // Adjacent chunk is already devastated, no need to bleed
+                }
+
+                // Check if the adjacent block can be devastated
+                Block adjacentBlock = sapi.World.BlockAccessor.GetBlock(adjacentPos);
+                if (adjacentBlock == null || adjacentBlock.Id == 0 || IsAlreadyDevastated(adjacentBlock))
+                {
+                    continue;
+                }
+
+                if (!TryGetDevastatedForm(adjacentBlock, out string devastatedForm, out string regeneratesTo))
+                {
+                    continue;
+                }
+
+                // Check if we already have this position in the bleed frontier
+                if (chunk.BleedFrontier.Any(b => b.Pos.X == adjacentPos.X && b.Pos.Y == adjacentPos.Y && b.Pos.Z == adjacentPos.Z))
+                {
+                    continue;
+                }
+
+                // Devastate the adjacent block and add it to bleed frontier
+                Block newBlock = sapi.World.GetBlock(new AssetLocation("game", devastatedForm));
+                if (newBlock != null)
+                {
+                    sapi.World.BlockAccessor.SetBlock(newBlock.Id, adjacentPos);
+
+                    regrowingBlocks.Add(new RegrowingBlocks
+                    {
+                        Pos = adjacentPos.Copy(),
+                        Out = regeneratesTo,
+                        LastTime = sapi.World.Calendar.TotalHours
+                    });
+
+                    // Add to bleed frontier with remaining spread budget
+                    chunk.BleedFrontier.Add(new BleedBlock
+                    {
+                        Pos = adjacentPos.Copy(),
+                        RemainingSpread = config.ChunkEdgeBleedDepth - 1 // -1 because we just placed one
+                    });
+                }
+            }
+        }
+
+        /// <summary>
+        /// Processes the bleed frontier, spreading limited devastation into adjacent non-devastated chunks.
+        /// Each bleed block can only spread a limited number of times before stopping.
+        /// </summary>
+        private void ProcessBleedFrontier(DevastatedChunk chunk)
+        {
+            if (chunk.BleedFrontier == null || chunk.BleedFrontier.Count == 0) return;
+
+            // Process a limited number of bleed blocks per tick
+            int maxToProcess = Math.Max(1, (int)(3 * config.SpeedMultiplier));
+            int processed = 0;
+
+            List<BleedBlock> newBleedBlocks = new List<BleedBlock>();
+            List<BleedBlock> bleedBlocksToRemove = new List<BleedBlock>();
+
+            // Shuffle to avoid directional bias
+            var shuffledBleed = chunk.BleedFrontier.OrderBy(x => sapi.World.Rand.Next()).ToList();
+
+            foreach (var bleedBlock in shuffledBleed)
+            {
+                if (processed >= maxToProcess) break;
+
+                // If no remaining spread, mark for removal
+                if (bleedBlock.RemainingSpread <= 0)
+                {
+                    bleedBlocksToRemove.Add(bleedBlock);
+                    continue;
+                }
+
+                // Try to spread to an adjacent block (horizontal only for natural look)
+                BlockPos[] horizontalOffsets = new BlockPos[]
+                {
+                    new BlockPos(1, 0, 0),
+                    new BlockPos(-1, 0, 0),
+                    new BlockPos(0, 0, 1),
+                    new BlockPos(0, 0, -1),
+                    new BlockPos(0, 1, 0),  // Also allow up/down for terrain following
+                    new BlockPos(0, -1, 0)
+                };
+
+                var shuffledOffsets = horizontalOffsets.OrderBy(x => sapi.World.Rand.Next()).ToArray();
+                bool foundTarget = false;
+
+                foreach (var offset in shuffledOffsets)
+                {
+                    BlockPos targetPos = new BlockPos(
+                        bleedBlock.Pos.X + offset.X,
+                        bleedBlock.Pos.Y + offset.Y,
+                        bleedBlock.Pos.Z + offset.Z
+                    );
+
+                    // Check Y bounds
+                    if (targetPos.Y < 1) continue;
+                    if (targetPos.Y < config.MinYLevel) continue;
+
+                    // Check depth constraint
+                    if (config.RequireSourceAirContact && config.ChunkMaxDepthBelowSurface >= 0)
+                    {
+                        int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(targetPos);
+                        if (surfaceY > 0 && targetPos.Y < surfaceY - config.ChunkMaxDepthBelowSurface)
+                        {
+                            continue;
+                        }
+                    }
+
+                    // Bleed can spread anywhere - into non-devastated chunks OR back into the source chunk
+                    // This creates organic edges on both sides of chunk boundaries
+
+                    Block targetBlock = sapi.World.BlockAccessor.GetBlock(targetPos);
+                    if (targetBlock == null || targetBlock.Id == 0 || IsAlreadyDevastated(targetBlock))
+                    {
+                        continue;
+                    }
+
+                    if (!TryGetDevastatedForm(targetBlock, out string devastatedForm, out string regeneratesTo))
+                    {
+                        continue;
+                    }
+
+                    // Devastate the block
+                    Block newBlock = sapi.World.GetBlock(new AssetLocation("game", devastatedForm));
+                    if (newBlock != null)
+                    {
+                        sapi.World.BlockAccessor.SetBlock(newBlock.Id, targetPos);
+
+                        regrowingBlocks.Add(new RegrowingBlocks
+                        {
+                            Pos = targetPos.Copy(),
+                            Out = regeneratesTo,
+                            LastTime = sapi.World.Calendar.TotalHours
+                        });
+
+                        // Add new bleed block with decremented spread budget
+                        newBleedBlocks.Add(new BleedBlock
+                        {
+                            Pos = targetPos.Copy(),
+                            RemainingSpread = bleedBlock.RemainingSpread - 1
+                        });
+
+                        foundTarget = true;
+                        processed++;
+                        break;
+                    }
+                }
+
+                // If we couldn't spread anywhere, remove this bleed block
+                if (!foundTarget)
+                {
+                    bleedBlocksToRemove.Add(bleedBlock);
+                }
+            }
+
+            // Update bleed frontier
+            foreach (var newBleed in newBleedBlocks)
+            {
+                if (!chunk.BleedFrontier.Any(b => b.Pos.X == newBleed.Pos.X && b.Pos.Y == newBleed.Pos.Y && b.Pos.Z == newBleed.Pos.Z))
+                {
+                    chunk.BleedFrontier.Add(newBleed);
+                }
+            }
+
+            foreach (var oldBleed in bleedBlocksToRemove)
+            {
+                chunk.BleedFrontier.Remove(oldBleed);
+            }
+
+            // Prune bleed frontier if too large
+            if (chunk.BleedFrontier.Count > 200)
+            {
+                chunk.BleedFrontier = chunk.BleedFrontier
+                    .OrderByDescending(b => b.RemainingSpread)
+                    .Take(100)
+                    .ToList();
             }
         }
 
