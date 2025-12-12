@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(dotnet build:*)",
-      "Bash(dotnet --list-sdks:*)"
+      "Bash(dotnet --list-sdks:*)",
+      "WebSearch",
+      "WebFetch(domain:wiki.vintagestory.at)",
+      "WebFetch(domain:apidocs.vintagestory.at)"
     ]
   }
 }

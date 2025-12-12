@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Globalization;
 using System.Security.Cryptography;
@@ -282,6 +283,23 @@ namespace SpreadingDevastation
         private int cleanupTickCounter = 0; // Counter for periodic cleanup
         private const int CHUNK_SIZE = 32; // VS chunk size in blocks
         private double lastChunkSpreadCheckTime = 0; // Track last chunk spread check
+
+        // Performance monitoring and adaptive throttling
+        private Stopwatch perfStopwatch = new Stopwatch();
+        private Queue<double> chunkProcessingTimes = new Queue<double>(); // Rolling window of processing times (ms)
+        private Queue<double> tickDeltaTimes = new Queue<double>(); // Rolling window of actual tick intervals
+        private const int PERF_SAMPLE_SIZE = 20; // Number of samples to average
+        private double currentThrottleLevel = 1.0; // 1.0 = full speed, lower = throttled
+        private int skippedChunksThisTick = 0; // Counter for chunks skipped due to throttling
+        private double totalProcessingTimeMs = 0; // Total time spent in chunk processing this session
+        private int totalTicksProcessed = 0; // Total ticks processed this session
+        private double peakProcessingTimeMs = 0; // Peak single-tick processing time
+        private const double TARGET_TICK_BUDGET_MS = 15.0; // Target max ms per tick for chunk processing (500ms interval / ~30 = ~16ms budget)
+        private const double LAG_THRESHOLD_MS = 50.0; // If dt exceeds this, server is lagging
+
+        // Queued operations for deferred processing during lag
+        private Queue<DevastatedChunk> pendingChunkInitializations = new Queue<DevastatedChunk>(); // Chunks waiting for frontier initialization
+        private Queue<long> chunksNeedingRepair = new Queue<long>(); // Chunk keys that need repair (stuck chunks)
 
         public override void Start(ICoreAPI api)
         {
@@ -1049,13 +1067,69 @@ namespace SpreadingDevastation
                 foreach (var chunk in devastatedChunks.Values.Take(20))
                 {
                     string status = chunk.IsFullyDevastated ? "fully devastated" : $"{chunk.DevastationLevel:P0} devastated";
-                    lines.Add($"  ({chunk.ChunkX}, {chunk.ChunkZ}): {status}, {chunk.BlocksDevastated} blocks");
+                    int frontierCount = chunk.DevastationFrontier?.Count ?? 0;
+                    lines.Add($"  ({chunk.ChunkX}, {chunk.ChunkZ}): {status}, {chunk.BlocksDevastated} blocks, frontier: {frontierCount}");
                 }
                 if (devastatedChunks.Count > 20)
                 {
                     lines.Add($"  ... and {devastatedChunks.Count - 20} more");
                 }
                 return SendChatLines(args, lines, "Chunk list sent to chat");
+            }
+            else if (action == "perf" || action == "performance")
+            {
+                var stats = GetPerformanceStats();
+                int activeChunks = devastatedChunks.Values.Count(c => !c.IsFullyDevastated);
+                int stuckChunks = devastatedChunks.Values.Count(c => !c.IsFullyDevastated && c.FrontierInitialized && (c.DevastationFrontier == null || c.DevastationFrontier.Count == 0));
+
+                var lines = new List<string>
+                {
+                    "=== Chunk Devastation Performance ===",
+                    $"Throttle level: {stats.throttle:P0} ({(stats.throttle < 0.5 ? "THROTTLED" : stats.throttle < 1.0 ? "reduced" : "full speed")})",
+                    $"Avg processing time: {stats.avgTime:F2}ms (target: {TARGET_TICK_BUDGET_MS}ms)",
+                    $"Peak processing time: {stats.peakTime:F2}ms",
+                    $"Avg tick interval: {stats.avgDt:F0}ms (expected: 500ms)",
+                    $"Chunks skipped last tick: {stats.skipped}",
+                    "",
+                    $"Total chunks: {devastatedChunks.Count}",
+                    $"Active chunks: {activeChunks}",
+                    $"Fully devastated: {devastatedChunks.Count - activeChunks}",
+                    $"Stuck chunks detected: {stuckChunks}",
+                    $"Pending initializations: {pendingChunkInitializations.Count}",
+                    $"Chunks queued for repair: {chunksNeedingRepair.Count}",
+                    "",
+                    $"Total ticks processed: {totalTicksProcessed}",
+                    $"Total processing time: {totalProcessingTimeMs / 1000.0:F1}s"
+                };
+
+                return SendChatLines(args, lines, "Performance stats sent to chat");
+            }
+            else if (action == "repair")
+            {
+                // Force repair all stuck chunks
+                int stuckCount = 0;
+                foreach (var chunk in devastatedChunks.Values)
+                {
+                    if (!chunk.IsFullyDevastated &&
+                        (chunk.DevastationFrontier == null || chunk.DevastationFrontier.Count == 0))
+                    {
+                        long chunkKey = chunk.ChunkKey;
+                        if (!chunksNeedingRepair.Contains(chunkKey))
+                        {
+                            chunksNeedingRepair.Enqueue(chunkKey);
+                            stuckCount++;
+                        }
+                    }
+                }
+
+                if (stuckCount > 0)
+                {
+                    return TextCommandResult.Success($"Queued {stuckCount} stuck chunks for repair");
+                }
+                else
+                {
+                    return TextCommandResult.Success("No stuck chunks found");
+                }
             }
             else if (action == "remove")
             {
@@ -1107,6 +1181,8 @@ namespace SpreadingDevastation
                         "  /dv chunk - Mark looked-at chunk as devastated",
                         "  /dv chunk remove [all] - Remove devastation from chunk",
                         "  /dv chunk list - List all devastated chunks",
+                        "  /dv chunk perf - Show performance stats and throttle info",
+                        "  /dv chunk repair - Force repair all stuck chunks",
                         "  /dv chunk spawn <hours> - Set enemy spawn interval",
                         "  /dv chunk drain <rate> - Set stability drain rate",
                         "  /dv chunk spread [on|off] - Toggle chunk spreading",
@@ -2243,34 +2319,227 @@ namespace SpreadingDevastation
 
         /// <summary>
         /// Processes all devastated chunks - spawns corrupted entities and spreads devastation rapidly.
+        /// Includes adaptive throttling to maintain server performance.
         /// </summary>
         private void ProcessDevastatedChunks(float dt)
         {
-            if (isPaused || sapi == null || devastatedChunks == null || devastatedChunks.Count == 0) return;
+            if (isPaused || sapi == null || devastatedChunks == null) return;
+
+            perfStopwatch.Restart();
 
             try
             {
                 double currentTime = sapi.World.Calendar.TotalHours;
 
+                // Track delta time for lag detection (dt is in seconds, convert to ms)
+                double dtMs = dt * 1000.0;
+                tickDeltaTimes.Enqueue(dtMs);
+                if (tickDeltaTimes.Count > PERF_SAMPLE_SIZE)
+                    tickDeltaTimes.Dequeue();
+
+                // Update throttle level based on recent performance
+                UpdateThrottleLevel(dtMs);
+
+                // Process any pending chunk initializations (deferred from previous lag spikes)
+                ProcessPendingChunkInitializations();
+
+                // Process any chunks needing repair (stuck chunks detected)
+                ProcessChunksNeedingRepair();
+
+                // Early exit if no chunks
+                if (devastatedChunks.Count == 0) return;
+
                 // Drain temporal stability from players in devastated chunks
                 DrainPlayerTemporalStability(dt);
 
                 // Check for chunk spreading to nearby chunks
+                // Always allow spreading - it's inexpensive and essential for progression
                 TrySpreadToNearbyChunks(currentTime);
 
-                foreach (var chunk in devastatedChunks.Values.ToList()) // ToList() to allow modification during iteration
+                // Get list of chunks to process, sorted by priority
+                // Prioritize chunks that have started but aren't fully devastated
+                var chunksToProcess = devastatedChunks.Values
+                    .Where(c => !c.IsFullyDevastated && c.FrontierInitialized && c.DevastationFrontier?.Count > 0)
+                    .OrderByDescending(c => c.BlocksDevastated) // Process more developed chunks first
+                    .ToList();
+
+                // Check for stuck chunks (marked as devastated but no frontier and not fully devastated)
+                foreach (var chunk in devastatedChunks.Values)
                 {
+                    if (!chunk.IsFullyDevastated &&
+                        chunk.FrontierInitialized &&
+                        (chunk.DevastationFrontier == null || chunk.DevastationFrontier.Count == 0) &&
+                        chunk.BlocksDevastated < 100) // Likely stuck if few blocks devastated and no frontier
+                    {
+                        long chunkKey = chunk.ChunkKey;
+                        if (!chunksNeedingRepair.Contains(chunkKey))
+                        {
+                            chunksNeedingRepair.Enqueue(chunkKey);
+                            sapi.Logger.Warning($"SpreadingDevastation: Detected stuck chunk at ({chunk.ChunkX}, {chunk.ChunkZ}), queuing for repair");
+                        }
+                    }
+                }
+
+                // Add fully devastated chunks at the end (they still need entity spawning)
+                chunksToProcess.AddRange(devastatedChunks.Values.Where(c => c.IsFullyDevastated));
+
+                skippedChunksThisTick = 0;
+                int chunksProcessedThisTick = 0;
+                int maxChunksThisTick = CalculateMaxChunksForTick();
+
+                foreach (var chunk in chunksToProcess)
+                {
+                    // Check if we've exceeded our time budget
+                    if (perfStopwatch.Elapsed.TotalMilliseconds > TARGET_TICK_BUDGET_MS * currentThrottleLevel)
+                    {
+                        skippedChunksThisTick = chunksToProcess.Count - chunksProcessedThisTick;
+                        break;
+                    }
+
+                    // Apply probabilistic throttling for remaining chunks
+                    if (chunksProcessedThisTick >= maxChunksThisTick && sapi.World.Rand.NextDouble() > currentThrottleLevel)
+                    {
+                        skippedChunksThisTick++;
+                        continue;
+                    }
+
                     // Spawn corrupted entities periodically
                     TrySpawnCorruptedEntitiesInChunk(chunk, currentTime);
 
-                    // Rapidly spread devastation within the chunk
-                    SpreadDevastationInChunk(chunk);
+                    // Rapidly spread devastation within the chunk (skip if fully devastated)
+                    if (!chunk.IsFullyDevastated)
+                    {
+                        SpreadDevastationInChunk(chunk);
+                    }
+
+                    chunksProcessedThisTick++;
                 }
             }
             catch (Exception ex)
             {
                 sapi.Logger.Error($"SpreadingDevastation: Error processing devastated chunks: {ex.Message}");
             }
+            finally
+            {
+                perfStopwatch.Stop();
+                RecordTickPerformance(perfStopwatch.Elapsed.TotalMilliseconds);
+            }
+        }
+
+        /// <summary>
+        /// Processes pending chunk initializations that were deferred due to lag.
+        /// </summary>
+        private void ProcessPendingChunkInitializations()
+        {
+            // Process up to 2 pending initializations per tick
+            int processed = 0;
+            while (processed < 2 && pendingChunkInitializations.Count > 0)
+            {
+                var chunk = pendingChunkInitializations.Dequeue();
+                if (!chunk.FrontierInitialized)
+                {
+                    InitializeChunkFrontier(chunk);
+                    sapi.Logger.Debug($"SpreadingDevastation: Processed deferred initialization for chunk ({chunk.ChunkX}, {chunk.ChunkZ})");
+                }
+                processed++;
+            }
+        }
+
+        /// <summary>
+        /// Repairs chunks that were detected as stuck (no frontier, few blocks devastated).
+        /// </summary>
+        private void ProcessChunksNeedingRepair()
+        {
+            // Process up to 1 repair per tick
+            if (chunksNeedingRepair.Count == 0) return;
+
+            long chunkKey = chunksNeedingRepair.Dequeue();
+            if (!devastatedChunks.TryGetValue(chunkKey, out var chunk)) return;
+
+            // Skip if already fixed or fully devastated
+            if (chunk.IsFullyDevastated) return;
+            if (chunk.DevastationFrontier?.Count > 0) return;
+
+            // Re-initialize the frontier
+            chunk.FrontierInitialized = false;
+            InitializeChunkFrontier(chunk);
+
+            sapi.Logger.Notification($"SpreadingDevastation: Repaired stuck chunk at ({chunk.ChunkX}, {chunk.ChunkZ}), frontier now has {chunk.DevastationFrontier?.Count ?? 0} blocks");
+        }
+
+        /// <summary>
+        /// Updates the throttle level based on recent tick timing and processing performance.
+        /// </summary>
+        private void UpdateThrottleLevel(double currentDtMs)
+        {
+            // Calculate average processing time
+            double avgProcessingTime = chunkProcessingTimes.Count > 0 ? chunkProcessingTimes.Average() : 0;
+
+            // Calculate average delta time (how long between ticks - indicates server load)
+            // Expected interval is 500ms, so values significantly above that indicate server lag
+            double avgDeltaTime = tickDeltaTimes.Count > 0 ? tickDeltaTimes.Average() : 500;
+
+            // Check for server lag (dt much higher than expected 500ms interval)
+            // Note: currentDtMs is the actual interval since last tick in ms
+            // A healthy server should have ~500ms intervals; >700ms indicates lag
+            bool serverLagging = currentDtMs > 700 || avgDeltaTime > 700;
+
+            // Check if our processing is taking too long (more than our budget)
+            bool processingTooSlow = avgProcessingTime > TARGET_TICK_BUDGET_MS;
+
+            if (serverLagging || processingTooSlow)
+            {
+                // Throttle down - reduce by 5% but not below 0.2
+                currentThrottleLevel = Math.Max(0.2, currentThrottleLevel - 0.05);
+            }
+            else if (avgProcessingTime < TARGET_TICK_BUDGET_MS * 0.7 && avgDeltaTime < 600)
+            {
+                // Room to speed up - increase by 10% but not above 1.0
+                // Recover faster than we throttle down
+                currentThrottleLevel = Math.Min(1.0, currentThrottleLevel + 0.1);
+            }
+        }
+
+        /// <summary>
+        /// Calculates max chunks to process this tick based on throttle level.
+        /// </summary>
+        private int CalculateMaxChunksForTick()
+        {
+            int totalChunks = devastatedChunks.Count;
+            if (totalChunks == 0) return 0;
+
+            // At full throttle (1.0), process all chunks
+            // At minimum throttle (0.1), process at least 1 chunk
+            int maxChunks = Math.Max(1, (int)(totalChunks * currentThrottleLevel));
+
+            // Never process more than 50 chunks per tick regardless of throttle
+            return Math.Min(maxChunks, 50);
+        }
+
+        /// <summary>
+        /// Records performance metrics for this tick.
+        /// </summary>
+        private void RecordTickPerformance(double processingTimeMs)
+        {
+            chunkProcessingTimes.Enqueue(processingTimeMs);
+            if (chunkProcessingTimes.Count > PERF_SAMPLE_SIZE)
+                chunkProcessingTimes.Dequeue();
+
+            totalProcessingTimeMs += processingTimeMs;
+            totalTicksProcessed++;
+
+            if (processingTimeMs > peakProcessingTimeMs)
+                peakProcessingTimeMs = processingTimeMs;
+        }
+
+        /// <summary>
+        /// Gets current performance statistics for debugging.
+        /// </summary>
+        private (double avgTime, double peakTime, double throttle, int skipped, double avgDt) GetPerformanceStats()
+        {
+            double avgTime = chunkProcessingTimes.Count > 0 ? chunkProcessingTimes.Average() : 0;
+            double avgDt = tickDeltaTimes.Count > 0 ? tickDeltaTimes.Average() : 0;
+            return (avgTime, peakProcessingTimeMs, currentThrottleLevel, skippedChunksThisTick, avgDt);
         }
 
         /// <summary>
