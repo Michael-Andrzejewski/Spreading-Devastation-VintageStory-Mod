@@ -253,6 +253,21 @@ namespace SpreadingDevastation
             [ProtoMember(11)]
             public int FillInTickCounter = 0; // Counter for periodic fill-in passes to catch missed blocks
 
+            [ProtoMember(12)]
+            public int ConsecutiveEmptyFrontierChecks = 0; // How many consecutive ticks the frontier has been empty
+
+            [ProtoMember(13)]
+            public double LastRepairAttemptTime = 0; // Game time when last repair was attempted
+
+            [ProtoMember(14)]
+            public int RepairAttemptCount = 0; // Number of repair attempts since last progress
+
+            [ProtoMember(15)]
+            public int BlocksAtLastRepair = 0; // BlocksDevastated count at last repair attempt
+
+            [ProtoMember(16)]
+            public bool IsUnrepairable = false; // True if chunk has been abandoned after too many failed repairs
+
             // Helper to get chunk key for dictionary lookup
             public long ChunkKey => ((long)ChunkX << 32) | (uint)ChunkZ;
 
@@ -1153,10 +1168,13 @@ namespace SpreadingDevastation
                     $"Blocks devastated: {chunk.BlocksDevastated}",
                     $"Devastation level: {chunk.DevastationLevel:P1}",
                     $"IsFullyDevastated: {chunk.IsFullyDevastated}",
+                    $"IsUnrepairable: {chunk.IsUnrepairable}",
                     $"FrontierInitialized: {chunk.FrontierInitialized}",
                     $"Frontier count: {chunk.DevastationFrontier?.Count ?? 0}",
                     $"Bleed frontier count: {chunk.BleedFrontier?.Count ?? 0}",
                     $"FillInTickCounter: {chunk.FillInTickCounter}",
+                    $"ConsecutiveEmptyFrontierChecks: {chunk.ConsecutiveEmptyFrontierChecks}",
+                    $"RepairAttemptCount: {chunk.RepairAttemptCount}/5",
                     $"Marked time: {chunk.MarkedTime:F2} hours",
                     ""
                 };
@@ -1283,14 +1301,66 @@ namespace SpreadingDevastation
                     return TextCommandResult.Error($"Chunk at ({chunkX}, {chunkZ}) is not marked as devastated");
                 }
 
-                // Force re-initialize
+                // Force re-initialize and reset repair state
                 int oldFrontierCount = chunk.DevastationFrontier?.Count ?? 0;
                 chunk.FrontierInitialized = false;
                 chunk.IsFullyDevastated = false;
+                chunk.IsUnrepairable = false; // Reset unrepairable flag
+                chunk.RepairAttemptCount = 0;
+                chunk.ConsecutiveEmptyFrontierChecks = 0;
                 InitializeChunkFrontier(chunk);
 
                 int newFrontierCount = chunk.DevastationFrontier?.Count ?? 0;
-                return TextCommandResult.Success($"Fixed chunk ({chunkX}, {chunkZ}): frontier {oldFrontierCount} -> {newFrontierCount} blocks");
+                return TextCommandResult.Success($"Fixed chunk ({chunkX}, {chunkZ}): frontier {oldFrontierCount} -> {newFrontierCount} blocks (repair state reset)");
+            }
+            else if (action == "unrepairable")
+            {
+                // List or manage unrepairable chunks
+                if (value == "list" || string.IsNullOrEmpty(value))
+                {
+                    var unrepairableChunks = devastatedChunks.Values.Where(c => c.IsUnrepairable).ToList();
+                    if (unrepairableChunks.Count == 0)
+                    {
+                        return TextCommandResult.Success("No unrepairable chunks found");
+                    }
+
+                    var lines = new List<string> { $"=== Unrepairable Chunks ({unrepairableChunks.Count}) ===" };
+                    foreach (var chunk in unrepairableChunks.Take(20))
+                    {
+                        lines.Add($"  ({chunk.ChunkX}, {chunk.ChunkZ}): {chunk.BlocksDevastated} blocks, {chunk.RepairAttemptCount} repair attempts");
+                    }
+                    if (unrepairableChunks.Count > 20)
+                    {
+                        lines.Add($"  ... and {unrepairableChunks.Count - 20} more");
+                    }
+                    return SendChatLines(args, lines, "Unrepairable chunks list sent to chat");
+                }
+                else if (value == "clear")
+                {
+                    int count = 0;
+                    foreach (var chunk in devastatedChunks.Values.Where(c => c.IsUnrepairable))
+                    {
+                        chunk.IsUnrepairable = false;
+                        chunk.RepairAttemptCount = 0;
+                        chunk.ConsecutiveEmptyFrontierChecks = 0;
+                        count++;
+                    }
+                    return TextCommandResult.Success($"Reset {count} unrepairable chunks - they will be retried");
+                }
+                else if (value == "remove")
+                {
+                    int count = devastatedChunks.Values.Count(c => c.IsUnrepairable);
+                    var keysToRemove = devastatedChunks.Where(kvp => kvp.Value.IsUnrepairable).Select(kvp => kvp.Key).ToList();
+                    foreach (var key in keysToRemove)
+                    {
+                        devastatedChunks.Remove(key);
+                    }
+                    return TextCommandResult.Success($"Removed {count} unrepairable chunks from tracking");
+                }
+                else
+                {
+                    return TextCommandResult.Error("Usage: /dv chunk unrepairable [list|clear|remove]");
+                }
             }
             else if (action == "remove")
             {
@@ -1346,6 +1416,7 @@ namespace SpreadingDevastation
                         "  /dv chunk fix - Force re-initialize looked-at chunk",
                         "  /dv chunk perf - Show performance stats",
                         "  /dv chunk repair - Queue all stuck chunks for repair",
+                        "  /dv chunk unrepairable [list|clear|remove] - Manage unrepairable chunks",
                         "  /dv chunk spawn <hours> - Set enemy spawn interval",
                         "  /dv chunk drain <rate> - Set stability drain rate",
                         "  /dv chunk spread [on|off] - Toggle chunk spreading",
@@ -2408,6 +2479,49 @@ namespace SpreadingDevastation
                 devastatedBlock = "devastatedsoil-3";
                 regeneratesTo = "log-grown-aged-ud";
             }
+            // Forest floor becomes devastated soil (forestfloor0, forestfloor1, etc - no hyphen)
+            else if (path.StartsWith("forestfloor"))
+            {
+                devastatedBlock = "devastatedsoil-0";
+                regeneratesTo = "soil-verylow-none";
+            }
+            // Peat becomes devastated soil
+            else if (path.StartsWith("peat-"))
+            {
+                devastatedBlock = "devastatedsoil-0";
+                regeneratesTo = "peat-none";
+            }
+            // Muddy gravel becomes devastated soil
+            else if (path == "muddygravel")
+            {
+                devastatedBlock = "devastatedsoil-1";
+                regeneratesTo = "sludgygravel";
+            }
+            // Raw clay becomes devastated soil
+            else if (path.StartsWith("rawclay-"))
+            {
+                devastatedBlock = "devastatedsoil-0";
+                regeneratesTo = "rawclay-blue-none";
+            }
+            // Tall plants (cattails/cooper's reed, etc) become devastated briars/thorns
+            else if (path.StartsWith("tallplant-"))
+            {
+                devastatedBlock = "devgrowth-thorns";
+                regeneratesTo = "none";
+            }
+            // Water plants
+            else if (path.StartsWith("waterlily"))
+            {
+                devastatedBlock = "devgrowth-thorns";
+                regeneratesTo = "none";
+            }
+            // Loose stones, boulders, flints - skip these (they'll remain as-is, spreading passes through)
+            // Not converting them since they're decorative surface items
+            else if (path.StartsWith("looseboulders-") || path.StartsWith("looseflints-") ||
+                     path.StartsWith("loosestones-") || path.StartsWith("looseores-"))
+            {
+                // Return false - don't convert these blocks, spreading will pass through them
+            }
 
             return devastatedBlock != "";
         }
@@ -2520,17 +2634,35 @@ namespace SpreadingDevastation
                         SpreadDevastationInChunk(chunk);
                     }
 
-                    // Check for stuck chunks: has frontier initialized but empty, not fully devastated, few blocks done
+                    // Skip unrepairable chunks entirely
+                    if (chunk.IsUnrepairable) continue;
+
+                    // Track consecutive empty frontier checks
+                    bool frontierEmpty = chunk.DevastationFrontier == null || chunk.DevastationFrontier.Count == 0;
+                    if (frontierEmpty && chunk.FrontierInitialized && !chunk.IsFullyDevastated)
+                    {
+                        chunk.ConsecutiveEmptyFrontierChecks++;
+                    }
+                    else
+                    {
+                        chunk.ConsecutiveEmptyFrontierChecks = 0;
+                    }
+
+                    // Check for stuck chunks: need 3+ consecutive empty checks to avoid false positives
                     if (!chunk.IsFullyDevastated &&
                         chunk.FrontierInitialized &&
-                        (chunk.DevastationFrontier == null || chunk.DevastationFrontier.Count == 0) &&
+                        chunk.ConsecutiveEmptyFrontierChecks >= 3 &&
                         chunk.BlocksDevastated < 1000) // Must have < 1000 blocks to be considered stuck
                     {
+                        // Check repair cooldown (60 seconds real time, assuming ~1 tick per second)
+                        double timeSinceLastRepair = currentTime - chunk.LastRepairAttemptTime;
+                        if (timeSinceLastRepair < 0.01) continue; // ~36 seconds in game time at default speed
+
                         long chunkKey = chunk.ChunkKey;
                         if (!chunksNeedingRepair.Contains(chunkKey))
                         {
                             chunksNeedingRepair.Enqueue(chunkKey);
-                            sapi.Logger.Warning($"SpreadingDevastation: Detected stuck chunk at ({chunk.ChunkX}, {chunk.ChunkZ}) with {chunk.BlocksDevastated} blocks, queuing for repair");
+                            sapi.Logger.Warning($"SpreadingDevastation: Detected stuck chunk at ({chunk.ChunkX}, {chunk.ChunkZ}) with {chunk.BlocksDevastated} blocks (attempt {chunk.RepairAttemptCount + 1}), queuing for repair");
                         }
                     }
                 }
@@ -2557,15 +2689,46 @@ namespace SpreadingDevastation
             long chunkKey = chunksNeedingRepair.Dequeue();
             if (!devastatedChunks.TryGetValue(chunkKey, out var chunk)) return;
 
-            // Skip if already fixed or fully devastated
+            // Skip if already fixed, fully devastated, or marked unrepairable
             if (chunk.IsFullyDevastated) return;
+            if (chunk.IsUnrepairable) return;
             if (chunk.DevastationFrontier?.Count > 0) return;
+
+            double currentTime = sapi.World.Calendar.TotalHours;
+
+            // Check if this repair made progress since last attempt
+            bool madeProgress = chunk.BlocksDevastated > chunk.BlocksAtLastRepair;
+
+            if (madeProgress)
+            {
+                // Progress was made, reset the repair counter
+                chunk.RepairAttemptCount = 0;
+            }
+            else
+            {
+                // No progress, increment repair counter
+                chunk.RepairAttemptCount++;
+            }
+
+            // Check if we've exceeded max repair attempts without progress
+            if (chunk.RepairAttemptCount >= 5)
+            {
+                chunk.IsUnrepairable = true;
+                sapi.Logger.Warning($"SpreadingDevastation: Chunk at ({chunk.ChunkX}, {chunk.ChunkZ}) marked as unrepairable after {chunk.RepairAttemptCount} failed repair attempts (only {chunk.BlocksDevastated} blocks devastated)");
+                return;
+            }
+
+            // Record this repair attempt
+            chunk.LastRepairAttemptTime = currentTime;
+            chunk.BlocksAtLastRepair = chunk.BlocksDevastated;
+            chunk.ConsecutiveEmptyFrontierChecks = 0; // Reset so we don't immediately re-queue
 
             // Re-initialize the frontier
             chunk.FrontierInitialized = false;
             InitializeChunkFrontier(chunk);
 
-            sapi.Logger.Notification($"SpreadingDevastation: Repaired stuck chunk at ({chunk.ChunkX}, {chunk.ChunkZ}), frontier now has {chunk.DevastationFrontier?.Count ?? 0} blocks");
+            int newFrontierCount = chunk.DevastationFrontier?.Count ?? 0;
+            sapi.Logger.Notification($"SpreadingDevastation: Repaired stuck chunk at ({chunk.ChunkX}, {chunk.ChunkZ}), frontier now has {newFrontierCount} blocks (attempt {chunk.RepairAttemptCount}/5)");
         }
 
         /// <summary>
@@ -2987,6 +3150,11 @@ namespace SpreadingDevastation
                             foundCandidate = true;
 
                             break; // Move to next attempt
+                        }
+                        else
+                        {
+                            // Log missing block for debugging
+                            sapi.Logger.Warning($"SpreadingDevastation: Could not find devastated block '{devastatedBlock}' for source block '{block.Code.Path}'");
                         }
                     }
                 }
