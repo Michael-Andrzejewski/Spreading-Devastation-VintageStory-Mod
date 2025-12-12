@@ -284,21 +284,16 @@ namespace SpreadingDevastation
         private const int CHUNK_SIZE = 32; // VS chunk size in blocks
         private double lastChunkSpreadCheckTime = 0; // Track last chunk spread check
 
-        // Performance monitoring and adaptive throttling
+        // Performance monitoring
         private Stopwatch perfStopwatch = new Stopwatch();
         private Queue<double> chunkProcessingTimes = new Queue<double>(); // Rolling window of processing times (ms)
         private Queue<double> tickDeltaTimes = new Queue<double>(); // Rolling window of actual tick intervals
         private const int PERF_SAMPLE_SIZE = 20; // Number of samples to average
-        private double currentThrottleLevel = 1.0; // 1.0 = full speed, lower = throttled
-        private int skippedChunksThisTick = 0; // Counter for chunks skipped due to throttling
         private double totalProcessingTimeMs = 0; // Total time spent in chunk processing this session
         private int totalTicksProcessed = 0; // Total ticks processed this session
         private double peakProcessingTimeMs = 0; // Peak single-tick processing time
-        private const double TARGET_TICK_BUDGET_MS = 15.0; // Target max ms per tick for chunk processing (500ms interval / ~30 = ~16ms budget)
-        private const double LAG_THRESHOLD_MS = 50.0; // If dt exceeds this, server is lagging
 
-        // Queued operations for deferred processing during lag
-        private Queue<DevastatedChunk> pendingChunkInitializations = new Queue<DevastatedChunk>(); // Chunks waiting for frontier initialization
+        // Stuck chunk repair queue
         private Queue<long> chunksNeedingRepair = new Queue<long>(); // Chunk keys that need repair (stuck chunks)
 
         public override void Start(ICoreAPI api)
@@ -1080,22 +1075,19 @@ namespace SpreadingDevastation
             {
                 var stats = GetPerformanceStats();
                 int activeChunks = devastatedChunks.Values.Count(c => !c.IsFullyDevastated);
-                int stuckChunks = devastatedChunks.Values.Count(c => !c.IsFullyDevastated && c.FrontierInitialized && (c.DevastationFrontier == null || c.DevastationFrontier.Count == 0));
+                int stuckChunks = devastatedChunks.Values.Count(c => !c.IsFullyDevastated && c.FrontierInitialized && (c.DevastationFrontier == null || c.DevastationFrontier.Count == 0) && c.BlocksDevastated < 1000);
 
                 var lines = new List<string>
                 {
                     "=== Chunk Devastation Performance ===",
-                    $"Throttle level: {stats.throttle:P0} ({(stats.throttle < 0.5 ? "THROTTLED" : stats.throttle < 1.0 ? "reduced" : "full speed")})",
-                    $"Avg processing time: {stats.avgTime:F2}ms (target: {TARGET_TICK_BUDGET_MS}ms)",
+                    $"Avg processing time: {stats.avgTime:F2}ms per tick",
                     $"Peak processing time: {stats.peakTime:F2}ms",
                     $"Avg tick interval: {stats.avgDt:F0}ms (expected: 500ms)",
-                    $"Chunks skipped last tick: {stats.skipped}",
                     "",
                     $"Total chunks: {devastatedChunks.Count}",
                     $"Active chunks: {activeChunks}",
                     $"Fully devastated: {devastatedChunks.Count - activeChunks}",
                     $"Stuck chunks detected: {stuckChunks}",
-                    $"Pending initializations: {pendingChunkInitializations.Count}",
                     $"Chunks queued for repair: {chunksNeedingRepair.Count}",
                     "",
                     $"Total ticks processed: {totalTicksProcessed}",
@@ -1130,6 +1122,175 @@ namespace SpreadingDevastation
                 {
                     return TextCommandResult.Success("No stuck chunks found");
                 }
+            }
+            else if (action == "analyze")
+            {
+                // Analyze a specific chunk the player is looking at
+                IServerPlayer player = args.Caller.Player as IServerPlayer;
+                if (player == null) return TextCommandResult.Error("This command must be run by a player");
+
+                BlockSelection blockSel = player.CurrentBlockSelection;
+                if (blockSel == null)
+                {
+                    return TextCommandResult.Error("Look at a block to analyze its chunk");
+                }
+
+                BlockPos pos = blockSel.Position;
+                int chunkX = pos.X / CHUNK_SIZE;
+                int chunkZ = pos.Z / CHUNK_SIZE;
+                long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
+
+                if (!devastatedChunks.TryGetValue(chunkKey, out var chunk))
+                {
+                    return TextCommandResult.Error($"Chunk at ({chunkX}, {chunkZ}) is not marked as devastated");
+                }
+
+                // Gather detailed diagnostic info
+                var lines = new List<string>
+                {
+                    $"=== Chunk Analysis: ({chunkX}, {chunkZ}) ===",
+                    $"Chunk key: {chunkKey}",
+                    $"Blocks devastated: {chunk.BlocksDevastated}",
+                    $"Devastation level: {chunk.DevastationLevel:P1}",
+                    $"IsFullyDevastated: {chunk.IsFullyDevastated}",
+                    $"FrontierInitialized: {chunk.FrontierInitialized}",
+                    $"Frontier count: {chunk.DevastationFrontier?.Count ?? 0}",
+                    $"Bleed frontier count: {chunk.BleedFrontier?.Count ?? 0}",
+                    $"FillInTickCounter: {chunk.FillInTickCounter}",
+                    $"Marked time: {chunk.MarkedTime:F2} hours",
+                    ""
+                };
+
+                // Check frontier blocks validity
+                if (chunk.DevastationFrontier != null && chunk.DevastationFrontier.Count > 0)
+                {
+                    lines.Add($"First 5 frontier blocks:");
+                    int shown = 0;
+                    foreach (var frontierPos in chunk.DevastationFrontier.Take(5))
+                    {
+                        Block block = sapi.World.BlockAccessor.GetBlock(frontierPos);
+                        string blockName = block?.Code?.ToString() ?? "null";
+                        bool isDevastated = block != null && IsAlreadyDevastated(block);
+                        lines.Add($"  {frontierPos}: {blockName} (devastated: {isDevastated})");
+                        shown++;
+                    }
+                }
+                else
+                {
+                    lines.Add("Frontier is EMPTY - this chunk cannot spread!");
+                }
+
+                // Scan chunk for actual devastated blocks
+                int startX = chunkX * CHUNK_SIZE;
+                int startZ = chunkZ * CHUNK_SIZE;
+                int devastatedBlocksFound = 0;
+                int convertibleBlocksFound = 0;
+                BlockPos sampleDevastatedPos = null;
+
+                for (int dx = 0; dx < CHUNK_SIZE && devastatedBlocksFound < 100; dx += 4)
+                {
+                    for (int dz = 0; dz < CHUNK_SIZE && devastatedBlocksFound < 100; dz += 4)
+                    {
+                        int x = startX + dx;
+                        int z = startZ + dz;
+                        int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(x, 0, z));
+                        if (surfaceY <= 0) continue;
+
+                        for (int yOff = -3; yOff <= 3; yOff++)
+                        {
+                            BlockPos checkPos = new BlockPos(x, surfaceY + yOff, z);
+                            Block block = sapi.World.BlockAccessor.GetBlock(checkPos);
+                            if (block == null || block.Id == 0) continue;
+
+                            if (IsAlreadyDevastated(block))
+                            {
+                                devastatedBlocksFound++;
+                                if (sampleDevastatedPos == null) sampleDevastatedPos = checkPos.Copy();
+                            }
+                            else if (TryGetDevastatedForm(block, out _, out _))
+                            {
+                                convertibleBlocksFound++;
+                            }
+                        }
+                    }
+                }
+
+                lines.Add("");
+                lines.Add($"Chunk scan (sampled every 4 blocks):");
+                lines.Add($"  Devastated blocks found: {devastatedBlocksFound}");
+                lines.Add($"  Convertible blocks found: {convertibleBlocksFound}");
+                if (sampleDevastatedPos != null)
+                {
+                    lines.Add($"  Sample devastated at: {sampleDevastatedPos}");
+                }
+
+                // Diagnose the problem
+                lines.Add("");
+                lines.Add("Diagnosis:");
+                if (chunk.IsFullyDevastated)
+                {
+                    lines.Add("  Chunk is marked fully devastated - no more spreading needed");
+                }
+                else if (chunk.DevastationFrontier == null || chunk.DevastationFrontier.Count == 0)
+                {
+                    if (devastatedBlocksFound == 0)
+                    {
+                        lines.Add("  PROBLEM: No frontier AND no devastated blocks found!");
+                        lines.Add("  This chunk was likely created but never initialized properly.");
+                    }
+                    else if (convertibleBlocksFound == 0)
+                    {
+                        lines.Add("  Frontier empty but no convertible blocks - chunk may be done");
+                    }
+                    else
+                    {
+                        lines.Add("  PROBLEM: Has devastated blocks but empty frontier!");
+                        lines.Add("  Use '/dv chunk repair' to fix, or '/dv chunk fix' on this chunk");
+                    }
+                }
+                else
+                {
+                    lines.Add("  Chunk appears healthy - frontier has blocks to spread from");
+                }
+
+                // Check if queued for repair
+                if (chunksNeedingRepair.Contains(chunkKey))
+                {
+                    lines.Add("  Note: This chunk is queued for repair");
+                }
+
+                return SendChatLines(args, lines, "Chunk analysis sent to chat");
+            }
+            else if (action == "fix")
+            {
+                // Force fix the specific chunk the player is looking at
+                IServerPlayer player = args.Caller.Player as IServerPlayer;
+                if (player == null) return TextCommandResult.Error("This command must be run by a player");
+
+                BlockSelection blockSel = player.CurrentBlockSelection;
+                if (blockSel == null)
+                {
+                    return TextCommandResult.Error("Look at a block to fix its chunk");
+                }
+
+                BlockPos pos = blockSel.Position;
+                int chunkX = pos.X / CHUNK_SIZE;
+                int chunkZ = pos.Z / CHUNK_SIZE;
+                long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
+
+                if (!devastatedChunks.TryGetValue(chunkKey, out var chunk))
+                {
+                    return TextCommandResult.Error($"Chunk at ({chunkX}, {chunkZ}) is not marked as devastated");
+                }
+
+                // Force re-initialize
+                int oldFrontierCount = chunk.DevastationFrontier?.Count ?? 0;
+                chunk.FrontierInitialized = false;
+                chunk.IsFullyDevastated = false;
+                InitializeChunkFrontier(chunk);
+
+                int newFrontierCount = chunk.DevastationFrontier?.Count ?? 0;
+                return TextCommandResult.Success($"Fixed chunk ({chunkX}, {chunkZ}): frontier {oldFrontierCount} -> {newFrontierCount} blocks");
             }
             else if (action == "remove")
             {
@@ -1181,8 +1342,10 @@ namespace SpreadingDevastation
                         "  /dv chunk - Mark looked-at chunk as devastated",
                         "  /dv chunk remove [all] - Remove devastation from chunk",
                         "  /dv chunk list - List all devastated chunks",
-                        "  /dv chunk perf - Show performance stats and throttle info",
-                        "  /dv chunk repair - Force repair all stuck chunks",
+                        "  /dv chunk analyze - Detailed diagnostics for looked-at chunk",
+                        "  /dv chunk fix - Force re-initialize looked-at chunk",
+                        "  /dv chunk perf - Show performance stats",
+                        "  /dv chunk repair - Queue all stuck chunks for repair",
                         "  /dv chunk spawn <hours> - Set enemy spawn interval",
                         "  /dv chunk drain <rate> - Set stability drain rate",
                         "  /dv chunk spread [on|off] - Toggle chunk spreading",
@@ -2319,11 +2482,11 @@ namespace SpreadingDevastation
 
         /// <summary>
         /// Processes all devastated chunks - spawns corrupted entities and spreads devastation rapidly.
-        /// Includes adaptive throttling to maintain server performance.
+        /// Includes performance monitoring and stuck chunk detection/repair.
         /// </summary>
         private void ProcessDevastatedChunks(float dt)
         {
-            if (isPaused || sapi == null || devastatedChunks == null) return;
+            if (isPaused || sapi == null || devastatedChunks == null || devastatedChunks.Count == 0) return;
 
             perfStopwatch.Restart();
 
@@ -2331,88 +2494,45 @@ namespace SpreadingDevastation
             {
                 double currentTime = sapi.World.Calendar.TotalHours;
 
-                // Track delta time for lag detection (dt is in seconds, convert to ms)
+                // Track delta time for performance monitoring (dt is in seconds, convert to ms)
                 double dtMs = dt * 1000.0;
                 tickDeltaTimes.Enqueue(dtMs);
                 if (tickDeltaTimes.Count > PERF_SAMPLE_SIZE)
                     tickDeltaTimes.Dequeue();
 
-                // Update throttle level based on recent performance
-                UpdateThrottleLevel(dtMs);
-
-                // Process any pending chunk initializations (deferred from previous lag spikes)
-                ProcessPendingChunkInitializations();
-
                 // Process any chunks needing repair (stuck chunks detected)
                 ProcessChunksNeedingRepair();
-
-                // Early exit if no chunks
-                if (devastatedChunks.Count == 0) return;
 
                 // Drain temporal stability from players in devastated chunks
                 DrainPlayerTemporalStability(dt);
 
                 // Check for chunk spreading to nearby chunks
-                // Always allow spreading - it's inexpensive and essential for progression
                 TrySpreadToNearbyChunks(currentTime);
 
-                // Get list of chunks to process, sorted by priority
-                // Prioritize chunks that have started but aren't fully devastated
-                var chunksToProcess = devastatedChunks.Values
-                    .Where(c => !c.IsFullyDevastated && c.FrontierInitialized && c.DevastationFrontier?.Count > 0)
-                    .OrderByDescending(c => c.BlocksDevastated) // Process more developed chunks first
-                    .ToList();
-
-                // Check for stuck chunks (marked as devastated but no frontier and not fully devastated)
-                foreach (var chunk in devastatedChunks.Values)
+                foreach (var chunk in devastatedChunks.Values.ToList()) // ToList() to allow modification during iteration
                 {
-                    if (!chunk.IsFullyDevastated &&
-                        chunk.FrontierInitialized &&
-                        (chunk.DevastationFrontier == null || chunk.DevastationFrontier.Count == 0) &&
-                        chunk.BlocksDevastated < 100) // Likely stuck if few blocks devastated and no frontier
-                    {
-                        long chunkKey = chunk.ChunkKey;
-                        if (!chunksNeedingRepair.Contains(chunkKey))
-                        {
-                            chunksNeedingRepair.Enqueue(chunkKey);
-                            sapi.Logger.Warning($"SpreadingDevastation: Detected stuck chunk at ({chunk.ChunkX}, {chunk.ChunkZ}), queuing for repair");
-                        }
-                    }
-                }
-
-                // Add fully devastated chunks at the end (they still need entity spawning)
-                chunksToProcess.AddRange(devastatedChunks.Values.Where(c => c.IsFullyDevastated));
-
-                skippedChunksThisTick = 0;
-                int chunksProcessedThisTick = 0;
-                int maxChunksThisTick = CalculateMaxChunksForTick();
-
-                foreach (var chunk in chunksToProcess)
-                {
-                    // Check if we've exceeded our time budget
-                    if (perfStopwatch.Elapsed.TotalMilliseconds > TARGET_TICK_BUDGET_MS * currentThrottleLevel)
-                    {
-                        skippedChunksThisTick = chunksToProcess.Count - chunksProcessedThisTick;
-                        break;
-                    }
-
-                    // Apply probabilistic throttling for remaining chunks
-                    if (chunksProcessedThisTick >= maxChunksThisTick && sapi.World.Rand.NextDouble() > currentThrottleLevel)
-                    {
-                        skippedChunksThisTick++;
-                        continue;
-                    }
-
                     // Spawn corrupted entities periodically
                     TrySpawnCorruptedEntitiesInChunk(chunk, currentTime);
 
-                    // Rapidly spread devastation within the chunk (skip if fully devastated)
+                    // Rapidly spread devastation within the chunk
                     if (!chunk.IsFullyDevastated)
                     {
                         SpreadDevastationInChunk(chunk);
                     }
 
-                    chunksProcessedThisTick++;
+                    // Check for stuck chunks: has frontier initialized but empty, not fully devastated, few blocks done
+                    if (!chunk.IsFullyDevastated &&
+                        chunk.FrontierInitialized &&
+                        (chunk.DevastationFrontier == null || chunk.DevastationFrontier.Count == 0) &&
+                        chunk.BlocksDevastated < 1000) // Must have < 1000 blocks to be considered stuck
+                    {
+                        long chunkKey = chunk.ChunkKey;
+                        if (!chunksNeedingRepair.Contains(chunkKey))
+                        {
+                            chunksNeedingRepair.Enqueue(chunkKey);
+                            sapi.Logger.Warning($"SpreadingDevastation: Detected stuck chunk at ({chunk.ChunkX}, {chunk.ChunkZ}) with {chunk.BlocksDevastated} blocks, queuing for repair");
+                        }
+                    }
                 }
             }
             catch (Exception ex)
@@ -2423,25 +2543,6 @@ namespace SpreadingDevastation
             {
                 perfStopwatch.Stop();
                 RecordTickPerformance(perfStopwatch.Elapsed.TotalMilliseconds);
-            }
-        }
-
-        /// <summary>
-        /// Processes pending chunk initializations that were deferred due to lag.
-        /// </summary>
-        private void ProcessPendingChunkInitializations()
-        {
-            // Process up to 2 pending initializations per tick
-            int processed = 0;
-            while (processed < 2 && pendingChunkInitializations.Count > 0)
-            {
-                var chunk = pendingChunkInitializations.Dequeue();
-                if (!chunk.FrontierInitialized)
-                {
-                    InitializeChunkFrontier(chunk);
-                    sapi.Logger.Debug($"SpreadingDevastation: Processed deferred initialization for chunk ({chunk.ChunkX}, {chunk.ChunkZ})");
-                }
-                processed++;
             }
         }
 
@@ -2468,55 +2569,6 @@ namespace SpreadingDevastation
         }
 
         /// <summary>
-        /// Updates the throttle level based on recent tick timing and processing performance.
-        /// </summary>
-        private void UpdateThrottleLevel(double currentDtMs)
-        {
-            // Calculate average processing time
-            double avgProcessingTime = chunkProcessingTimes.Count > 0 ? chunkProcessingTimes.Average() : 0;
-
-            // Calculate average delta time (how long between ticks - indicates server load)
-            // Expected interval is 500ms, so values significantly above that indicate server lag
-            double avgDeltaTime = tickDeltaTimes.Count > 0 ? tickDeltaTimes.Average() : 500;
-
-            // Check for server lag (dt much higher than expected 500ms interval)
-            // Note: currentDtMs is the actual interval since last tick in ms
-            // A healthy server should have ~500ms intervals; >700ms indicates lag
-            bool serverLagging = currentDtMs > 700 || avgDeltaTime > 700;
-
-            // Check if our processing is taking too long (more than our budget)
-            bool processingTooSlow = avgProcessingTime > TARGET_TICK_BUDGET_MS;
-
-            if (serverLagging || processingTooSlow)
-            {
-                // Throttle down - reduce by 5% but not below 0.2
-                currentThrottleLevel = Math.Max(0.2, currentThrottleLevel - 0.05);
-            }
-            else if (avgProcessingTime < TARGET_TICK_BUDGET_MS * 0.7 && avgDeltaTime < 600)
-            {
-                // Room to speed up - increase by 10% but not above 1.0
-                // Recover faster than we throttle down
-                currentThrottleLevel = Math.Min(1.0, currentThrottleLevel + 0.1);
-            }
-        }
-
-        /// <summary>
-        /// Calculates max chunks to process this tick based on throttle level.
-        /// </summary>
-        private int CalculateMaxChunksForTick()
-        {
-            int totalChunks = devastatedChunks.Count;
-            if (totalChunks == 0) return 0;
-
-            // At full throttle (1.0), process all chunks
-            // At minimum throttle (0.1), process at least 1 chunk
-            int maxChunks = Math.Max(1, (int)(totalChunks * currentThrottleLevel));
-
-            // Never process more than 50 chunks per tick regardless of throttle
-            return Math.Min(maxChunks, 50);
-        }
-
-        /// <summary>
         /// Records performance metrics for this tick.
         /// </summary>
         private void RecordTickPerformance(double processingTimeMs)
@@ -2539,7 +2591,7 @@ namespace SpreadingDevastation
         {
             double avgTime = chunkProcessingTimes.Count > 0 ? chunkProcessingTimes.Average() : 0;
             double avgDt = tickDeltaTimes.Count > 0 ? tickDeltaTimes.Average() : 0;
-            return (avgTime, peakProcessingTimeMs, currentThrottleLevel, skippedChunksThisTick, avgDt);
+            return (avgTime, peakProcessingTimeMs, 1.0, 0, avgDt); // No throttling, return fixed values
         }
 
         /// <summary>
@@ -2828,10 +2880,17 @@ namespace SpreadingDevastation
                 InitializeChunkFrontier(chunk);
             }
 
-            // If frontier is empty after initialization, chunk is fully devastated
+            // If frontier is empty after initialization, check if chunk is actually done
+            // Don't mark as fully devastated unless we've actually devastated a significant number of blocks
             if (chunk.DevastationFrontier.Count == 0)
             {
-                chunk.IsFullyDevastated = true;
+                if (chunk.BlocksDevastated >= 1000) // Reasonable minimum for a "fully devastated" chunk
+                {
+                    chunk.IsFullyDevastated = true;
+                    return;
+                }
+                // Frontier is empty but chunk isn't done - this is a stuck chunk, don't process further this tick
+                // The stuck chunk detection will pick it up and repair it
                 return;
             }
 
@@ -3043,8 +3102,8 @@ namespace SpreadingDevastation
             // Rough estimate: a chunk surface area is 32x32 = 1024 blocks, times ~10 depth = ~10000 convertible blocks
             chunk.DevastationLevel = Math.Min(1.0, chunk.BlocksDevastated / 5000.0);
 
-            // Mark as fully devastated if frontier is empty
-            if (chunk.DevastationFrontier.Count == 0)
+            // Mark as fully devastated if frontier is empty AND we've devastated enough blocks
+            if (chunk.DevastationFrontier.Count == 0 && chunk.BlocksDevastated >= 1000)
             {
                 chunk.IsFullyDevastated = true;
             }
