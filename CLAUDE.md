@@ -5,11 +5,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build Commands
 
 ```bash
-# Build the mod (requires VINTAGE_STORY environment variable or edit .csproj paths)
+# Build the mod from the project directory
+cd "Spreading Devastation"
 dotnet build
 
-# The build automatically packages into SpreadingDevastation.zip in bin/Debug/net8.0/ or bin/Release/net8.0/
+# The build automatically:
+# 1. Packages into SpreadingDevastation.zip in bin/Debug/net8.0/ or bin/Release/net8.0/
+# 2. Deploys to C:\Users\maaro\AppData\Roaming\VintagestoryData\Mods\
 ```
+
+**IMPORTANT**: After any code changes, always run `dotnet build` from the `Spreading Devastation` directory. The build will automatically deploy the mod to the Vintage Story mods folder, replacing any previous version.
 
 Note: The .csproj references Vintage Story DLLs at hardcoded paths (`C:\Users\maaro\AppData\Roaming\Vintagestory\`). You may need to update these paths or set up proper environment variables.
 

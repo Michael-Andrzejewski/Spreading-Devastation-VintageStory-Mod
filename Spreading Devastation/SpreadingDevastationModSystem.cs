@@ -111,6 +111,13 @@ namespace SpreadingDevastation
         /// Base interval in seconds between chunk spread checks (default: 60). Affected by SpeedMultiplier.
         /// </summary>
         public double ChunkSpreadIntervalSeconds { get; set; } = 60.0;
+
+        /// <summary>
+        /// Maximum depth below surface that chunk devastation can spread (default: 10).
+        /// Only applies when RequireSourceAirContact is true.
+        /// Set to -1 to disable depth limiting.
+        /// </summary>
+        public int ChunkMaxDepthBelowSurface { get; set; } = 10;
     }
 
     public class SpreadingDevastationModSystem : ModSystem
@@ -219,6 +226,12 @@ namespace SpreadingDevastation
 
             [ProtoMember(7)]
             public int BlocksDevastated = 0; // Count of blocks devastated in this chunk
+
+            [ProtoMember(8)]
+            public List<BlockPos> DevastationFrontier = new List<BlockPos>(); // Blocks at the frontier for cardinal spreading
+
+            [ProtoMember(9)]
+            public bool FrontierInitialized = false; // Whether the frontier has been seeded with starting position
 
             // Helper to get chunk key for dictionary lookup
             public long ChunkKey => ((long)ChunkX << 32) | (uint)ChunkZ;
@@ -1068,7 +1081,7 @@ namespace SpreadingDevastation
                     }, "Chunk help sent to chat");
                 }
 
-                BlockPos pos = blockSel.Position;
+                BlockPos pos = blockSel.Position.Copy();
                 int chunkX = pos.X / CHUNK_SIZE;
                 int chunkZ = pos.Z / CHUNK_SIZE;
                 long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
@@ -1084,11 +1097,34 @@ namespace SpreadingDevastation
                     ChunkZ = chunkZ,
                     MarkedTime = sapi.World.Calendar.TotalHours,
                     DevastationLevel = 0.0,
-                    IsFullyDevastated = false
+                    IsFullyDevastated = false,
+                    FrontierInitialized = true,
+                    DevastationFrontier = new List<BlockPos> { pos }
                 };
 
+                // Devastate the starting block immediately
+                Block startBlock = sapi.World.BlockAccessor.GetBlock(pos);
+                if (startBlock != null && startBlock.Id != 0 && !IsAlreadyDevastated(startBlock))
+                {
+                    if (TryGetDevastatedForm(startBlock, out string devastatedBlock, out string regeneratesTo))
+                    {
+                        Block newBlock = sapi.World.GetBlock(new AssetLocation("game", devastatedBlock));
+                        if (newBlock != null)
+                        {
+                            sapi.World.BlockAccessor.SetBlock(newBlock.Id, pos);
+                            regrowingBlocks.Add(new RegrowingBlocks
+                            {
+                                Pos = pos,
+                                Out = regeneratesTo,
+                                LastTime = sapi.World.Calendar.TotalHours
+                            });
+                            newChunk.BlocksDevastated++;
+                        }
+                    }
+                }
+
                 devastatedChunks[chunkKey] = newChunk;
-                return TextCommandResult.Success($"Marked chunk at ({chunkX}, {chunkZ}) as devastated. Corrupted entities will spawn and devastation will spread rapidly.");
+                return TextCommandResult.Success($"Marked chunk at ({chunkX}, {chunkZ}) as devastated starting from {pos}. Devastation will spread in cardinal directions.");
             }
         }
 
@@ -2235,7 +2271,20 @@ namespace SpreadingDevastation
         }
 
         /// <summary>
+        /// Cardinal direction offsets for chunk spreading (N/S/E/W only, no diagonals)
+        /// </summary>
+        private static readonly int[][] ChunkCardinalOffsets = new int[][]
+        {
+            new int[] { 1, 0 },   // East (+X)
+            new int[] { -1, 0 },  // West (-X)
+            new int[] { 0, 1 },   // South (+Z)
+            new int[] { 0, -1 }   // North (-Z)
+        };
+
+        /// <summary>
         /// Checks if devastated chunks should spread to nearby chunks.
+        /// Chunks only spread in cardinal directions (N/S/E/W) and only if
+        /// there is at least one devastated block at the edge bordering the target chunk.
         /// Base interval is 60 seconds, affected by speed multiplier.
         /// </summary>
         private void TrySpreadToNearbyChunks(double currentTime)
@@ -2262,33 +2311,41 @@ namespace SpreadingDevastation
                 // Roll for spread chance
                 if (sapi.World.Rand.NextDouble() >= config.ChunkSpreadChance) continue;
 
-                // Try to spread to a random adjacent chunk
-                int[] adjacentOffsets = new int[] { -1, 0, 1 };
-                int offsetX = adjacentOffsets[sapi.World.Rand.Next(3)];
-                int offsetZ = adjacentOffsets[sapi.World.Rand.Next(3)];
+                // Try to spread to a random cardinal direction (no diagonals)
+                var shuffledDirections = ChunkCardinalOffsets.OrderBy(x => sapi.World.Rand.Next()).ToArray();
 
-                // Don't spread to self
-                if (offsetX == 0 && offsetZ == 0) continue;
-
-                int newChunkX = chunk.ChunkX + offsetX;
-                int newChunkZ = chunk.ChunkZ + offsetZ;
-                long newChunkKey = DevastatedChunk.MakeChunkKey(newChunkX, newChunkZ);
-
-                // Skip if already devastated or already queued
-                if (devastatedChunks.ContainsKey(newChunkKey)) continue;
-                if (chunksToAdd.Any(c => c.ChunkKey == newChunkKey)) continue;
-
-                // Create new devastated chunk
-                var newChunk = new DevastatedChunk
+                foreach (var direction in shuffledDirections)
                 {
-                    ChunkX = newChunkX,
-                    ChunkZ = newChunkZ,
-                    MarkedTime = currentTime,
-                    DevastationLevel = 0.0,
-                    IsFullyDevastated = false
-                };
+                    int offsetX = direction[0];
+                    int offsetZ = direction[1];
 
-                chunksToAdd.Add(newChunk);
+                    int newChunkX = chunk.ChunkX + offsetX;
+                    int newChunkZ = chunk.ChunkZ + offsetZ;
+                    long newChunkKey = DevastatedChunk.MakeChunkKey(newChunkX, newChunkZ);
+
+                    // Skip if already devastated or already queued
+                    if (devastatedChunks.ContainsKey(newChunkKey)) continue;
+                    if (chunksToAdd.Any(c => c.ChunkKey == newChunkKey)) continue;
+
+                    // Check if there's at least one devastated block at the edge of the source chunk
+                    // bordering the target chunk direction
+                    if (!HasDevastatedBlockAtEdge(chunk, offsetX, offsetZ)) continue;
+
+                    // Create new devastated chunk with frontier seeded from edge of source chunk
+                    var newChunk = new DevastatedChunk
+                    {
+                        ChunkX = newChunkX,
+                        ChunkZ = newChunkZ,
+                        MarkedTime = currentTime,
+                        DevastationLevel = 0.0,
+                        IsFullyDevastated = false,
+                        FrontierInitialized = true,
+                        DevastationFrontier = FindChunkEdgeFrontier(chunk, offsetX, offsetZ)
+                    };
+
+                    chunksToAdd.Add(newChunk);
+                    break; // Only spread to one direction per chunk per check
+                }
             }
 
             // Add new chunks after iteration
@@ -2297,6 +2354,61 @@ namespace SpreadingDevastation
                 devastatedChunks[newChunk.ChunkKey] = newChunk;
                 sapi.Logger.VerboseDebug($"SpreadingDevastation: Chunk ({newChunk.ChunkX}, {newChunk.ChunkZ}) became devastated from spread");
             }
+        }
+
+        /// <summary>
+        /// Checks if a chunk has at least one devastated block at the edge bordering the specified direction.
+        /// </summary>
+        /// <param name="chunk">The source chunk to check</param>
+        /// <param name="offsetX">Direction to check: 1 for east edge, -1 for west edge, 0 for no X edge</param>
+        /// <param name="offsetZ">Direction to check: 1 for south edge, -1 for north edge, 0 for no Z edge</param>
+        private bool HasDevastatedBlockAtEdge(DevastatedChunk chunk, int offsetX, int offsetZ)
+        {
+            int startX = chunk.ChunkX * CHUNK_SIZE;
+            int startZ = chunk.ChunkZ * CHUNK_SIZE;
+
+            // Determine which edge to check based on direction
+            int edgeX, edgeZ;
+            bool checkXEdge = offsetX != 0;
+            bool checkZEdge = offsetZ != 0;
+
+            // Sample positions along the edge
+            int sampleCount = 16;
+            for (int i = 0; i < sampleCount; i++)
+            {
+                if (checkXEdge)
+                {
+                    // Check east (offsetX=1) or west (offsetX=-1) edge
+                    edgeX = offsetX > 0 ? startX + CHUNK_SIZE - 1 : startX;
+                    edgeZ = startZ + sapi.World.Rand.Next(CHUNK_SIZE);
+                }
+                else
+                {
+                    // Check south (offsetZ=1) or north (offsetZ=-1) edge
+                    edgeX = startX + sapi.World.Rand.Next(CHUNK_SIZE);
+                    edgeZ = offsetZ > 0 ? startZ + CHUNK_SIZE - 1 : startZ;
+                }
+
+                int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(edgeX, 0, edgeZ));
+                if (surfaceY <= 0) continue;
+
+                // Check a vertical range around surface
+                for (int yOffset = -3; yOffset <= 10; yOffset++)
+                {
+                    int y = surfaceY - yOffset;
+                    if (y < 1) continue;
+
+                    BlockPos pos = new BlockPos(edgeX, y, edgeZ);
+                    Block block = sapi.World.BlockAccessor.GetBlock(pos);
+
+                    if (block != null && IsAlreadyDevastated(block))
+                    {
+                        return true; // Found a devastated block at this edge
+                    }
+                }
+            }
+
+            return false; // No devastated blocks found at this edge
         }
 
         /// <summary>
@@ -2388,76 +2500,380 @@ namespace SpreadingDevastation
         }
 
         /// <summary>
-        /// Rapidly spreads devastation within a chunk.
+        /// Six cardinal directions for adjacent block checking (east, west, up, down, south, north)
+        /// </summary>
+        private static readonly BlockPos[] CardinalOffsets = new BlockPos[]
+        {
+            new BlockPos(1, 0, 0),   // East (+X)
+            new BlockPos(-1, 0, 0),  // West (-X)
+            new BlockPos(0, 1, 0),   // Up (+Y)
+            new BlockPos(0, -1, 0),  // Down (-Y)
+            new BlockPos(0, 0, 1),   // South (+Z)
+            new BlockPos(0, 0, -1)   // North (-Z)
+        };
+
+        /// <summary>
+        /// Rapidly spreads devastation within a chunk using cardinal-adjacent spreading.
+        /// Devastation only spreads to blocks adjacent (in 6 cardinal directions) to existing devastation.
         /// </summary>
         private void SpreadDevastationInChunk(DevastatedChunk chunk)
         {
             if (chunk.IsFullyDevastated) return;
 
+            // Initialize frontier if needed (for chunks from older saves without frontier data)
+            if (!chunk.FrontierInitialized || chunk.DevastationFrontier == null || chunk.DevastationFrontier.Count == 0)
+            {
+                InitializeChunkFrontier(chunk);
+            }
+
+            // If frontier is empty after initialization, chunk is fully devastated
+            if (chunk.DevastationFrontier.Count == 0)
+            {
+                chunk.IsFullyDevastated = true;
+                return;
+            }
+
             int startX = chunk.ChunkX * CHUNK_SIZE;
             int startZ = chunk.ChunkZ * CHUNK_SIZE;
+            int endX = startX + CHUNK_SIZE;
+            int endZ = startZ + CHUNK_SIZE;
 
             // Scale with speed multiplier: base 10 blocks per 500ms tick = 20/sec at 1x speed
             int blocksToProcess = Math.Max(1, (int)(10 * config.SpeedMultiplier));
             int successCount = 0;
             int attempts = 0;
-            int maxAttempts = blocksToProcess * 5;
+            int maxAttempts = blocksToProcess * 10; // More attempts since we're being selective
 
-            while (successCount < blocksToProcess && attempts < maxAttempts)
+            List<BlockPos> newFrontierBlocks = new List<BlockPos>();
+            List<BlockPos> blocksToRemoveFromFrontier = new List<BlockPos>();
+
+            while (successCount < blocksToProcess && attempts < maxAttempts && chunk.DevastationFrontier.Count > 0)
             {
                 attempts++;
 
-                // Random position within chunk
-                int x = startX + sapi.World.Rand.Next(CHUNK_SIZE);
-                int z = startZ + sapi.World.Rand.Next(CHUNK_SIZE);
+                // Pick a random frontier block to spread from
+                int frontierIndex = sapi.World.Rand.Next(chunk.DevastationFrontier.Count);
+                BlockPos frontierPos = chunk.DevastationFrontier[frontierIndex];
 
-                // Get terrain height and work from above surface (plants/grass) down into ground
-                int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(x, 0, z));
-                if (surfaceY <= 0) continue;
+                // Try each cardinal direction from this frontier block
+                bool foundCandidate = false;
+                // Shuffle the cardinal directions to avoid bias
+                var shuffledOffsets = CardinalOffsets.OrderBy(x => sapi.World.Rand.Next()).ToArray();
 
-                // Check blocks from surface+3 (tall plants) down to surface-10 (underground)
-                // This ensures we hit grass, bushes, flowers, and other vegetation above the terrain
-                int yOffset = sapi.World.Rand.Next(14) - 3; // Range: -3 to +10, so y = surface+3 to surface-10
-                int y = surfaceY - yOffset;
-                if (y < 1) y = 1;
-
-                BlockPos targetPos = new BlockPos(x, y, z);
-                Block block = sapi.World.BlockAccessor.GetBlock(targetPos);
-
-                if (block == null || block.Id == 0) continue;
-                if (IsAlreadyDevastated(block)) continue;
-
-                string devastatedBlock, regeneratesTo;
-                if (TryGetDevastatedForm(block, out devastatedBlock, out regeneratesTo))
+                foreach (var offset in shuffledOffsets)
                 {
-                    Block newBlock = sapi.World.GetBlock(new AssetLocation("game", devastatedBlock));
-                    if (newBlock != null)
+                    BlockPos targetPos = new BlockPos(
+                        frontierPos.X + offset.X,
+                        frontierPos.Y + offset.Y,
+                        frontierPos.Z + offset.Z
+                    );
+
+                    // Check if target is within chunk bounds (X and Z only - Y can go anywhere)
+                    if (targetPos.X < startX || targetPos.X >= endX ||
+                        targetPos.Z < startZ || targetPos.Z >= endZ)
                     {
-                        sapi.World.BlockAccessor.SetBlock(newBlock.Id, targetPos);
+                        continue; // Outside chunk bounds
+                    }
 
-                        // Track for regeneration
-                        regrowingBlocks.Add(new RegrowingBlocks
+                    // Check Y bounds
+                    if (targetPos.Y < 1) continue;
+
+                    // Check minY level constraint
+                    if (targetPos.Y < config.MinYLevel) continue;
+
+                    // Check depth below surface constraint (when aircontact is enabled)
+                    if (config.RequireSourceAirContact && config.ChunkMaxDepthBelowSurface >= 0)
+                    {
+                        int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(targetPos);
+                        if (surfaceY > 0 && targetPos.Y < surfaceY - config.ChunkMaxDepthBelowSurface)
                         {
-                            Pos = targetPos,
-                            Out = regeneratesTo,
-                            LastTime = sapi.World.Calendar.TotalHours
-                        });
+                            continue; // Too deep below surface
+                        }
+                    }
 
-                        successCount++;
-                        chunk.BlocksDevastated++;
+                    // Get the block at this position
+                    Block block = sapi.World.BlockAccessor.GetBlock(targetPos);
+
+                    if (block == null || block.Id == 0) continue; // Skip air blocks
+
+                    // Check if already devastated
+                    if (IsAlreadyDevastated(block))
+                    {
+                        continue; // Already devastated
+                    }
+
+                    string devastatedBlock, regeneratesTo;
+                    if (TryGetDevastatedForm(block, out devastatedBlock, out regeneratesTo))
+                    {
+                        Block newBlock = sapi.World.GetBlock(new AssetLocation("game", devastatedBlock));
+                        if (newBlock != null)
+                        {
+                            sapi.World.BlockAccessor.SetBlock(newBlock.Id, targetPos);
+
+                            // Track for regeneration
+                            regrowingBlocks.Add(new RegrowingBlocks
+                            {
+                                Pos = targetPos,
+                                Out = regeneratesTo,
+                                LastTime = sapi.World.Calendar.TotalHours
+                            });
+
+                            // Add this newly devastated block to the frontier
+                            newFrontierBlocks.Add(targetPos.Copy());
+
+                            successCount++;
+                            chunk.BlocksDevastated++;
+                            foundCandidate = true;
+
+                            break; // Move to next attempt
+                        }
                     }
                 }
+
+                // If we couldn't find any valid candidate from this frontier block, check if it should be removed
+                if (!foundCandidate)
+                {
+                    bool hasValidNeighbors = false;
+                    foreach (var offset in CardinalOffsets)
+                    {
+                        BlockPos neighborPos = new BlockPos(
+                            frontierPos.X + offset.X,
+                            frontierPos.Y + offset.Y,
+                            frontierPos.Z + offset.Z
+                        );
+
+                        // Check if within chunk bounds
+                        if (neighborPos.X < startX || neighborPos.X >= endX ||
+                            neighborPos.Z < startZ || neighborPos.Z >= endZ ||
+                            neighborPos.Y < 1)
+                        {
+                            continue;
+                        }
+
+                        // Check minY level constraint
+                        if (neighborPos.Y < config.MinYLevel) continue;
+
+                        // Check depth below surface constraint (when aircontact is enabled)
+                        if (config.RequireSourceAirContact && config.ChunkMaxDepthBelowSurface >= 0)
+                        {
+                            int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(neighborPos);
+                            if (surfaceY > 0 && neighborPos.Y < surfaceY - config.ChunkMaxDepthBelowSurface)
+                            {
+                                continue; // Too deep below surface
+                            }
+                        }
+
+                        Block neighborBlock = sapi.World.BlockAccessor.GetBlock(neighborPos);
+                        if (neighborBlock != null && neighborBlock.Id != 0 && !IsAlreadyDevastated(neighborBlock))
+                        {
+                            if (TryGetDevastatedForm(neighborBlock, out _, out _))
+                            {
+                                hasValidNeighbors = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!hasValidNeighbors && !blocksToRemoveFromFrontier.Any(p => p.X == frontierPos.X && p.Y == frontierPos.Y && p.Z == frontierPos.Z))
+                    {
+                        blocksToRemoveFromFrontier.Add(frontierPos);
+                    }
+                }
+            }
+
+            // Update frontier: add new blocks, remove exhausted ones
+            foreach (var newBlock in newFrontierBlocks)
+            {
+                if (!chunk.DevastationFrontier.Any(p => p.X == newBlock.X && p.Y == newBlock.Y && p.Z == newBlock.Z))
+                {
+                    chunk.DevastationFrontier.Add(newBlock);
+                }
+            }
+
+            foreach (var oldBlock in blocksToRemoveFromFrontier)
+            {
+                chunk.DevastationFrontier.RemoveAll(p => p.X == oldBlock.X && p.Y == oldBlock.Y && p.Z == oldBlock.Z);
+            }
+
+            // Prune frontier if it gets too large (keep blocks closer to center)
+            if (chunk.DevastationFrontier.Count > 500)
+            {
+                int centerX = startX + CHUNK_SIZE / 2;
+                int centerZ = startZ + CHUNK_SIZE / 2;
+                chunk.DevastationFrontier = chunk.DevastationFrontier
+                    .OrderBy(p => Math.Abs(p.X - centerX) + Math.Abs(p.Z - centerZ))
+                    .Take(300)
+                    .ToList();
             }
 
             // Update devastation level estimate
             // Rough estimate: a chunk surface area is 32x32 = 1024 blocks, times ~10 depth = ~10000 convertible blocks
             chunk.DevastationLevel = Math.Min(1.0, chunk.BlocksDevastated / 5000.0);
 
-            // Mark as fully devastated if success rate drops very low
-            if (attempts >= maxAttempts && successCount == 0)
+            // Mark as fully devastated if frontier is empty
+            if (chunk.DevastationFrontier.Count == 0)
             {
                 chunk.IsFullyDevastated = true;
             }
+        }
+
+        /// <summary>
+        /// Initializes the frontier for a chunk that doesn't have one (e.g., from older saves or chunk spread).
+        /// Searches for existing devastated blocks to use as the frontier.
+        /// </summary>
+        private void InitializeChunkFrontier(DevastatedChunk chunk)
+        {
+            chunk.FrontierInitialized = true;
+            chunk.DevastationFrontier = new List<BlockPos>();
+
+            int startX = chunk.ChunkX * CHUNK_SIZE;
+            int startZ = chunk.ChunkZ * CHUNK_SIZE;
+
+            // Search for existing devastated blocks that could be frontier (have non-devastated neighbors)
+            // Sample the chunk to find devastated blocks
+            for (int attempt = 0; attempt < 100; attempt++)
+            {
+                int x = startX + sapi.World.Rand.Next(CHUNK_SIZE);
+                int z = startZ + sapi.World.Rand.Next(CHUNK_SIZE);
+                int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(x, 0, z));
+                if (surfaceY <= 0) continue;
+
+                // Check a vertical range around surface
+                for (int yOffset = -3; yOffset <= 10; yOffset++)
+                {
+                    int y = surfaceY - yOffset;
+                    if (y < 1) continue;
+
+                    BlockPos pos = new BlockPos(x, y, z);
+                    Block block = sapi.World.BlockAccessor.GetBlock(pos);
+
+                    if (block != null && IsAlreadyDevastated(block))
+                    {
+                        // Check if this block has any non-devastated neighbors (making it a frontier block)
+                        foreach (var offset in CardinalOffsets)
+                        {
+                            BlockPos neighborPos = new BlockPos(pos.X + offset.X, pos.Y + offset.Y, pos.Z + offset.Z);
+                            Block neighborBlock = sapi.World.BlockAccessor.GetBlock(neighborPos);
+                            if (neighborBlock != null && neighborBlock.Id != 0 && !IsAlreadyDevastated(neighborBlock))
+                            {
+                                if (TryGetDevastatedForm(neighborBlock, out _, out _))
+                                {
+                                    // This is a valid frontier block
+                                    if (!chunk.DevastationFrontier.Any(p => p.X == pos.X && p.Y == pos.Y && p.Z == pos.Z))
+                                    {
+                                        chunk.DevastationFrontier.Add(pos.Copy());
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Stop if we've found enough frontier blocks
+                if (chunk.DevastationFrontier.Count >= 20) break;
+            }
+
+            // If no devastated blocks found, pick a random surface position to start from
+            if (chunk.DevastationFrontier.Count == 0)
+            {
+                int x = startX + CHUNK_SIZE / 2;
+                int z = startZ + CHUNK_SIZE / 2;
+                int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(x, 0, z));
+                if (surfaceY > 0)
+                {
+                    BlockPos startPos = new BlockPos(x, surfaceY, z);
+                    chunk.DevastationFrontier.Add(startPos);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Finds blocks in the new chunk that are cardinally adjacent to devastated blocks in the source chunk.
+        /// This ensures devastation spreads continuously - only blocks touching existing devastation can spread.
+        /// </summary>
+        /// <param name="sourceChunk">The existing devastated chunk</param>
+        /// <param name="offsetX">Direction to new chunk in X (-1, 0, or 1)</param>
+        /// <param name="offsetZ">Direction to new chunk in Z (-1, 0, or 1)</param>
+        private List<BlockPos> FindChunkEdgeFrontier(DevastatedChunk sourceChunk, int offsetX, int offsetZ)
+        {
+            List<BlockPos> edgeFrontier = new List<BlockPos>();
+
+            int sourceStartX = sourceChunk.ChunkX * CHUNK_SIZE;
+            int sourceStartZ = sourceChunk.ChunkZ * CHUNK_SIZE;
+
+            // Determine which edge of the SOURCE chunk to search for devastated blocks
+            // offsetX > 0 means new chunk is to the east, so we check the east edge (x = startX + CHUNK_SIZE - 1)
+            // offsetX < 0 means new chunk is to the west, so we check the west edge (x = startX)
+            // Same logic for Z
+
+            // Search along the edge of the source chunk for devastated blocks
+            int edgeLength = CHUNK_SIZE;
+            for (int i = 0; i < edgeLength; i++)
+            {
+                int sourceEdgeX, sourceEdgeZ;
+
+                if (offsetX != 0)
+                {
+                    // Checking east or west edge of source chunk
+                    sourceEdgeX = offsetX > 0 ? sourceStartX + CHUNK_SIZE - 1 : sourceStartX;
+                    sourceEdgeZ = sourceStartZ + i;
+                }
+                else
+                {
+                    // Checking north or south edge of source chunk
+                    sourceEdgeX = sourceStartX + i;
+                    sourceEdgeZ = offsetZ > 0 ? sourceStartZ + CHUNK_SIZE - 1 : sourceStartZ;
+                }
+
+                int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(sourceEdgeX, 0, sourceEdgeZ));
+                if (surfaceY <= 0) continue;
+
+                // Check a vertical range around surface level for devastated blocks in source chunk
+                for (int yOffset = -5; yOffset <= 10; yOffset++)
+                {
+                    int y = surfaceY - yOffset;
+                    if (y < 1) continue;
+
+                    BlockPos sourcePos = new BlockPos(sourceEdgeX, y, sourceEdgeZ);
+                    Block sourceBlock = sapi.World.BlockAccessor.GetBlock(sourcePos);
+
+                    // Found a devastated block at the edge of source chunk
+                    if (sourceBlock != null && IsAlreadyDevastated(sourceBlock))
+                    {
+                        // Now find the adjacent block in the NEW chunk (one step in the offset direction)
+                        BlockPos newChunkPos = new BlockPos(
+                            sourceEdgeX + offsetX,
+                            y,
+                            sourceEdgeZ + offsetZ
+                        );
+
+                        Block newChunkBlock = sapi.World.BlockAccessor.GetBlock(newChunkPos);
+
+                        // Check if this block in the new chunk can be devastated
+                        if (newChunkBlock != null && newChunkBlock.Id != 0 && !IsAlreadyDevastated(newChunkBlock))
+                        {
+                            if (TryGetDevastatedForm(newChunkBlock, out _, out _))
+                            {
+                                if (!edgeFrontier.Any(p => p.X == newChunkPos.X && p.Y == newChunkPos.Y && p.Z == newChunkPos.Z))
+                                {
+                                    edgeFrontier.Add(newChunkPos.Copy());
+                                }
+                            }
+                        }
+                        // Also check if the block is already devastated (can still be a frontier)
+                        else if (newChunkBlock != null && IsAlreadyDevastated(newChunkBlock))
+                        {
+                            if (!edgeFrontier.Any(p => p.X == newChunkPos.X && p.Y == newChunkPos.Y && p.Z == newChunkPos.Z))
+                            {
+                                edgeFrontier.Add(newChunkPos.Copy());
+                            }
+                        }
+                    }
+                }
+            }
+
+            return edgeFrontier;
         }
 
         /// <summary>
