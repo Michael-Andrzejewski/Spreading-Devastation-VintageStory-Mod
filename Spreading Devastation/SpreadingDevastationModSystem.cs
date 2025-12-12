@@ -1563,19 +1563,6 @@ namespace SpreadingDevastation
             
             try
             {
-                // Get the rift system
-                ModSystemRifts riftSystem = sapi.ModLoader.GetModSystem<ModSystemRifts>();
-            
-                // Spread from rifts (if rift system exists) - 1 block per rift per tick
-                // Rifts don't use adaptive radius, they always search full 8 blocks
-                if (riftSystem?.riftsById != null)
-                {
-                    foreach (Rift rift in riftSystem.riftsById.Values)
-                    {
-                        SpreadDevastationFromRift(rift.Position, 8, 1);
-                    }
-                }
-            
                 // Spread from manual devastation sources
                 List<DevastationSource> toRemove = new List<DevastationSource>();
                 double currentGameTime = sapi.World.Calendar.TotalHours;
@@ -1727,50 +1714,6 @@ namespace SpreadingDevastation
             foreach (var source in sourcesToRemove)
             {
                 devastationSources.Remove(source);
-            }
-        }
-
-        private void SpreadDevastationFromRift(Vec3d position, int range, int amount)
-        {
-            // Rifts use simple random spreading (no distance weighting or adaptive radius)
-            int devastatedCount = 0;
-            int maxAttempts = amount * 5;
-            
-            for (int attempt = 0; attempt < maxAttempts && devastatedCount < amount; attempt++)
-            {
-                int dirX = RandomNumberGenerator.GetInt32(2) == 1 ? 1 : -1;
-                int dirY = RandomNumberGenerator.GetInt32(2) == 1 ? 1 : -1;
-                int dirZ = RandomNumberGenerator.GetInt32(2) == 1 ? 1 : -1;
-
-                int offsetX = RandomNumberGenerator.GetInt32(range) * dirX;
-                int offsetY = RandomNumberGenerator.GetInt32(range) * dirY;
-                int offsetZ = RandomNumberGenerator.GetInt32(range) * dirZ;
-
-                BlockPos targetPos = new BlockPos(
-                    (int)position.X + offsetX,
-                    (int)position.Y + offsetY,
-                    (int)position.Z + offsetZ
-                );
-
-                Block block = sapi.World.BlockAccessor.GetBlock(targetPos);
-                
-                if (block.Id == 0 || IsAlreadyDevastated(block)) continue;
-
-                string devastatedBlock, regeneratesTo;
-                if (TryGetDevastatedForm(block, out devastatedBlock, out regeneratesTo))
-                {
-                    Block newBlock = sapi.World.GetBlock(new AssetLocation("game", devastatedBlock));
-                    sapi.World.BlockAccessor.SetBlock(newBlock.Id, targetPos);
-                    
-                    regrowingBlocks.Add(new RegrowingBlocks
-                    {
-                        Pos = targetPos,
-                        Out = regeneratesTo,
-                        LastTime = sapi.World.Calendar.TotalHours
-                    });
-                    
-                    devastatedCount++;
-                }
             }
         }
 
