@@ -4196,11 +4196,15 @@ namespace SpreadingDevastation
             double currentTime = sapi.World.Calendar.TotalHours;
             double checkIntervalHours = config.RiftWardScanIntervalSeconds / 3600.0;
 
-            // Periodically verify rift wards are still active (have fuel)
+            // Periodically verify rift wards are still active (have fuel) and remove nearby sources
             if (currentTime - lastRiftWardScanTime >= checkIntervalHours)
             {
                 lastRiftWardScanTime = currentTime;
                 VerifyRiftWardActiveState();
+
+                // Also remove any newly spawned devastation sources within rift ward radii
+                // This catches sources that spawn from rifts after the ward was placed
+                RemoveSourcesInAllRiftWardRadii();
             }
 
             // Process healing for each active rift ward
@@ -4236,10 +4240,15 @@ namespace SpreadingDevastation
                 // Check active state
                 bool isActive = IsRiftWardActive(ward.Pos);
 
-                // If ward just became active, notify
+                // If ward just became active, notify and remove nearby sources
                 if (isActive && ward.BlocksHealed == 0 && ward.LastHealTime == 0)
                 {
                     BroadcastMessage($"Rift ward at {ward.Pos} is now ACTIVE and protecting!");
+                    int removedSources = RemoveSourcesInRiftWardRadius(ward);
+                    if (removedSources > 0)
+                    {
+                        BroadcastMessage($"Rift ward neutralized {removedSources} devastation source(s)!");
+                    }
                     anyBecameActive = true;
                 }
 
@@ -4500,6 +4509,57 @@ namespace SpreadingDevastation
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Removes all devastation sources within a rift ward's protection radius.
+        /// This prevents temporal instability and mob spawning in protected areas.
+        /// </summary>
+        private int RemoveSourcesInRiftWardRadius(RiftWard ward)
+        {
+            if (ward?.Pos == null || devastationSources == null || devastationSources.Count == 0)
+                return 0;
+
+            int radiusSquared = config.RiftWardProtectionRadius * config.RiftWardProtectionRadius;
+
+            int removed = devastationSources.RemoveAll(source =>
+            {
+                if (source.Pos == null) return false;
+
+                int dx = source.Pos.X - ward.Pos.X;
+                int dy = source.Pos.Y - ward.Pos.Y;
+                int dz = source.Pos.Z - ward.Pos.Z;
+                int distanceSquared = dx * dx + dy * dy + dz * dz;
+
+                return distanceSquared <= radiusSquared;
+            });
+
+            if (removed > 0)
+            {
+                sapi.Logger.Notification($"SpreadingDevastation: Rift ward at {ward.Pos} removed {removed} devastation source(s)");
+            }
+
+            return removed;
+        }
+
+        /// <summary>
+        /// Removes devastation sources within all active rift ward protection radii.
+        /// Called periodically to catch newly spawned sources (e.g., from rifts).
+        /// </summary>
+        private int RemoveSourcesInAllRiftWardRadii()
+        {
+            if (activeRiftWards == null || activeRiftWards.Count == 0)
+                return 0;
+
+            int totalRemoved = 0;
+            foreach (var ward in activeRiftWards)
+            {
+                if (ward.CachedIsActive)
+                {
+                    totalRemoved += RemoveSourcesInRiftWardRadius(ward);
+                }
+            }
+            return totalRemoved;
         }
 
         /// <summary>
