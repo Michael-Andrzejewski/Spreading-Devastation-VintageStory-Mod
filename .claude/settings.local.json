@@ -8,7 +8,8 @@
       "WebFetch(domain:apidocs.vintagestory.at)",
       "WebFetch(domain:mods.vintagestory.at)",
       "WebFetch(domain:github.com)",
-      "Bash(dir \"C:\\Users\\maaro\\AppData\\Roaming\\VintagestoryData\\Logs\")"
+      "Bash(dir \"C:\\Users\\maaro\\AppData\\Roaming\\VintagestoryData\\Logs\")",
+      "WebFetch(domain:gitlab.com)"
     ]
   }
 }

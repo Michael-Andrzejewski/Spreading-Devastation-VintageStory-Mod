@@ -436,6 +436,8 @@ namespace SpreadingDevastation
         private List<RiftWard> activeRiftWards = new List<RiftWard>();
         private double lastRiftWardScanTime = 0; // Track last scan for new rift wards
         private HashSet<long> protectedChunkKeys = new HashSet<long>(); // Cache of chunk keys protected by rift wards
+        private bool initialRiftWardScanCompleted = false; // Whether initial world scan for rift wards has completed
+        private double lastFullRiftWardScanTime = 0; // Track last full world scan for rift wards
 
         public override void Start(ICoreAPI api)
         {
@@ -548,6 +550,9 @@ namespace SpreadingDevastation
 
                 // Rebuild protected chunk cache
                 RebuildProtectedChunkCache();
+
+                // Restore rift ward active states and apply their effects
+                InitializeRiftWardsOnLoad();
 
                 sapi.Logger.Notification($"SpreadingDevastation: Loaded {devastationSources?.Count ?? 0} sources, {regrowingBlocks?.Count ?? 0} regrowing blocks, {devastatedChunks?.Count ?? 0} devastated chunks, {activeRiftWards?.Count ?? 0} rift wards");
             }
@@ -4187,24 +4192,38 @@ namespace SpreadingDevastation
 
         /// <summary>
         /// Processes rift ward active state checks and healing.
-        /// No longer scans for new rift wards - that's handled by block placement events.
+        /// Also handles initial world scan and periodic re-scans for rift wards.
         /// </summary>
         private void ProcessRiftWards(float dt)
         {
-            if (sapi == null || activeRiftWards == null || activeRiftWards.Count == 0) return;
+            if (sapi == null) return;
 
             double currentTime = sapi.World.Calendar.TotalHours;
             double checkIntervalHours = config.RiftWardScanIntervalSeconds / 3600.0;
+            double fullScanIntervalHours = 5.0 / 60.0; // Re-scan every 5 minutes in game time
 
-            // Periodically verify rift wards are still active (have fuel) and remove nearby sources
+            // Perform initial scan for existing rift wards (or periodic re-scan)
+            if (!initialRiftWardScanCompleted || (currentTime - lastFullRiftWardScanTime >= fullScanIntervalHours))
+            {
+                ScanForExistingRiftWards();
+            }
+
+            // Skip the rest if no rift wards are tracked
+            if (activeRiftWards == null || activeRiftWards.Count == 0) return;
+
+            // Periodically verify rift wards are still active (have fuel) and apply protection
             if (currentTime - lastRiftWardScanTime >= checkIntervalHours)
             {
                 lastRiftWardScanTime = currentTime;
                 VerifyRiftWardActiveState();
 
-                // Also remove any newly spawned devastation sources within rift ward radii
+                // Remove any newly spawned devastation sources within rift ward radii
                 // This catches sources that spawn from rifts after the ward was placed
                 RemoveSourcesInAllRiftWardRadii();
+
+                // Clear any new devastated chunks within rift ward radii
+                // This maintains temporal stability in protected areas
+                RemoveDevastatedChunksInAllRiftWardRadii();
             }
 
             // Process healing for each active rift ward
@@ -4240,15 +4259,25 @@ namespace SpreadingDevastation
                 // Check active state
                 bool isActive = IsRiftWardActive(ward.Pos);
 
-                // If ward just became active, notify and remove nearby sources
+                // If ward just became active, notify and apply protection effects
                 if (isActive && ward.BlocksHealed == 0 && ward.LastHealTime == 0)
                 {
                     BroadcastMessage($"Rift ward at {ward.Pos} is now ACTIVE and protecting!");
+
+                    // Remove devastation sources
                     int removedSources = RemoveSourcesInRiftWardRadius(ward);
                     if (removedSources > 0)
                     {
                         BroadcastMessage($"Rift ward neutralized {removedSources} devastation source(s)!");
                     }
+
+                    // Clear devastated chunks (restores temporal stability)
+                    int clearedChunks = RemoveDevastatedChunksInRiftWardRadius(ward);
+                    if (clearedChunks > 0)
+                    {
+                        BroadcastMessage($"Rift ward restored temporal stability to {clearedChunks} chunk(s)!");
+                    }
+
                     anyBecameActive = true;
                 }
 
@@ -4557,6 +4586,218 @@ namespace SpreadingDevastation
                 if (ward.CachedIsActive)
                 {
                     totalRemoved += RemoveSourcesInRiftWardRadius(ward);
+                }
+            }
+            return totalRemoved;
+        }
+
+        /// <summary>
+        /// Initializes rift wards after loading save data.
+        /// Restores active states and applies protection effects.
+        /// </summary>
+        private void InitializeRiftWardsOnLoad()
+        {
+            if (activeRiftWards == null || activeRiftWards.Count == 0) return;
+
+            int activeCount = 0;
+            int totalSourcesRemoved = 0;
+            int totalChunksCleared = 0;
+
+            foreach (var ward in activeRiftWards)
+            {
+                if (ward.Pos == null) continue;
+
+                // Check and cache the active state
+                ward.CachedIsActive = IsRiftWardActive(ward.Pos);
+                ward.LastActiveCheck = sapi.World.Calendar.TotalHours;
+
+                if (ward.CachedIsActive)
+                {
+                    activeCount++;
+
+                    // Remove any devastation sources within this ward's radius
+                    int sourcesRemoved = RemoveSourcesInRiftWardRadius(ward);
+                    totalSourcesRemoved += sourcesRemoved;
+
+                    // Clear devastated chunks within this ward's radius (restores temporal stability)
+                    int chunksCleared = RemoveDevastatedChunksInRiftWardRadius(ward);
+                    totalChunksCleared += chunksCleared;
+                }
+            }
+
+            if (activeCount > 0)
+            {
+                sapi.Logger.Notification($"SpreadingDevastation: Restored {activeCount} active rift ward(s), removed {totalSourcesRemoved} source(s), cleared {totalChunksCleared} devastated chunk(s)");
+            }
+        }
+
+        /// <summary>
+        /// Scans loaded chunks around players for rift ward blocks and adds them to tracking.
+        /// This catches rift wards that existed before the mod was installed, or rift wards
+        /// that weren't previously tracked for any reason.
+        /// </summary>
+        private void ScanForExistingRiftWards()
+        {
+            if (sapi == null) return;
+
+            int scanRadius = 8; // Scan 8 chunks in each direction around each player (256 blocks)
+            int newWardsFound = 0;
+            var existingPositions = new HashSet<long>(activeRiftWards.Select(w => GetPositionKey(w.Pos)));
+
+            foreach (var player in sapi.World.AllOnlinePlayers)
+            {
+                if (player.Entity == null) continue;
+
+                var playerPos = player.Entity.Pos.AsBlockPos;
+                int playerChunkX = playerPos.X / CHUNK_SIZE;
+                int playerChunkZ = playerPos.Z / CHUNK_SIZE;
+
+                // Scan chunks around the player
+                for (int cx = playerChunkX - scanRadius; cx <= playerChunkX + scanRadius; cx++)
+                {
+                    for (int cz = playerChunkZ - scanRadius; cz <= playerChunkZ + scanRadius; cz++)
+                    {
+                        // Get the chunk if it's loaded
+                        var chunk = sapi.World.BlockAccessor.GetChunk(cx, 0, cz);
+                        if (chunk == null) continue;
+
+                        // Scan all blocks in this chunk column for rift wards
+                        int startX = cx * CHUNK_SIZE;
+                        int startZ = cz * CHUNK_SIZE;
+                        int endX = startX + CHUNK_SIZE;
+                        int endZ = startZ + CHUNK_SIZE;
+
+                        // Scan at surface level and a bit below (rift wards are usually at ground level)
+                        int seaLevel = sapi.World.SeaLevel;
+                        int minY = Math.Max(1, seaLevel - 50);
+                        int maxY = Math.Min(sapi.World.BlockAccessor.MapSizeY - 1, seaLevel + 100);
+
+                        for (int x = startX; x < endX; x++)
+                        {
+                            for (int z = startZ; z < endZ; z++)
+                            {
+                                for (int y = minY; y < maxY; y++)
+                                {
+                                    var pos = new BlockPos(x, y, z);
+                                    var block = sapi.World.BlockAccessor.GetBlock(pos);
+
+                                    if (IsRiftWardBlock(block))
+                                    {
+                                        long posKey = GetPositionKey(pos);
+                                        if (!existingPositions.Contains(posKey))
+                                        {
+                                            var newWard = new RiftWard
+                                            {
+                                                Pos = pos.Copy(),
+                                                DiscoveredTime = sapi.World.Calendar.TotalHours
+                                            };
+
+                                            // Check if it's active
+                                            newWard.CachedIsActive = IsRiftWardActive(pos);
+                                            newWard.LastActiveCheck = sapi.World.Calendar.TotalHours;
+
+                                            activeRiftWards.Add(newWard);
+                                            existingPositions.Add(posKey);
+                                            newWardsFound++;
+
+                                            sapi.Logger.Notification($"SpreadingDevastation: Discovered existing rift ward at {pos} (active: {newWard.CachedIsActive})");
+
+                                            if (newWard.CachedIsActive)
+                                            {
+                                                // Apply protection effects
+                                                RemoveSourcesInRiftWardRadius(newWard);
+                                                RemoveDevastatedChunksInRiftWardRadius(newWard);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (newWardsFound > 0)
+            {
+                sapi.Logger.Notification($"SpreadingDevastation: Scan found {newWardsFound} previously untracked rift ward(s)");
+                RebuildProtectedChunkCache();
+            }
+
+            initialRiftWardScanCompleted = true;
+            lastFullRiftWardScanTime = sapi.World.Calendar.TotalHours;
+        }
+
+        /// <summary>
+        /// Removes all devastated chunks within a rift ward's protection radius.
+        /// This restores temporal stability to the protected area.
+        /// </summary>
+        private int RemoveDevastatedChunksInRiftWardRadius(RiftWard ward)
+        {
+            if (ward?.Pos == null || devastatedChunks == null || devastatedChunks.Count == 0)
+                return 0;
+
+            int radius = config.RiftWardProtectionRadius;
+            int radiusSquared = radius * radius;
+
+            // Find chunks that overlap with the rift ward's protection radius
+            int minChunkX = (ward.Pos.X - radius) / CHUNK_SIZE;
+            int maxChunkX = (ward.Pos.X + radius) / CHUNK_SIZE;
+            int minChunkZ = (ward.Pos.Z - radius) / CHUNK_SIZE;
+            int maxChunkZ = (ward.Pos.Z + radius) / CHUNK_SIZE;
+
+            var chunksToRemove = new List<long>();
+
+            for (int cx = minChunkX; cx <= maxChunkX; cx++)
+            {
+                for (int cz = minChunkZ; cz <= maxChunkZ; cz++)
+                {
+                    long chunkKey = DevastatedChunk.MakeChunkKey(cx, cz);
+                    if (devastatedChunks.ContainsKey(chunkKey))
+                    {
+                        // Check if the chunk center is within the protection radius
+                        int chunkCenterX = cx * CHUNK_SIZE + CHUNK_SIZE / 2;
+                        int chunkCenterZ = cz * CHUNK_SIZE + CHUNK_SIZE / 2;
+
+                        int dx = chunkCenterX - ward.Pos.X;
+                        int dz = chunkCenterZ - ward.Pos.Z;
+                        int distanceSquared = dx * dx + dz * dz;
+
+                        if (distanceSquared <= radiusSquared)
+                        {
+                            chunksToRemove.Add(chunkKey);
+                        }
+                    }
+                }
+            }
+
+            foreach (long chunkKey in chunksToRemove)
+            {
+                devastatedChunks.Remove(chunkKey);
+            }
+
+            if (chunksToRemove.Count > 0)
+            {
+                sapi.Logger.Notification($"SpreadingDevastation: Rift ward at {ward.Pos} cleared {chunksToRemove.Count} devastated chunk(s) - temporal stability restored");
+            }
+
+            return chunksToRemove.Count;
+        }
+
+        /// <summary>
+        /// Removes devastated chunks within all active rift ward protection radii.
+        /// Called periodically to maintain temporal stability in protected areas.
+        /// </summary>
+        private int RemoveDevastatedChunksInAllRiftWardRadii()
+        {
+            if (activeRiftWards == null || activeRiftWards.Count == 0)
+                return 0;
+
+            int totalRemoved = 0;
+            foreach (var ward in activeRiftWards)
+            {
+                if (ward.CachedIsActive)
+                {
+                    totalRemoved += RemoveDevastatedChunksInRiftWardRadius(ward);
                 }
             }
             return totalRemoved;
