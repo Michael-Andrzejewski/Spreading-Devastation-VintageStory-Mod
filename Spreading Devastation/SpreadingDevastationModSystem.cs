@@ -169,10 +169,16 @@ namespace SpreadingDevastation
         public int RiftWardProtectionRadius { get; set; } = 128;
 
         /// <summary>
-        /// Healing rate in blocks per second for rift wards (default: 5.0).
-        /// Rift wards will heal devastated blocks within their radius at this rate.
+        /// Base healing rate in blocks per second for rift wards (default: 10.0).
+        /// This is multiplied by the rift ward speed multiplier.
         /// </summary>
-        public double RiftWardHealingRate { get; set; } = 5.0;
+        public double RiftWardHealingRate { get; set; } = 10.0;
+
+        /// <summary>
+        /// Speed multiplier for rift ward healing (default: -1 = use global SpeedMultiplier).
+        /// Set to a positive value to use a custom speed independent of global devastation speed.
+        /// </summary>
+        public double RiftWardSpeedMultiplier { get; set; } = -1;
 
         /// <summary>
         /// Whether rift wards should actively heal devastated blocks (default: true).
@@ -365,6 +371,13 @@ namespace SpreadingDevastation
 
             [ProtoMember(4)]
             public double LastHealTime = 0; // Last time this ward performed healing
+
+            // Cached active state (not serialized - recalculated on load)
+            [ProtoIgnore]
+            public bool CachedIsActive = false;
+
+            [ProtoIgnore]
+            public double LastActiveCheck = 0; // Last time we checked if this ward is active
 
             /// <summary>
             /// Checks if a position is within the protection radius of this rift ward.
@@ -678,6 +691,12 @@ namespace SpreadingDevastation
                     .WithArgs(api.ChatCommands.Parsers.OptionalWord("action"),
                               api.ChatCommands.Parsers.OptionalWord("value"))
                     .HandleWith(HandleChunkCommand)
+                .EndSubCommand()
+                .BeginSubCommand("riftward")
+                    .WithDescription("Configure rift ward settings (speed, list, info)")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("action"),
+                              api.ChatCommands.Parsers.OptionalWord("value"))
+                    .HandleWith(HandleRiftWardCommand)
                 .EndSubCommand();
         }
 
@@ -703,6 +722,111 @@ namespace SpreadingDevastation
             config.SpeedMultiplier = newSpeed;
             SaveConfig();
             return TextCommandResult.Success($"Devastation speed set to {config.SpeedMultiplier:F2}x");
+        }
+
+        private TextCommandResult HandleRiftWardCommand(TextCommandCallingArgs args)
+        {
+            string action = args.Parsers[0].GetValue() as string ?? "";
+            string value = args.Parsers[1].GetValue() as string ?? "";
+
+            switch (action.ToLowerInvariant())
+            {
+                case "speed":
+                    return HandleRiftWardSpeedCommand(value);
+
+                case "list":
+                    return HandleRiftWardListCommand(args);
+
+                case "rate":
+                    return HandleRiftWardRateCommand(value);
+
+                case "":
+                case "info":
+                case "status":
+                    double effectiveSpeed = config.RiftWardSpeedMultiplier > 0 ? config.RiftWardSpeedMultiplier : config.SpeedMultiplier;
+                    string speedSource = config.RiftWardSpeedMultiplier > 0 ? "custom" : "global";
+                    return SendChatLines(args, new[]
+                    {
+                        "=== Rift Ward Settings ===",
+                        $"Protection radius: {config.RiftWardProtectionRadius} blocks",
+                        $"Healing enabled: {config.RiftWardHealingEnabled}",
+                        $"Base healing rate: {config.RiftWardHealingRate:F1} blocks/sec",
+                        $"Speed multiplier: {effectiveSpeed:F2}x ({speedSource})",
+                        $"Effective rate: {config.RiftWardHealingRate * effectiveSpeed:F1} blocks/sec",
+                        $"Active rift wards: {activeRiftWards?.Count ?? 0}",
+                        "",
+                        "Commands:",
+                        "  /dv riftward speed <multiplier> - Set healing speed (or 'global' to use /dv speed)",
+                        "  /dv riftward rate <blocks/sec> - Set base healing rate",
+                        "  /dv riftward list - Show all tracked rift wards"
+                    }, "Rift ward info sent to chat");
+
+                default:
+                    return TextCommandResult.Error($"Unknown riftward action: {action}. Use: speed, rate, list, or info");
+            }
+        }
+
+        private TextCommandResult HandleRiftWardSpeedCommand(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                double effectiveSpeed = config.RiftWardSpeedMultiplier > 0 ? config.RiftWardSpeedMultiplier : config.SpeedMultiplier;
+                string speedSource = config.RiftWardSpeedMultiplier > 0 ? "custom" : "global";
+                return TextCommandResult.Success($"Rift ward healing speed: {effectiveSpeed:F2}x ({speedSource}). Use '/dv riftward speed <multiplier>' to set, or 'global' to use devastation speed.");
+            }
+
+            if (value.ToLowerInvariant() == "global" || value.ToLowerInvariant() == "default")
+            {
+                config.RiftWardSpeedMultiplier = -1;
+                SaveConfig();
+                return TextCommandResult.Success($"Rift ward healing now uses global devastation speed ({config.SpeedMultiplier:F2}x)");
+            }
+
+            if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsedSpeed))
+            {
+                return TextCommandResult.Error("Invalid number. Usage: /dv riftward speed <multiplier> (e.g., 5, 10, or 'global')");
+            }
+
+            double newSpeed = Math.Clamp(parsedSpeed, 0.01, 1000.0);
+            config.RiftWardSpeedMultiplier = newSpeed;
+            SaveConfig();
+            return TextCommandResult.Success($"Rift ward healing speed set to {config.RiftWardSpeedMultiplier:F2}x (effective rate: {config.RiftWardHealingRate * newSpeed:F1} blocks/sec)");
+        }
+
+        private TextCommandResult HandleRiftWardRateCommand(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return TextCommandResult.Success($"Rift ward base healing rate: {config.RiftWardHealingRate:F1} blocks/sec. Use '/dv riftward rate <blocks>' to set.");
+            }
+
+            if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsedRate))
+            {
+                return TextCommandResult.Error("Invalid number. Usage: /dv riftward rate <blocks/sec> (e.g., 10, 50, 100)");
+            }
+
+            double newRate = Math.Clamp(parsedRate, 0.1, 10000.0);
+            config.RiftWardHealingRate = newRate;
+            SaveConfig();
+            double effectiveSpeed = config.RiftWardSpeedMultiplier > 0 ? config.RiftWardSpeedMultiplier : config.SpeedMultiplier;
+            return TextCommandResult.Success($"Rift ward base healing rate set to {config.RiftWardHealingRate:F1} blocks/sec (effective: {config.RiftWardHealingRate * effectiveSpeed:F1} blocks/sec)");
+        }
+
+        private TextCommandResult HandleRiftWardListCommand(TextCommandCallingArgs args)
+        {
+            if (activeRiftWards == null || activeRiftWards.Count == 0)
+            {
+                return TextCommandResult.Success("No rift wards are currently tracked.");
+            }
+
+            var lines = new List<string> { $"=== Tracked Rift Wards ({activeRiftWards.Count}) ===" };
+            foreach (var ward in activeRiftWards)
+            {
+                bool isActive = IsRiftWardActive(ward.Pos);
+                string status = isActive ? "ACTIVE" : "inactive";
+                lines.Add($"  {ward.Pos} - {status}, healed {ward.BlocksHealed} blocks");
+            }
+            return SendChatLines(args, lines, "Rift ward list sent to chat");
         }
 
         private TextCommandResult HandleAddCommand(TextCommandCallingArgs args, bool isHealing)
@@ -2033,14 +2157,14 @@ namespace SpreadingDevastation
                             sapi.World.BlockAccessor.SetBlock(newBlock.Id, targetPos);
                         }
                     }
-                    
-                    // Remove from regrowing blocks list (instant heal, no need to track)
-                    regrowingBlocks.RemoveAll(rb => rb.Pos.Equals(targetPos));
-                    
+
+                    // Note: We don't remove from regrowingBlocks here to avoid O(n) overhead
+                    // Healed blocks will simply be skipped when regeneration runs
+
                     healedCount++;
                 }
             }
-            
+
             return healedCount;
         }
 
@@ -4250,15 +4374,25 @@ namespace SpreadingDevastation
             if (activeRiftWards == null || activeRiftWards.Count == 0) return;
 
             double currentTime = sapi.World.Calendar.TotalHours;
+            double activeCheckIntervalHours = 1.0 / 3600.0; // Check active state once per second (1 second = 1/3600 hours)
 
             // Calculate blocks to heal per rift ward this tick
             // dt is in seconds, RiftWardHealingRate is blocks per second
-            double blocksToHealThisTick = config.RiftWardHealingRate * dt * config.SpeedMultiplier;
+            // Use RiftWardSpeedMultiplier if set (>0), otherwise use global SpeedMultiplier
+            double speedMult = config.RiftWardSpeedMultiplier > 0 ? config.RiftWardSpeedMultiplier : config.SpeedMultiplier;
+            double blocksToHealThisTick = config.RiftWardHealingRate * dt * speedMult;
 
             foreach (var ward in activeRiftWards)
             {
+                // Use cached active state, only check via reflection once per second
+                if (currentTime - ward.LastActiveCheck >= activeCheckIntervalHours)
+                {
+                    ward.CachedIsActive = IsRiftWardActive(ward.Pos);
+                    ward.LastActiveCheck = currentTime;
+                }
+
                 // Only heal if the rift ward is active (has fuel)
-                if (!IsRiftWardActive(ward.Pos)) continue;
+                if (!ward.CachedIsActive) continue;
 
                 // Track fractional healing across ticks
                 int blocksToProcess = (int)blocksToHealThisTick;
@@ -4329,8 +4463,9 @@ namespace SpreadingDevastation
                         }
                     }
 
-                    // Remove from regrowing blocks list
-                    regrowingBlocks?.RemoveAll(rb => rb.Pos.Equals(targetPos));
+                    // Note: We don't remove from regrowingBlocks here to avoid O(n) overhead
+                    // The regrowingBlocks list is for tracking purposes; healed blocks will simply
+                    // be skipped when regeneration runs since they're no longer devastated
                     healedCount++;
                 }
             }
