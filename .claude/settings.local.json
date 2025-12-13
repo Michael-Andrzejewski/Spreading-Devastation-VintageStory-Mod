@@ -5,7 +5,10 @@
       "Bash(dotnet --list-sdks:*)",
       "WebSearch",
       "WebFetch(domain:wiki.vintagestory.at)",
-      "WebFetch(domain:apidocs.vintagestory.at)"
+      "WebFetch(domain:apidocs.vintagestory.at)",
+      "WebFetch(domain:mods.vintagestory.at)",
+      "WebFetch(domain:github.com)",
+      "Bash(dir \"C:\\Users\\maaro\\AppData\\Roaming\\VintagestoryData\\Logs\")"
     ]
   }
 }

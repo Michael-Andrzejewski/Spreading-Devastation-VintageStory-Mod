@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Globalization;
+using System.Reflection;
 using System.Security.Cryptography;
 using ProtoBuf;
 using Vintagestory.API.Common;
@@ -158,6 +159,32 @@ namespace SpreadingDevastation
         /// Lower values create more sparse, irregular borders.
         /// </summary>
         public double ChunkEdgeBleedChance { get; set; } = 0.3;
+
+        // === Rift Ward Settings ===
+
+        /// <summary>
+        /// Protection radius in blocks for rift wards (default: 128).
+        /// Rift wards prevent devastation from spreading within this radius.
+        /// </summary>
+        public int RiftWardProtectionRadius { get; set; } = 128;
+
+        /// <summary>
+        /// Healing rate in blocks per second for rift wards (default: 5.0).
+        /// Rift wards will heal devastated blocks within their radius at this rate.
+        /// </summary>
+        public double RiftWardHealingRate { get; set; } = 5.0;
+
+        /// <summary>
+        /// Whether rift wards should actively heal devastated blocks (default: true).
+        /// If false, rift wards only prevent new devastation.
+        /// </summary>
+        public bool RiftWardHealingEnabled { get; set; } = true;
+
+        /// <summary>
+        /// Interval in seconds between rift ward scans for new/removed rift wards (default: 30.0).
+        /// Lower values detect rift wards faster but use more CPU.
+        /// </summary>
+        public double RiftWardScanIntervalSeconds { get; set; } = 30.0;
     }
 
     public class SpreadingDevastationModSystem : ModSystem
@@ -320,6 +347,55 @@ namespace SpreadingDevastation
             public int RemainingSpread; // How many more blocks this can infect (decrements with each spread)
         }
 
+        /// <summary>
+        /// Represents an active rift ward that protects an area from devastation.
+        /// Rift wards prevent devastation spread and actively heal devastated blocks.
+        /// </summary>
+        [ProtoContract]
+        public class RiftWard
+        {
+            [ProtoMember(1)]
+            public BlockPos Pos;
+
+            [ProtoMember(2)]
+            public double DiscoveredTime; // Game time when this rift ward was discovered
+
+            [ProtoMember(3)]
+            public int BlocksHealed = 0; // Total blocks healed by this rift ward
+
+            [ProtoMember(4)]
+            public double LastHealTime = 0; // Last time this ward performed healing
+
+            /// <summary>
+            /// Checks if a position is within the protection radius of this rift ward.
+            /// </summary>
+            public bool IsPositionProtected(BlockPos targetPos, int protectionRadius)
+            {
+                if (Pos == null || targetPos == null) return false;
+
+                // Use squared distance for efficiency (avoid sqrt)
+                int dx = targetPos.X - Pos.X;
+                int dy = targetPos.Y - Pos.Y;
+                int dz = targetPos.Z - Pos.Z;
+                int distanceSquared = dx * dx + dy * dy + dz * dz;
+
+                return distanceSquared <= protectionRadius * protectionRadius;
+            }
+
+            /// <summary>
+            /// Gets the squared distance from this rift ward to a position.
+            /// </summary>
+            public int GetDistanceSquared(BlockPos targetPos)
+            {
+                if (Pos == null || targetPos == null) return int.MaxValue;
+
+                int dx = targetPos.X - Pos.X;
+                int dy = targetPos.Y - Pos.Y;
+                int dz = targetPos.Z - Pos.Z;
+                return dx * dx + dy * dy + dz * dz;
+            }
+        }
+
         private ICoreServerAPI sapi;
         private List<RegrowingBlocks> regrowingBlocks;
         private List<DevastationSource> devastationSources;
@@ -343,6 +419,11 @@ namespace SpreadingDevastation
         // Stuck chunk repair queue
         private Queue<long> chunksNeedingRepair = new Queue<long>(); // Chunk keys that need repair (stuck chunks)
 
+        // Rift Ward tracking
+        private List<RiftWard> activeRiftWards = new List<RiftWard>();
+        private double lastRiftWardScanTime = 0; // Track last scan for new rift wards
+        private HashSet<long> protectedChunkKeys = new HashSet<long>(); // Cache of chunk keys protected by rift wards
+
         public override void Start(ICoreAPI api)
         {
             base.Start(api);
@@ -360,7 +441,14 @@ namespace SpreadingDevastation
 
             // Process devastated chunks (spawning and rapid spreading) every 500ms
             api.Event.RegisterGameTickListener(ProcessDevastatedChunks, 500);
-            
+
+            // Process rift wards (check active state and healing) every 500ms
+            api.Event.RegisterGameTickListener(ProcessRiftWards, 500);
+
+            // Listen for block placement/removal to track rift wards efficiently
+            api.Event.DidPlaceBlock += OnBlockPlaced;
+            api.Event.DidBreakBlock += OnBlockBroken;
+
             // Save/load events
             api.Event.SaveGameLoaded += OnSaveGameLoading;
             api.Event.GameWorldSave += OnSaveGameSaving;
@@ -441,7 +529,14 @@ namespace SpreadingDevastation
                     }
                 }
 
-                sapi.Logger.Notification($"SpreadingDevastation: Loaded {devastationSources?.Count ?? 0} sources, {regrowingBlocks?.Count ?? 0} regrowing blocks, {devastatedChunks?.Count ?? 0} devastated chunks");
+                // Load rift wards
+                byte[] riftWardsData = sapi.WorldManager.SaveGame.GetData("riftWards");
+                activeRiftWards = riftWardsData == null ? new List<RiftWard>() : SerializerUtil.Deserialize<List<RiftWard>>(riftWardsData);
+
+                // Rebuild protected chunk cache
+                RebuildProtectedChunkCache();
+
+                sapi.Logger.Notification($"SpreadingDevastation: Loaded {devastationSources?.Count ?? 0} sources, {regrowingBlocks?.Count ?? 0} regrowing blocks, {devastatedChunks?.Count ?? 0} devastated chunks, {activeRiftWards?.Count ?? 0} rift wards");
             }
             catch (Exception ex)
             {
@@ -450,6 +545,7 @@ namespace SpreadingDevastation
                 regrowingBlocks = regrowingBlocks ?? new List<RegrowingBlocks>();
                 devastationSources = devastationSources ?? new List<DevastationSource>();
                 devastatedChunks = devastatedChunks ?? new Dictionary<long, DevastatedChunk>();
+                activeRiftWards = activeRiftWards ?? new List<RiftWard>();
             }
         }
 
@@ -466,7 +562,10 @@ namespace SpreadingDevastation
                 var chunkList = devastatedChunks?.Values.ToList() ?? new List<DevastatedChunk>();
                 sapi.WorldManager.SaveGame.StoreData("devastatedChunks", SerializerUtil.Serialize(chunkList));
 
-                sapi.Logger.VerboseDebug($"SpreadingDevastation: Saved {devastationSources?.Count ?? 0} sources, {regrowingBlocks?.Count ?? 0} regrowing blocks, {devastatedChunks?.Count ?? 0} devastated chunks");
+                // Save rift wards
+                sapi.WorldManager.SaveGame.StoreData("riftWards", SerializerUtil.Serialize(activeRiftWards ?? new List<RiftWard>()));
+
+                sapi.Logger.VerboseDebug($"SpreadingDevastation: Saved {devastationSources?.Count ?? 0} sources, {regrowingBlocks?.Count ?? 0} regrowing blocks, {devastatedChunks?.Count ?? 0} devastated chunks, {activeRiftWards?.Count ?? 0} rift wards");
             }
             catch (Exception ex)
             {
@@ -1835,14 +1934,20 @@ namespace SpreadingDevastation
                     continue; // Already devastated, try again
                 }
 
+                // Check if protected by rift ward
+                if (IsBlockProtectedByRiftWard(targetPos))
+                {
+                    continue; // Protected by rift ward, try again
+                }
+
                 string devastatedBlock = "";
                 string regeneratesTo = "";
-                
+
                 if (TryGetDevastatedForm(block, out devastatedBlock, out regeneratesTo))
                 {
                     Block newBlock = sapi.World.GetBlock(new AssetLocation("game", devastatedBlock));
                     sapi.World.BlockAccessor.SetBlock(newBlock.Id, targetPos);
-                    
+
                     // Track this block for regeneration
                     regrowingBlocks.Add(new RegrowingBlocks
                     {
@@ -1850,18 +1955,18 @@ namespace SpreadingDevastation
                         Out = regeneratesTo,
                         LastTime = sapi.World.Calendar.TotalHours
                     });
-                    
+
                     devastatedCount++;
-                    
+
                     // Track for metastasis system
                     source.BlocksDevastatedTotal++;
                     source.BlocksSinceLastMetastasis++;
                 }
             }
-            
+
             return devastatedCount;
         }
-        
+
         private double GenerateWeightedDistance(double maxDistance)
         {
             // Generate distance with bias toward closer blocks
@@ -2862,6 +2967,9 @@ namespace SpreadingDevastation
                     if (devastatedChunks.ContainsKey(newChunkKey)) continue;
                     if (chunksToAdd.Any(c => c.ChunkKey == newChunkKey)) continue;
 
+                    // Skip if chunk is protected by a rift ward
+                    if (IsChunkProtectedByRiftWard(newChunkX, newChunkZ)) continue;
+
                     // Check if there's at least one devastated block at the edge of the source chunk
                     // bordering the target chunk direction
                     if (!HasDevastatedBlockAtEdge(chunk, offsetX, offsetZ)) continue;
@@ -3219,6 +3327,12 @@ namespace SpreadingDevastation
                         continue; // Already devastated
                     }
 
+                    // Check if protected by rift ward
+                    if (IsBlockProtectedByRiftWard(targetPos))
+                    {
+                        continue; // Protected by rift ward
+                    }
+
                     string devastatedBlock, regeneratesTo;
                     if (TryGetDevastatedForm(block, out devastatedBlock, out regeneratesTo))
                     {
@@ -3503,6 +3617,12 @@ namespace SpreadingDevastation
                     continue;
                 }
 
+                // Check if protected by rift ward
+                if (IsBlockProtectedByRiftWard(adjacentPos))
+                {
+                    continue; // Protected by rift ward
+                }
+
                 if (!TryGetDevastatedForm(adjacentBlock, out string devastatedForm, out string regeneratesTo))
                 {
                     continue;
@@ -3609,6 +3729,12 @@ namespace SpreadingDevastation
                     if (targetBlock == null || targetBlock.Id == 0 || IsAlreadyDevastated(targetBlock))
                     {
                         continue;
+                    }
+
+                    // Check if protected by rift ward
+                    if (IsBlockProtectedByRiftWard(targetPos))
+                    {
+                        continue; // Protected by rift ward
                     }
 
                     if (!TryGetDevastatedForm(targetBlock, out string devastatedForm, out string regeneratesTo))
@@ -3886,6 +4012,404 @@ namespace SpreadingDevastation
             }
 
             return edgeFrontier;
+        }
+
+        #endregion
+
+        #region Rift Ward Protection
+
+        /// <summary>
+        /// Called when a block is placed. Checks if it's a rift ward and tracks it.
+        /// </summary>
+        private void OnBlockPlaced(IServerPlayer byPlayer, int oldblockId, BlockSelection blockSel, ItemStack withItemStack)
+        {
+            if (blockSel?.Position == null) return;
+
+            Block block = sapi.World.BlockAccessor.GetBlock(blockSel.Position);
+            if (IsRiftWardBlock(block))
+            {
+                // Track this rift ward position (it might not be active yet until fueled)
+                long posKey = GetPositionKey(blockSel.Position);
+                if (!activeRiftWards.Any(rw => GetPositionKey(rw.Pos) == posKey))
+                {
+                    activeRiftWards.Add(new RiftWard
+                    {
+                        Pos = blockSel.Position.Copy(),
+                        DiscoveredTime = sapi.World.Calendar.TotalHours
+                    });
+                    sapi.Logger.Notification($"SpreadingDevastation: Rift ward placed at {blockSel.Position}");
+                    RebuildProtectedChunkCache();
+                }
+            }
+        }
+
+        /// <summary>
+        /// Called when a block is broken. Removes rift ward from tracking if applicable.
+        /// </summary>
+        private void OnBlockBroken(IServerPlayer byPlayer, int oldblockId, BlockSelection blockSel)
+        {
+            if (blockSel?.Position == null) return;
+
+            // Check if we were tracking a rift ward at this position
+            long posKey = GetPositionKey(blockSel.Position);
+            var ward = activeRiftWards.FirstOrDefault(rw => GetPositionKey(rw.Pos) == posKey);
+            if (ward != null)
+            {
+                activeRiftWards.Remove(ward);
+                sapi.Logger.Notification($"SpreadingDevastation: Rift ward at {blockSel.Position} was broken (healed {ward.BlocksHealed} blocks)");
+                RebuildProtectedChunkCache();
+            }
+        }
+
+        /// <summary>
+        /// Processes rift ward active state checks and healing.
+        /// No longer scans for new rift wards - that's handled by block placement events.
+        /// </summary>
+        private void ProcessRiftWards(float dt)
+        {
+            if (sapi == null || activeRiftWards == null || activeRiftWards.Count == 0) return;
+
+            double currentTime = sapi.World.Calendar.TotalHours;
+            double checkIntervalHours = config.RiftWardScanIntervalSeconds / 3600.0;
+
+            // Periodically verify rift wards are still active (have fuel)
+            if (currentTime - lastRiftWardScanTime >= checkIntervalHours)
+            {
+                lastRiftWardScanTime = currentTime;
+                VerifyRiftWardActiveState();
+            }
+
+            // Process healing for each active rift ward
+            if (config.RiftWardHealingEnabled)
+            {
+                ProcessRiftWardHealing(dt);
+            }
+        }
+
+        /// <summary>
+        /// Verifies that tracked rift wards are still active (have fuel and are on).
+        /// Only checks existing tracked wards - no scanning for new ones.
+        /// </summary>
+        private void VerifyRiftWardActiveState()
+        {
+            if (activeRiftWards == null || activeRiftWards.Count == 0) return;
+
+            var wardsToRemove = new List<RiftWard>();
+            bool anyBecameActive = false;
+
+            foreach (var ward in activeRiftWards)
+            {
+                Block block = sapi.World.BlockAccessor.GetBlock(ward.Pos);
+
+                // Check if block still exists
+                if (!IsRiftWardBlock(block))
+                {
+                    wardsToRemove.Add(ward);
+                    sapi.Logger.Notification($"SpreadingDevastation: Rift ward at {ward.Pos} no longer exists (healed {ward.BlocksHealed} blocks)");
+                    continue;
+                }
+
+                // Check active state
+                bool isActive = IsRiftWardActive(ward.Pos);
+
+                // If ward just became active, notify
+                if (isActive && ward.BlocksHealed == 0 && ward.LastHealTime == 0)
+                {
+                    BroadcastMessage($"Rift ward at {ward.Pos} is now ACTIVE and protecting!");
+                    anyBecameActive = true;
+                }
+
+                // If ward ran out of fuel, remove from active tracking
+                // (but don't remove entirely - it might be refueled)
+                if (!isActive && ward.LastHealTime > 0)
+                {
+                    sapi.Logger.Notification($"SpreadingDevastation: Rift ward at {ward.Pos} ran out of fuel (healed {ward.BlocksHealed} blocks)");
+                    // Reset heal time so we can detect when it becomes active again
+                    ward.LastHealTime = 0;
+                }
+            }
+
+            foreach (var ward in wardsToRemove)
+            {
+                activeRiftWards.Remove(ward);
+            }
+
+            if (wardsToRemove.Count > 0 || anyBecameActive)
+            {
+                RebuildProtectedChunkCache();
+            }
+        }
+
+        /// <summary>
+        /// Checks if a block is a rift ward block.
+        /// </summary>
+        private bool IsRiftWardBlock(Block block)
+        {
+            if (block == null || block.Code == null) return false;
+
+            // Check for game:riftward block
+            return block.Code.Path == "riftward" ||
+                   block.Code.ToString() == "game:riftward" ||
+                   block.Code.Path.Contains("riftward");
+        }
+
+        /// <summary>
+        /// Broadcasts a message to all online players and logs it.
+        /// </summary>
+        private void BroadcastMessage(string message)
+        {
+            sapi.Logger.Notification($"SpreadingDevastation: {message}");
+            foreach (var player in sapi.World.AllOnlinePlayers)
+            {
+                if (player is IServerPlayer serverPlayer)
+                {
+                    serverPlayer.SendMessage(GlobalConstants.GeneralChatGroup, $"[RiftWard] {message}", EnumChatType.Notification);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Checks if a rift ward at the given position is active (has fuel and is on).
+        /// Uses reflection to access the BlockEntityRiftWard properties since it's in the game DLL.
+        /// </summary>
+        private bool IsRiftWardActive(BlockPos pos)
+        {
+            if (pos == null) return false;
+
+            try
+            {
+                // Get the block entity at this position
+                var blockEntity = sapi.World.BlockAccessor.GetBlockEntity(pos);
+                if (blockEntity == null) return false;
+
+                // Check if it's a rift ward block entity by type name
+                var typeName = blockEntity.GetType().Name;
+                if (!typeName.Contains("RiftWard")) return false;
+
+                // Use reflection to check the "On" property
+                var onProperty = blockEntity.GetType().GetProperty("On");
+                if (onProperty != null)
+                {
+                    var isOn = onProperty.GetValue(blockEntity);
+                    if (isOn is bool onValue && onValue)
+                    {
+                        return true;
+                    }
+                }
+
+                // Fallback: check HasFuel property
+                var hasFuelProperty = blockEntity.GetType().GetProperty("HasFuel");
+                if (hasFuelProperty != null)
+                {
+                    var hasFuel = hasFuelProperty.GetValue(blockEntity);
+                    if (hasFuel is bool fuelValue && fuelValue)
+                    {
+                        return true;
+                    }
+                }
+
+                // Also check fuelDays field directly as another fallback
+                var fuelDaysField = blockEntity.GetType().GetField("fuelDays",
+                    BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public);
+                if (fuelDaysField != null)
+                {
+                    var fuelDays = fuelDaysField.GetValue(blockEntity);
+                    if (fuelDays is double daysValue && daysValue > 0)
+                    {
+                        return true;
+                    }
+                    if (fuelDays is float floatDays && floatDays > 0)
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+            catch (Exception ex)
+            {
+                sapi.Logger.Warning($"SpreadingDevastation: Error checking rift ward active state at {pos}: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Gets a unique key for a block position.
+        /// </summary>
+        private long GetPositionKey(BlockPos pos)
+        {
+            if (pos == null) return 0;
+            return ((long)pos.X << 40) | ((long)(pos.Y & 0xFFFF) << 24) | (uint)(pos.Z & 0xFFFFFF);
+        }
+
+        /// <summary>
+        /// Processes healing for all active rift wards.
+        /// </summary>
+        private void ProcessRiftWardHealing(float dt)
+        {
+            if (activeRiftWards == null || activeRiftWards.Count == 0) return;
+
+            double currentTime = sapi.World.Calendar.TotalHours;
+
+            // Calculate blocks to heal per rift ward this tick
+            // dt is in seconds, RiftWardHealingRate is blocks per second
+            double blocksToHealThisTick = config.RiftWardHealingRate * dt * config.SpeedMultiplier;
+
+            foreach (var ward in activeRiftWards)
+            {
+                // Only heal if the rift ward is active (has fuel)
+                if (!IsRiftWardActive(ward.Pos)) continue;
+
+                // Track fractional healing across ticks
+                int blocksToProcess = (int)blocksToHealThisTick;
+                if (blocksToProcess < 1 && sapi.World.Rand.NextDouble() < blocksToHealThisTick)
+                {
+                    blocksToProcess = 1;
+                }
+
+                if (blocksToProcess > 0)
+                {
+                    int healed = HealBlocksAroundRiftWard(ward, blocksToProcess);
+                    ward.BlocksHealed += healed;
+                    ward.LastHealTime = currentTime;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Heals devastated blocks within the rift ward's protection radius.
+        /// </summary>
+        private int HealBlocksAroundRiftWard(RiftWard ward, int blocksToHeal)
+        {
+            if (ward.Pos == null) return 0;
+
+            int healedCount = 0;
+            int maxAttempts = blocksToHeal * 10;
+            int radius = config.RiftWardProtectionRadius;
+
+            for (int attempt = 0; attempt < maxAttempts && healedCount < blocksToHeal; attempt++)
+            {
+                // Generate random position within the protection radius
+                // Use spherical distribution for more even coverage
+                double distance = sapi.World.Rand.NextDouble() * radius;
+                double angle = sapi.World.Rand.NextDouble() * 2 * Math.PI;
+                double angleY = (sapi.World.Rand.NextDouble() - 0.5) * Math.PI;
+
+                int offsetX = (int)(distance * Math.Cos(angle) * Math.Cos(angleY));
+                int offsetY = (int)(distance * Math.Sin(angleY));
+                int offsetZ = (int)(distance * Math.Sin(angle) * Math.Cos(angleY));
+
+                BlockPos targetPos = new BlockPos(
+                    ward.Pos.X + offsetX,
+                    ward.Pos.Y + offsetY,
+                    ward.Pos.Z + offsetZ
+                );
+
+                if (targetPos.Y < 1) continue;
+
+                Block block = sapi.World.BlockAccessor.GetBlock(targetPos);
+                if (block == null || block.Id == 0) continue;
+
+                // Check if this is a devastated block
+                if (!IsAlreadyDevastated(block)) continue;
+
+                // Heal the block
+                if (TryGetHealedForm(block, out string healedBlock))
+                {
+                    if (healedBlock == "none")
+                    {
+                        sapi.World.BlockAccessor.SetBlock(0, targetPos);
+                    }
+                    else
+                    {
+                        Block newBlock = sapi.World.GetBlock(new AssetLocation("game", healedBlock));
+                        if (newBlock != null)
+                        {
+                            sapi.World.BlockAccessor.SetBlock(newBlock.Id, targetPos);
+                        }
+                    }
+
+                    // Remove from regrowing blocks list
+                    regrowingBlocks?.RemoveAll(rb => rb.Pos.Equals(targetPos));
+                    healedCount++;
+                }
+            }
+
+            return healedCount;
+        }
+
+        /// <summary>
+        /// Rebuilds the cache of chunk keys that are protected by rift wards.
+        /// </summary>
+        private void RebuildProtectedChunkCache()
+        {
+            protectedChunkKeys.Clear();
+
+            foreach (var ward in activeRiftWards)
+            {
+                if (ward.Pos == null) continue;
+
+                int radius = config.RiftWardProtectionRadius;
+
+                // Calculate which chunks are covered by this rift ward
+                int minChunkX = (ward.Pos.X - radius) / CHUNK_SIZE;
+                int maxChunkX = (ward.Pos.X + radius) / CHUNK_SIZE;
+                int minChunkZ = (ward.Pos.Z - radius) / CHUNK_SIZE;
+                int maxChunkZ = (ward.Pos.Z + radius) / CHUNK_SIZE;
+
+                for (int cx = minChunkX; cx <= maxChunkX; cx++)
+                {
+                    for (int cz = minChunkZ; cz <= maxChunkZ; cz++)
+                    {
+                        protectedChunkKeys.Add(DevastatedChunk.MakeChunkKey(cx, cz));
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Checks if a block position is protected by any active rift ward.
+        /// </summary>
+        private bool IsBlockProtectedByRiftWard(BlockPos pos)
+        {
+            if (pos == null || activeRiftWards == null || activeRiftWards.Count == 0) return false;
+
+            // Quick chunk-level check first
+            int chunkX = pos.X / CHUNK_SIZE;
+            int chunkZ = pos.Z / CHUNK_SIZE;
+            long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
+
+            if (!protectedChunkKeys.Contains(chunkKey)) return false;
+
+            // Detailed per-ward check
+            int radiusSquared = config.RiftWardProtectionRadius * config.RiftWardProtectionRadius;
+
+            foreach (var ward in activeRiftWards)
+            {
+                if (ward.Pos == null) continue;
+
+                int dx = pos.X - ward.Pos.X;
+                int dy = pos.Y - ward.Pos.Y;
+                int dz = pos.Z - ward.Pos.Z;
+                int distanceSquared = dx * dx + dy * dy + dz * dz;
+
+                if (distanceSquared <= radiusSquared)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Checks if a chunk is protected by any active rift ward.
+        /// This is a quick check that only looks at chunk-level protection.
+        /// </summary>
+        private bool IsChunkProtectedByRiftWard(int chunkX, int chunkZ)
+        {
+            long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
+            return protectedChunkKeys.Contains(chunkKey);
         }
 
         #endregion
