@@ -899,25 +899,22 @@ namespace SpreadingDevastation
         }
 
         /// <summary>
-        /// Sends multi-line command output as individual chat messages so the in-game
-        /// chat log can be scrolled, while still returning a result for consoles.
+        /// Sends multi-line command output using SendMessage, then returns empty success.
         /// </summary>
-        private TextCommandResult SendChatLines(TextCommandCallingArgs args, IEnumerable<string> lines, string playerAck = "Details sent to chat (scroll to view)")
+        private TextCommandResult SendChatLines(TextCommandCallingArgs args, IEnumerable<string> lines, string playerAck = null)
         {
             var player = args?.Caller?.Player as IServerPlayer;
             var safeLines = lines?.Where(l => !string.IsNullOrWhiteSpace(l)).ToList() ?? new List<string>();
 
-            if (player != null)
+            if (player != null && safeLines.Count > 0)
             {
-                foreach (string line in safeLines)
-                {
-                    player.SendMessage(GlobalConstants.GeneralChatGroup, line, EnumChatType.CommandSuccess);
-                }
-
-                return TextCommandResult.Success(playerAck);
+                // Send as a single message with newlines
+                string combined = string.Join("\n", safeLines);
+                player.SendMessage(GlobalConstants.GeneralChatGroup, combined, EnumChatType.Notification);
             }
 
-            return TextCommandResult.Success(string.Join("\n", safeLines));
+            // Return empty success to avoid duplicate output
+            return TextCommandResult.Success();
         }
 
         #region Command Handlers
@@ -1001,20 +998,25 @@ namespace SpreadingDevastation
                 .BeginSubCommand("chunk")
                     .WithDescription("Mark the chunk you're looking at as devastated, or configure chunk settings")
                     .WithArgs(api.ChatCommands.Parsers.OptionalWord("action"),
-                              api.ChatCommands.Parsers.OptionalWord("value"))
+                              api.ChatCommands.Parsers.OptionalAll("value"))
                     .HandleWith(HandleChunkCommand)
                 .EndSubCommand()
                 .BeginSubCommand("riftward")
                     .WithDescription("Configure rift ward settings (speed, list, info)")
                     .WithArgs(api.ChatCommands.Parsers.OptionalWord("action"),
-                              api.ChatCommands.Parsers.OptionalWord("value"))
+                              api.ChatCommands.Parsers.OptionalAll("value"))
                     .HandleWith(HandleRiftWardCommand)
                 .EndSubCommand()
                 .BeginSubCommand("fog")
                     .WithDescription("Configure devastation fog/sky effect")
                     .WithArgs(api.ChatCommands.Parsers.OptionalWord("setting"),
-                              api.ChatCommands.Parsers.OptionalWord("value"))
+                              api.ChatCommands.Parsers.OptionalAll("value"))
                     .HandleWith(HandleFogCommand)
+                .EndSubCommand()
+                .BeginSubCommand("reset")
+                    .WithDescription("Reset all config values to defaults")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("confirm"))
+                    .HandleWith(HandleResetCommand)
                 .EndSubCommand();
         }
 
@@ -1027,13 +1029,13 @@ namespace SpreadingDevastation
                 return SendChatLines(args, new[]
                 {
                     $"Current devastation speed: {config.SpeedMultiplier:F2}x",
-                    "Usage: /dv speed <multiplier> (e.g., 0.5 for half speed, 5 for 5x speed)"
+                    "Usage: /dv speed [multiplier] (e.g., 0.5 for half speed, 5 for 5x speed)"
                 }, "Speed info sent to chat (scrollable)");
             }
 
             if (!double.TryParse(rawArg, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsedSpeed))
             {
-                return TextCommandResult.Error("Invalid number. Usage: /dv speed <multiplier> (e.g., 0.5, 1, 5)");
+                return TextCommandResult.Error("Invalid number. Usage: /dv speed [multiplier] (e.g., 0.5, 1, 5)");
             }
 
             double newSpeed = Math.Clamp(parsedSpeed, 0.01, 100.0);
@@ -1061,7 +1063,7 @@ namespace SpreadingDevastation
                 case "radius":
                     if (string.IsNullOrWhiteSpace(value))
                     {
-                        return TextCommandResult.Success($"Rift ward protection radius: {config.RiftWardProtectionRadius} blocks. Use '/dv riftward radius <blocks>' to set.");
+                        return TextCommandResult.Success($"Rift ward protection radius: {config.RiftWardProtectionRadius} blocks. Use '/dv riftward radius [blocks]' to set.");
                     }
                     if (int.TryParse(value, out int newRadius))
                     {
@@ -1082,15 +1084,15 @@ namespace SpreadingDevastation
                         "=== Rift Ward Settings ===",
                         $"Protection radius: {config.RiftWardProtectionRadius} blocks",
                         $"Healing enabled: {config.RiftWardHealingEnabled}",
-                        $"Base healing rate: {config.RiftWardHealingRate:F1} blocks/sec",
+                        $"Base healing rate: {config.RiftWardHealingRate:F1} blk/s",
                         $"Speed multiplier: {effectiveSpeed:F2}x ({speedSource})",
-                        $"Effective rate: {config.RiftWardHealingRate * effectiveSpeed:F1} blocks/sec",
+                        $"Effective rate: {config.RiftWardHealingRate * effectiveSpeed:F1} blk/s",
                         $"Active rift wards: {activeRiftWards?.Count ?? 0}",
                         "",
                         "Commands:",
-                        "  /dv riftward radius <blocks> - Set protection radius",
-                        "  /dv riftward speed <multiplier> - Set healing speed (or 'global' to use /dv speed)",
-                        "  /dv riftward rate <blocks/sec> - Set base healing rate",
+                        "  /dv riftward radius [blocks] - Set protection radius",
+                        "  /dv riftward speed [multiplier] - Set healing speed (or 'global' to use /dv speed)",
+                        "  /dv riftward rate [blk/s] - Set base healing rate",
                         "  /dv riftward list - Show all tracked rift wards"
                     }, "Rift ward info sent to chat");
 
@@ -1105,7 +1107,7 @@ namespace SpreadingDevastation
             {
                 double effectiveSpeed = config.RiftWardSpeedMultiplier > 0 ? config.RiftWardSpeedMultiplier : config.SpeedMultiplier;
                 string speedSource = config.RiftWardSpeedMultiplier > 0 ? "custom" : "global";
-                return TextCommandResult.Success($"Rift ward healing speed: {effectiveSpeed:F2}x ({speedSource}). Use '/dv riftward speed <multiplier>' to set, or 'global' to use devastation speed.");
+                return TextCommandResult.Success($"Rift ward healing speed: {effectiveSpeed:F2}x ({speedSource}). Use '/dv riftward speed [multiplier]' to set, or 'global' to use devastation speed.");
             }
 
             if (value.ToLowerInvariant() == "global" || value.ToLowerInvariant() == "default")
@@ -1117,32 +1119,32 @@ namespace SpreadingDevastation
 
             if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsedSpeed))
             {
-                return TextCommandResult.Error("Invalid number. Usage: /dv riftward speed <multiplier> (e.g., 5, 10, or 'global')");
+                return TextCommandResult.Error("Invalid number. Usage: /dv riftward speed [multiplier] (e.g., 5, 10, or 'global')");
             }
 
             double newSpeed = Math.Clamp(parsedSpeed, 0.01, 1000.0);
             config.RiftWardSpeedMultiplier = newSpeed;
             SaveConfig();
-            return TextCommandResult.Success($"Rift ward healing speed set to {config.RiftWardSpeedMultiplier:F2}x (effective rate: {config.RiftWardHealingRate * newSpeed:F1} blocks/sec)");
+            return TextCommandResult.Success($"Rift ward healing speed set to {config.RiftWardSpeedMultiplier:F2}x (effective rate: {config.RiftWardHealingRate * newSpeed:F1} blk/s)");
         }
 
         private TextCommandResult HandleRiftWardRateCommand(string value)
         {
             if (string.IsNullOrWhiteSpace(value))
             {
-                return TextCommandResult.Success($"Rift ward base healing rate: {config.RiftWardHealingRate:F1} blocks/sec. Use '/dv riftward rate <blocks>' to set.");
+                return TextCommandResult.Success($"Rift ward base healing rate: {config.RiftWardHealingRate:F1} blk/s. Use '/dv riftward rate [value]' to set.");
             }
 
             if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsedRate))
             {
-                return TextCommandResult.Error("Invalid number. Usage: /dv riftward rate <blocks/sec> (e.g., 10, 50, 100)");
+                return TextCommandResult.Error("Invalid number. Usage: /dv riftward rate [value] (e.g., 10, 50, 100)");
             }
 
             double newRate = Math.Clamp(parsedRate, 0.1, 10000.0);
             config.RiftWardHealingRate = newRate;
             SaveConfig();
             double effectiveSpeed = config.RiftWardSpeedMultiplier > 0 ? config.RiftWardSpeedMultiplier : config.SpeedMultiplier;
-            return TextCommandResult.Success($"Rift ward base healing rate set to {config.RiftWardHealingRate:F1} blocks/sec (effective: {config.RiftWardHealingRate * effectiveSpeed:F1} blocks/sec)");
+            return TextCommandResult.Success($"Rift ward base healing rate set to {config.RiftWardHealingRate:F1} blk/s (effective: {config.RiftWardHealingRate * effectiveSpeed:F1} blk/s)");
         }
 
         private TextCommandResult HandleRiftWardListCommand(TextCommandCallingArgs args)
@@ -1186,12 +1188,12 @@ namespace SpreadingDevastation
                         BroadcastFogConfig();
                         return TextCommandResult.Success("Devastation fog effect DISABLED");
                     }
-                    return TextCommandResult.Error("Usage: /dv fog enabled <on|off>");
+                    return TextCommandResult.Error("Usage: /dv fog enabled [on|off]");
 
                 case "color":
                     if (string.IsNullOrWhiteSpace(value))
                     {
-                        return TextCommandResult.Success($"Fog color: R={config.FogColorR:F2} G={config.FogColorG:F2} B={config.FogColorB:F2}. Use '/dv fog color <r> <g> <b>' (0.0-1.0)");
+                        return TextCommandResult.Success($"Fog color: R={config.FogColorR:F2} G={config.FogColorG:F2} B={config.FogColorB:F2}. Use '/dv fog color [r] [g] [b]' (0.0-1.0)");
                     }
                     // Parse r g b from value (space-separated)
                     var parts = value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -1207,12 +1209,12 @@ namespace SpreadingDevastation
                         BroadcastFogConfig();
                         return TextCommandResult.Success($"Fog color set to R={config.FogColorR:F2} G={config.FogColorG:F2} B={config.FogColorB:F2}");
                     }
-                    return TextCommandResult.Error("Usage: /dv fog color <r> <g> <b> (values 0.0-1.0, e.g., '0.55 0.25 0.15')");
+                    return TextCommandResult.Error("Usage: /dv fog color [r] [g] [b] (values 0.0-1.0, e.g., '0.55 0.25 0.15')");
 
                 case "density":
                     if (string.IsNullOrWhiteSpace(value))
                     {
-                        return TextCommandResult.Success($"Fog density: {config.FogDensity:F4}. Use '/dv fog density <value>' (e.g., 0.004)");
+                        return TextCommandResult.Success($"Fog density: {config.FogDensity:F4}. Use '/dv fog density [value]' (e.g., 0.004)");
                     }
                     if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float density))
                     {
@@ -1226,7 +1228,7 @@ namespace SpreadingDevastation
                 case "min":
                     if (string.IsNullOrWhiteSpace(value))
                     {
-                        return TextCommandResult.Success($"Fog minimum: {config.FogMin:F2}. Use '/dv fog min <value>' (0.0-1.0)");
+                        return TextCommandResult.Success($"Fog minimum: {config.FogMin:F2}. Use '/dv fog min [value]' (0.0-1.0)");
                     }
                     if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float fogMin))
                     {
@@ -1241,7 +1243,7 @@ namespace SpreadingDevastation
                 case "weights":
                     if (string.IsNullOrWhiteSpace(value))
                     {
-                        return TextCommandResult.Success($"Fog weights: color={config.FogColorWeight:F2} density={config.FogDensityWeight:F2} min={config.FogMinWeight:F2}. Use '/dv fog weight <color|density|min> <value>'");
+                        return TextCommandResult.Success($"Fog weights: color={config.FogColorWeight:F2} density={config.FogDensityWeight:F2} min={config.FogMinWeight:F2}. Use '/dv fog weight [color|density|min] [value]'");
                     }
                     var weightParts = value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
                     if (weightParts.Length >= 2 &&
@@ -1267,13 +1269,13 @@ namespace SpreadingDevastation
                                 return TextCommandResult.Success($"Fog min weight set to {config.FogMinWeight:F2}");
                         }
                     }
-                    return TextCommandResult.Error("Usage: /dv fog weight <color|density|min> <value> (0.0-1.0)");
+                    return TextCommandResult.Error("Usage: /dv fog weight [color|density|min] [value] (0.0-1.0)");
 
                 case "transition":
                 case "speed":
                     if (string.IsNullOrWhiteSpace(value))
                     {
-                        return TextCommandResult.Success($"Fog transition speed: {config.FogTransitionSpeed:F2}s. Use '/dv fog transition <seconds>'");
+                        return TextCommandResult.Success($"Fog transition speed: {config.FogTransitionSpeed:F2}s. Use '/dv fog transition [seconds]'");
                     }
                     if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float transSpeed))
                     {
@@ -1299,16 +1301,48 @@ namespace SpreadingDevastation
                         "",
                         "Commands:",
                         "  /dv fog on|off - Enable/disable fog effect",
-                        "  /dv fog color <r> <g> <b> - Set fog color (0.0-1.0)",
-                        "  /dv fog density <value> - Set fog density",
-                        "  /dv fog min <value> - Set minimum fog level",
-                        "  /dv fog weight <color|density|min> <value> - Set effect weights",
-                        "  /dv fog transition <seconds> - Set transition speed"
+                        "  /dv fog color [r] [g] [b] - Set fog color (0.0-1.0)",
+                        "  /dv fog density [value] - Set fog density",
+                        "  /dv fog min [value] - Set minimum fog level",
+                        "  /dv fog weight [color|density|min] [value] - Set effect weights",
+                        "  /dv fog transition [seconds] - Set transition speed"
                     }, "Fog settings sent to chat");
 
                 default:
                     return TextCommandResult.Error($"Unknown fog setting: {setting}. Use: on, off, color, density, min, weight, transition, or info");
             }
+        }
+
+        private TextCommandResult HandleResetCommand(TextCommandCallingArgs args)
+        {
+            string confirm = (args.Parsers[0].GetValue() as string ?? "").ToLowerInvariant();
+
+            if (confirm != "confirm")
+            {
+                return SendChatLines(args, new[]
+                {
+                    "This will reset ALL config values to defaults:",
+                    "  - Speed multiplier",
+                    "  - Max sources, metastasis threshold",
+                    "  - Chunk spreading settings",
+                    "  - Rift ward settings",
+                    "  - Fog effect settings",
+                    "",
+                    "Type '/dv reset confirm' to proceed."
+                });
+            }
+
+            // Create fresh default config
+            config = new SpreadingDevastationConfig();
+            SaveConfig();
+
+            // Mark fog config as dirty to sync to clients
+            BroadcastFogConfig();
+
+            // Rebuild rift ward cache with new radius
+            RebuildProtectedChunkCache();
+
+            return TextCommandResult.Success("All config values have been reset to defaults.");
         }
 
         private TextCommandResult HandleAddCommand(TextCommandCallingArgs args, bool isHealing)
@@ -1565,7 +1599,7 @@ namespace SpreadingDevastation
                 {
                     $"Current max sources cap: {config.MaxSources}",
                     $"Active sources: {devastationSources.Count}/{config.MaxSources}",
-                    "Usage: /devastate maxsources <number> (e.g., 20, 50, 100)"
+                    "Usage: /devastate maxsources [number] (e.g., 20, 50, 100)"
                 }, "Max sources info sent to chat");
             }
             
@@ -1591,7 +1625,7 @@ namespace SpreadingDevastation
                 return SendChatLines(args, new[]
                 {
                     $"Current max failed spawn attempts: {config.MaxFailedSpawnAttempts}",
-                    "Usage: /devastate maxattempts <number> (e.g., 5, 10, 20)"
+                    "Usage: /devastate maxattempts [number] (e.g., 5, 10, 20)"
                 }, "Max attempts info sent to chat");
             }
             
@@ -1675,7 +1709,7 @@ namespace SpreadingDevastation
                 return SendChatLines(args, new[]
                 {
                     $"Current minimum Y level: {config.MinYLevel}",
-                    "Usage: /devastate miny <level> (e.g., 0, -64, 50)"
+                    "Usage: /devastate miny [level] (e.g., 0, -64, 50)"
                 }, "Min Y info sent to chat");
             }
             
@@ -1721,10 +1755,10 @@ namespace SpreadingDevastation
                         $"Max mobs per chunk: {config.ChunkSpawnMaxMobsPerChunk}",
                         "",
                         "Subcommands:",
-                        "  /dv chunk spawn interval <min> <max> - Set random interval range (hours)",
-                        "  /dv chunk spawn cooldown <hours> - Set cooldown after spawn",
-                        "  /dv chunk spawn distance <min> <max> - Set spawn distance from player",
-                        "  /dv chunk spawn maxmobs <count> - Set max mobs per chunk",
+                        "  /dv chunk spawn interval [min] [max] - Set random interval range (hours)",
+                        "  /dv chunk spawn cooldown [hours] - Set cooldown after spawn",
+                        "  /dv chunk spawn distance [min] [max] - Set spawn distance from player",
+                        "  /dv chunk spawn maxmobs [count] - Set max mobs per chunk",
                         "  /dv chunk spawn reset - Reset mob counts in all chunks"
                     }, "Spawn settings sent to chat");
                 }
@@ -1740,7 +1774,7 @@ namespace SpreadingDevastation
                         return SendChatLines(args, new[]
                         {
                             $"Current interval: {config.ChunkSpawnIntervalMinHours:F2}-{config.ChunkSpawnIntervalMaxHours:F2} game hours",
-                            "Usage: /dv chunk spawn interval <min> <max>",
+                            "Usage: /dv chunk spawn interval [min] [max]",
                             "Example: /dv chunk spawn interval 0.5 1.0 (30-60 in-game minutes)"
                         }, "Interval info sent to chat");
                     }
@@ -1748,7 +1782,7 @@ namespace SpreadingDevastation
                     if (!double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out double minHours) ||
                         !double.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out double maxHours))
                     {
-                        return TextCommandResult.Error("Invalid numbers. Usage: /dv chunk spawn interval <min> <max>");
+                        return TextCommandResult.Error("Invalid numbers. Usage: /dv chunk spawn interval [min] [max]");
                     }
 
                     if (minHours > maxHours)
@@ -1768,14 +1802,14 @@ namespace SpreadingDevastation
                         return SendChatLines(args, new[]
                         {
                             $"Current cooldown: {config.ChunkSpawnCooldownHours:F2} game hours",
-                            "Usage: /dv chunk spawn cooldown <hours>",
+                            "Usage: /dv chunk spawn cooldown [hours]",
                             "Example: /dv chunk spawn cooldown 4 (4 hour minimum between spawns)"
                         }, "Cooldown info sent to chat");
                     }
 
                     if (!double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out double cooldown))
                     {
-                        return TextCommandResult.Error("Invalid number. Usage: /dv chunk spawn cooldown <hours>");
+                        return TextCommandResult.Error("Invalid number. Usage: /dv chunk spawn cooldown [hours]");
                     }
 
                     config.ChunkSpawnCooldownHours = Math.Clamp(cooldown, 0.0, 100.0);
@@ -1789,14 +1823,14 @@ namespace SpreadingDevastation
                         return SendChatLines(args, new[]
                         {
                             $"Current distance: {config.ChunkSpawnMinDistance}-{config.ChunkSpawnMaxDistance} blocks from player",
-                            "Usage: /dv chunk spawn distance <min> <max>",
+                            "Usage: /dv chunk spawn distance [min] [max]",
                             "Example: /dv chunk spawn distance 16 48"
                         }, "Distance info sent to chat");
                     }
 
                     if (!int.TryParse(parts[1], out int minDist) || !int.TryParse(parts[2], out int maxDist))
                     {
-                        return TextCommandResult.Error("Invalid numbers. Usage: /dv chunk spawn distance <min> <max>");
+                        return TextCommandResult.Error("Invalid numbers. Usage: /dv chunk spawn distance [min] [max]");
                     }
 
                     if (minDist > maxDist)
@@ -1816,14 +1850,14 @@ namespace SpreadingDevastation
                         return SendChatLines(args, new[]
                         {
                             $"Current max mobs per chunk: {config.ChunkSpawnMaxMobsPerChunk}",
-                            "Usage: /dv chunk spawn maxmobs <count>",
+                            "Usage: /dv chunk spawn maxmobs [count]",
                             "Example: /dv chunk spawn maxmobs 5"
                         }, "Max mobs info sent to chat");
                     }
 
                     if (!int.TryParse(parts[1], out int maxMobs))
                     {
-                        return TextCommandResult.Error("Invalid number. Usage: /dv chunk spawn maxmobs <count>");
+                        return TextCommandResult.Error("Invalid number. Usage: /dv chunk spawn maxmobs [count]");
                     }
 
                     config.ChunkSpawnMaxMobsPerChunk = Math.Clamp(maxMobs, 0, 100);
@@ -1857,13 +1891,13 @@ namespace SpreadingDevastation
                     {
                         $"Current stability drain rate: {config.ChunkStabilityDrainRate:F4} per 500ms tick",
                         $"(~{config.ChunkStabilityDrainRate * 2 * 100:F2}% per second)",
-                        "Usage: /dv chunk drain <rate> (e.g., 0.001 for ~0.2%/sec, 0.01 for ~2%/sec)"
+                        "Usage: /dv chunk drain [rate] (e.g., 0.001 for ~0.2%/sec, 0.01 for ~2%/sec)"
                     }, "Drain rate info sent to chat");
                 }
 
                 if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double rate))
                 {
-                    return TextCommandResult.Error("Invalid number. Usage: /dv chunk drain <rate>");
+                    return TextCommandResult.Error("Invalid number. Usage: /dv chunk drain [rate]");
                 }
 
                 config.ChunkStabilityDrainRate = Math.Clamp(rate, 0.0, 1.0);
@@ -1908,13 +1942,13 @@ namespace SpreadingDevastation
                     {
                         $"Current spread chance: {config.ChunkSpreadChance * 100:F1}%",
                         $"Check interval: {config.ChunkSpreadIntervalSeconds:F0}s (at 1x speed)",
-                        "Usage: /dv chunk spreadchance <percent> (e.g., 5 for 5%)"
+                        "Usage: /dv chunk spreadchance [percent] (e.g., 5 for 5%)"
                     }, "Spread chance info sent to chat");
                 }
 
                 if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double percent))
                 {
-                    return TextCommandResult.Error("Invalid number. Usage: /dv chunk spreadchance <percent>");
+                    return TextCommandResult.Error("Invalid number. Usage: /dv chunk spreadchance [percent]");
                 }
 
                 config.ChunkSpreadChance = Math.Clamp(percent / 100.0, 0.0, 1.0);
@@ -2273,9 +2307,9 @@ namespace SpreadingDevastation
                         "  /dv chunk repair - Queue all stuck chunks for repair",
                         "  /dv chunk unrepairable [list|clear|remove] - Manage unrepairable chunks",
                         "  /dv chunk spawn - Show mob spawn settings and subcommands",
-                        "  /dv chunk drain <rate> - Set stability drain rate",
+                        "  /dv chunk drain [rate] - Set stability drain rate",
                         "  /dv chunk spread [on|off] - Toggle chunk spreading",
-                        "  /dv chunk spreadchance <percent> - Set spread chance"
+                        "  /dv chunk spreadchance [percent] - Set spread chance"
                     }, "Chunk help sent to chat");
                 }
 

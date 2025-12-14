@@ -66,3 +66,40 @@ Key config fields in `SpreadingDevastationConfig`:
 - `RegenerationHours` - Time before blocks heal (default: 60.0)
 - `RequireSourceAirContact` - Surface-only spreading (default: false)
 - `ChildSpawnDelaySeconds` - Cooldown between spawning children (default: 120)
+
+## Chat Message Formatting
+
+**CRITICAL**: Vintage Story's chat system uses HTML-like rich text formatting. Any text that looks like an HTML tag will be interpreted as formatting, which can break chat display.
+
+### Rules for Chat Messages
+
+1. **Use square brackets `[]` instead of angle brackets `<>` for placeholders**:
+   - WRONG: `"Usage: /dv speed <multiplier>"`
+   - RIGHT: `"Usage: /dv speed [multiplier]"`
+
+2. **Avoid forward slashes after words** (looks like closing HTML tags):
+   - WRONG: `"Rate: 10 blocks/sec"` - interpreted as `</blocks>` closing tag
+   - RIGHT: `"Rate: 10 blk/s"` or `"Rate: 10 blocks per sec"`
+
+3. **Common patterns to avoid**:
+   - `<value>`, `<number>`, `<name>` → use `[value]`, `[number]`, `[name]`
+   - `blocks/sec`, `items/min` → use `blk/s`, `items per min`
+   - Any `<word>` pattern in strings sent to chat
+
+### Command Argument Parsers
+
+When commands need multiple space-separated values, use `OptionalAll` instead of `OptionalWord`:
+
+```csharp
+// WRONG - only captures first word after "color"
+.WithArgs(api.ChatCommands.Parsers.OptionalWord("setting"),
+          api.ChatCommands.Parsers.OptionalWord("value"))
+
+// RIGHT - captures all remaining text: "0.5 0.3 0.2"
+.WithArgs(api.ChatCommands.Parsers.OptionalWord("setting"),
+          api.ChatCommands.Parsers.OptionalAll("value"))
+```
+
+Use `OptionalAll` when the command accepts:
+- Multiple numeric values (e.g., `/dv fog color 0.5 0.3 0.2`)
+- Subcommands with their own arguments (e.g., `/dv chunk spawn interval 0.5 1.0`)
