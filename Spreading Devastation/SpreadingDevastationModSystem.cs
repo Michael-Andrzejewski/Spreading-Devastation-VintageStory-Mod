@@ -11,6 +11,7 @@ using Vintagestory.API.Common.Entities;
 using Vintagestory.API.Config;
 using Vintagestory.API.MathTools;
 using Vintagestory.API.Server;
+using Vintagestory.API.Client;
 using Vintagestory.API.Util;
 using Vintagestory.GameContent;
 
@@ -191,6 +192,58 @@ namespace SpreadingDevastation
         /// Lower values detect rift wards faster but use more CPU.
         /// </summary>
         public double RiftWardScanIntervalSeconds { get; set; } = 30.0;
+
+        // === Devastation Fog Effect Settings ===
+
+        /// <summary>
+        /// Whether to show fog/sky color effect in devastated chunks (default: true).
+        /// </summary>
+        public bool FogEffectEnabled { get; set; } = true;
+
+        /// <summary>
+        /// Fog color R component (0.0-1.0). Default rusty orange: 0.55
+        /// </summary>
+        public float FogColorR { get; set; } = 0.55f;
+
+        /// <summary>
+        /// Fog color G component (0.0-1.0). Default rusty orange: 0.25
+        /// </summary>
+        public float FogColorG { get; set; } = 0.25f;
+
+        /// <summary>
+        /// Fog color B component (0.0-1.0). Default rusty orange: 0.15
+        /// </summary>
+        public float FogColorB { get; set; } = 0.15f;
+
+        /// <summary>
+        /// Fog density in devastated areas (default: 0.004). Higher = thicker fog.
+        /// </summary>
+        public float FogDensity { get; set; } = 0.004f;
+
+        /// <summary>
+        /// Minimum fog level in devastated areas (default: 0.15). Higher = more baseline fog.
+        /// </summary>
+        public float FogMin { get; set; } = 0.15f;
+
+        /// <summary>
+        /// How strongly the fog color is applied (0.0-1.0, default: 0.7).
+        /// </summary>
+        public float FogColorWeight { get; set; } = 0.7f;
+
+        /// <summary>
+        /// How strongly the fog density is applied (0.0-1.0, default: 0.5).
+        /// </summary>
+        public float FogDensityWeight { get; set; } = 0.5f;
+
+        /// <summary>
+        /// How strongly the minimum fog is applied (0.0-1.0, default: 0.6).
+        /// </summary>
+        public float FogMinWeight { get; set; } = 0.6f;
+
+        /// <summary>
+        /// How fast the fog effect transitions in/out in seconds (default: 0.5).
+        /// </summary>
+        public float FogTransitionSpeed { get; set; } = 0.5f;
     }
 
     public class SpreadingDevastationModSystem : ModSystem
@@ -409,6 +462,55 @@ namespace SpreadingDevastation
             }
         }
 
+        /// <summary>
+        /// Network packet sent from server to client containing devastated chunk positions.
+        /// Used for client-side fog/sky effects when player is in devastated areas.
+        /// </summary>
+        [ProtoContract]
+        public class DevastatedChunkSyncPacket
+        {
+            /// <summary>
+            /// List of chunk X coordinates that are devastated near the player.
+            /// </summary>
+            [ProtoMember(1)]
+            public List<int> ChunkXs = new List<int>();
+
+            /// <summary>
+            /// List of chunk Z coordinates that are devastated near the player.
+            /// Indices correspond to ChunkXs.
+            /// </summary>
+            [ProtoMember(2)]
+            public List<int> ChunkZs = new List<int>();
+        }
+
+        /// <summary>
+        /// Network packet sent from server to client containing fog configuration.
+        /// </summary>
+        [ProtoContract]
+        public class FogConfigPacket
+        {
+            [ProtoMember(1)]
+            public bool Enabled = true;
+            [ProtoMember(2)]
+            public float ColorR = 0.55f;
+            [ProtoMember(3)]
+            public float ColorG = 0.25f;
+            [ProtoMember(4)]
+            public float ColorB = 0.15f;
+            [ProtoMember(5)]
+            public float Density = 0.004f;
+            [ProtoMember(6)]
+            public float Min = 0.15f;
+            [ProtoMember(7)]
+            public float ColorWeight = 0.7f;
+            [ProtoMember(8)]
+            public float DensityWeight = 0.5f;
+            [ProtoMember(9)]
+            public float MinWeight = 0.6f;
+            [ProtoMember(10)]
+            public float TransitionSpeed = 0.5f;
+        }
+
         private ICoreServerAPI sapi;
         private List<RegrowingBlocks> regrowingBlocks;
         private List<DevastationSource> devastationSources;
@@ -439,18 +541,145 @@ namespace SpreadingDevastation
         private bool initialRiftWardScanCompleted = false; // Whether initial world scan for rift wards has completed
         private double lastFullRiftWardScanTime = 0; // Track last full world scan for rift wards
 
+        // Network channel for client-server sync
+        private const string NETWORK_CHANNEL_NAME = "spreadingdevastation";
+        private IServerNetworkChannel serverNetworkChannel;
+        private bool fogConfigDirty = true; // Flag to track if fog config needs to be sent
+
+        // Client-side fields
+        private ICoreClientAPI capi;
+        private IClientNetworkChannel clientNetworkChannel;
+        private HashSet<long> clientDevastatedChunks = new HashSet<long>(); // Chunk keys received from server
+        private DevastationFogRenderer fogRenderer;
+        private FogConfigPacket clientFogConfig = new FogConfigPacket(); // Fog config received from server
+
         public override void Start(ICoreAPI api)
         {
             base.Start(api);
+
+            // Register network channel and message types (runs on both client and server)
+            api.Network
+                .RegisterChannel(NETWORK_CHANNEL_NAME)
+                .RegisterMessageType(typeof(DevastatedChunkSyncPacket))
+                .RegisterMessageType(typeof(FogConfigPacket));
+        }
+
+        public override void StartClientSide(ICoreClientAPI api)
+        {
+            capi = api;
+
+            // Get the network channel and set up message handlers
+            clientNetworkChannel = api.Network.GetChannel(NETWORK_CHANNEL_NAME)
+                .SetMessageHandler<DevastatedChunkSyncPacket>(OnDevastatedChunkSync)
+                .SetMessageHandler<FogConfigPacket>(OnFogConfigSync);
+
+            // Create and register the fog renderer
+            fogRenderer = new DevastationFogRenderer(api, this);
+            api.Event.RegisterRenderer(fogRenderer, EnumRenderStage.Before, "devastationfog");
+
+            api.Logger.Notification("SpreadingDevastation: Client-side fog renderer initialized");
+        }
+
+        /// <summary>
+        /// Called when the client receives fog configuration from the server.
+        /// </summary>
+        private void OnFogConfigSync(FogConfigPacket packet)
+        {
+            clientFogConfig = packet;
+            fogRenderer?.UpdateConfig(packet);
+        }
+
+        /// <summary>
+        /// Gets the current fog config for the client.
+        /// </summary>
+        public FogConfigPacket GetFogConfig()
+        {
+            return clientFogConfig;
+        }
+
+        /// <summary>
+        /// Called when the client receives devastated chunk data from the server.
+        /// </summary>
+        private void OnDevastatedChunkSync(DevastatedChunkSyncPacket packet)
+        {
+            clientDevastatedChunks.Clear();
+
+            if (packet.ChunkXs != null && packet.ChunkZs != null)
+            {
+                int count = Math.Min(packet.ChunkXs.Count, packet.ChunkZs.Count);
+                for (int i = 0; i < count; i++)
+                {
+                    long chunkKey = DevastatedChunk.MakeChunkKey(packet.ChunkXs[i], packet.ChunkZs[i]);
+                    clientDevastatedChunks.Add(chunkKey);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Checks if the player is currently in a devastated chunk (client-side).
+        /// </summary>
+        public bool IsPlayerInDevastatedChunk()
+        {
+            if (capi?.World?.Player?.Entity == null) return false;
+
+            var playerPos = capi.World.Player.Entity.Pos;
+            int chunkX = (int)playerPos.X / CHUNK_SIZE;
+            int chunkZ = (int)playerPos.Z / CHUNK_SIZE;
+            long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
+
+            return clientDevastatedChunks.Contains(chunkKey);
+        }
+
+        /// <summary>
+        /// Gets the distance to the nearest devastated chunk edge (for fog intensity).
+        /// Returns 0 if in a devastated chunk, positive distance to nearest devastated chunk edge.
+        /// </summary>
+        public float GetDistanceToDevastatedChunk()
+        {
+            if (capi?.World?.Player?.Entity == null) return float.MaxValue;
+
+            var playerPos = capi.World.Player.Entity.Pos;
+            int playerChunkX = (int)playerPos.X / CHUNK_SIZE;
+            int playerChunkZ = (int)playerPos.Z / CHUNK_SIZE;
+            long playerChunkKey = DevastatedChunk.MakeChunkKey(playerChunkX, playerChunkZ);
+
+            // If player is in a devastated chunk, return 0
+            if (clientDevastatedChunks.Contains(playerChunkKey)) return 0f;
+
+            // Find the nearest devastated chunk
+            float nearestDistSq = float.MaxValue;
+            foreach (long chunkKey in clientDevastatedChunks)
+            {
+                int chunkX = (int)(chunkKey >> 32);
+                int chunkZ = (int)(chunkKey & 0xFFFFFFFF);
+
+                // Calculate distance to chunk center
+                float chunkCenterX = chunkX * CHUNK_SIZE + CHUNK_SIZE / 2f;
+                float chunkCenterZ = chunkZ * CHUNK_SIZE + CHUNK_SIZE / 2f;
+
+                float dx = (float)playerPos.X - chunkCenterX;
+                float dz = (float)playerPos.Z - chunkCenterZ;
+                float distSq = dx * dx + dz * dz;
+
+                if (distSq < nearestDistSq)
+                {
+                    nearestDistSq = distSq;
+                }
+            }
+
+            return (float)Math.Sqrt(nearestDistSq);
         }
 
         public override void StartServerSide(ICoreServerAPI api)
         {
             sapi = api;
-            
+
             // Load config
             LoadConfig();
-            
+
+            // Get the server network channel for syncing devastated chunks to clients
+            serverNetworkChannel = api.Network.GetChannel(NETWORK_CHANNEL_NAME);
+
             // Check for manual sources every 10ms (100 times per second)
             api.Event.RegisterGameTickListener(SpreadDevastationFromRifts, 10);
 
@@ -460,6 +689,9 @@ namespace SpreadingDevastation
             // Process rift wards (check active state and healing) every 500ms
             api.Event.RegisterGameTickListener(ProcessRiftWards, 500);
 
+            // Sync devastated chunks to clients every 5 seconds
+            api.Event.RegisterGameTickListener(SyncDevastatedChunksToClients, 5000);
+
             // Listen for block placement/removal to track rift wards efficiently
             api.Event.DidPlaceBlock += OnBlockPlaced;
             api.Event.DidBreakBlock += OnBlockBroken;
@@ -467,11 +699,11 @@ namespace SpreadingDevastation
             // Save/load events
             api.Event.SaveGameLoaded += OnSaveGameLoading;
             api.Event.GameWorldSave += OnSaveGameSaving;
-            
+
             // Register commands using the modern ChatCommand API (with shorthand alias)
             RegisterDevastateCommand(api, "devastate");
             RegisterDevastateCommand(api, "dv");
-            
+
             api.ChatCommands.Create("devastationconfig")
                 .WithDescription("Reload configuration from file")
                 .RequiresPrivilege(Privilege.controlserver)
@@ -479,6 +711,81 @@ namespace SpreadingDevastation
                     LoadConfig();
                     return TextCommandResult.Success("Configuration reloaded from ModConfig/SpreadingDevastationConfig.json");
                 });
+        }
+
+        /// <summary>
+        /// Syncs devastated chunk data to all connected clients.
+        /// Each player receives only the chunks within render distance of their position.
+        /// </summary>
+        private void SyncDevastatedChunksToClients(float dt)
+        {
+            if (serverNetworkChannel == null) return;
+
+            const int SYNC_RADIUS_CHUNKS = 8; // Sync chunks within 8 chunk radius (~256 blocks)
+
+            // Only create and send fog config packet when it has changed
+            FogConfigPacket fogPacket = null;
+            if (fogConfigDirty)
+            {
+                fogPacket = new FogConfigPacket
+                {
+                    Enabled = config.FogEffectEnabled,
+                    ColorR = config.FogColorR,
+                    ColorG = config.FogColorG,
+                    ColorB = config.FogColorB,
+                    Density = config.FogDensity,
+                    Min = config.FogMin,
+                    ColorWeight = config.FogColorWeight,
+                    DensityWeight = config.FogDensityWeight,
+                    MinWeight = config.FogMinWeight,
+                    TransitionSpeed = config.FogTransitionSpeed
+                };
+                fogConfigDirty = false;
+            }
+
+            foreach (IServerPlayer player in sapi.World.AllOnlinePlayers.Cast<IServerPlayer>())
+            {
+                if (player?.Entity == null) continue;
+
+                // Send fog config only when it changed
+                if (fogPacket != null)
+                {
+                    serverNetworkChannel.SendPacket(fogPacket, player);
+                }
+
+                // Send chunk data if there are any devastated chunks
+                if (devastatedChunks == null || devastatedChunks.Count == 0) continue;
+
+                var playerPos = player.Entity.Pos;
+                int playerChunkX = (int)playerPos.X / CHUNK_SIZE;
+                int playerChunkZ = (int)playerPos.Z / CHUNK_SIZE;
+
+                var packet = new DevastatedChunkSyncPacket();
+
+                foreach (var chunk in devastatedChunks.Values)
+                {
+                    // Only sync chunks within range of player
+                    int dx = chunk.ChunkX - playerChunkX;
+                    int dz = chunk.ChunkZ - playerChunkZ;
+
+                    if (Math.Abs(dx) <= SYNC_RADIUS_CHUNKS && Math.Abs(dz) <= SYNC_RADIUS_CHUNKS)
+                    {
+                        packet.ChunkXs.Add(chunk.ChunkX);
+                        packet.ChunkZs.Add(chunk.ChunkZ);
+                    }
+                }
+
+                // Send packet to this specific player
+                serverNetworkChannel.SendPacket(packet, player);
+            }
+        }
+
+        /// <summary>
+        /// Marks the fog configuration as changed, so it will be sent to clients on next sync.
+        /// </summary>
+        private void BroadcastFogConfig()
+        {
+            fogConfigDirty = true;
         }
 
         private void LoadConfig()
@@ -702,6 +1009,12 @@ namespace SpreadingDevastation
                     .WithArgs(api.ChatCommands.Parsers.OptionalWord("action"),
                               api.ChatCommands.Parsers.OptionalWord("value"))
                     .HandleWith(HandleRiftWardCommand)
+                .EndSubCommand()
+                .BeginSubCommand("fog")
+                    .WithDescription("Configure devastation fog/sky effect")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("setting"),
+                              api.ChatCommands.Parsers.OptionalWord("value"))
+                    .HandleWith(HandleFogCommand)
                 .EndSubCommand();
         }
 
@@ -745,6 +1058,20 @@ namespace SpreadingDevastation
                 case "rate":
                     return HandleRiftWardRateCommand(value);
 
+                case "radius":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Rift ward protection radius: {config.RiftWardProtectionRadius} blocks. Use '/dv riftward radius <blocks>' to set.");
+                    }
+                    if (int.TryParse(value, out int newRadius))
+                    {
+                        config.RiftWardProtectionRadius = Math.Clamp(newRadius, 8, 1024);
+                        SaveConfig();
+                        RebuildProtectedChunkCache();
+                        return TextCommandResult.Success($"Rift ward protection radius set to {config.RiftWardProtectionRadius} blocks");
+                    }
+                    return TextCommandResult.Error("Invalid number for radius");
+
                 case "":
                 case "info":
                 case "status":
@@ -761,13 +1088,14 @@ namespace SpreadingDevastation
                         $"Active rift wards: {activeRiftWards?.Count ?? 0}",
                         "",
                         "Commands:",
+                        "  /dv riftward radius <blocks> - Set protection radius",
                         "  /dv riftward speed <multiplier> - Set healing speed (or 'global' to use /dv speed)",
                         "  /dv riftward rate <blocks/sec> - Set base healing rate",
                         "  /dv riftward list - Show all tracked rift wards"
                     }, "Rift ward info sent to chat");
 
                 default:
-                    return TextCommandResult.Error($"Unknown riftward action: {action}. Use: speed, rate, list, or info");
+                    return TextCommandResult.Error($"Unknown riftward action: {action}. Use: radius, speed, rate, list, or info");
             }
         }
 
@@ -832,6 +1160,155 @@ namespace SpreadingDevastation
                 lines.Add($"  {ward.Pos} - {status}, healed {ward.BlocksHealed} blocks");
             }
             return SendChatLines(args, lines, "Rift ward list sent to chat");
+        }
+
+        private TextCommandResult HandleFogCommand(TextCommandCallingArgs args)
+        {
+            string setting = (args.Parsers[0].GetValue() as string ?? "").ToLowerInvariant();
+            string value = args.Parsers[1].GetValue() as string ?? "";
+
+            switch (setting)
+            {
+                case "enabled":
+                case "on":
+                case "off":
+                    if (setting == "on" || (setting == "enabled" && value.ToLowerInvariant() == "on"))
+                    {
+                        config.FogEffectEnabled = true;
+                        SaveConfig();
+                        BroadcastFogConfig();
+                        return TextCommandResult.Success("Devastation fog effect ENABLED");
+                    }
+                    else if (setting == "off" || (setting == "enabled" && value.ToLowerInvariant() == "off"))
+                    {
+                        config.FogEffectEnabled = false;
+                        SaveConfig();
+                        BroadcastFogConfig();
+                        return TextCommandResult.Success("Devastation fog effect DISABLED");
+                    }
+                    return TextCommandResult.Error("Usage: /dv fog enabled <on|off>");
+
+                case "color":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Fog color: R={config.FogColorR:F2} G={config.FogColorG:F2} B={config.FogColorB:F2}. Use '/dv fog color <r> <g> <b>' (0.0-1.0)");
+                    }
+                    // Parse r g b from value (space-separated)
+                    var parts = value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length >= 3 &&
+                        float.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out float r) &&
+                        float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float g) &&
+                        float.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out float b))
+                    {
+                        config.FogColorR = Math.Clamp(r, 0f, 1f);
+                        config.FogColorG = Math.Clamp(g, 0f, 1f);
+                        config.FogColorB = Math.Clamp(b, 0f, 1f);
+                        SaveConfig();
+                        BroadcastFogConfig();
+                        return TextCommandResult.Success($"Fog color set to R={config.FogColorR:F2} G={config.FogColorG:F2} B={config.FogColorB:F2}");
+                    }
+                    return TextCommandResult.Error("Usage: /dv fog color <r> <g> <b> (values 0.0-1.0, e.g., '0.55 0.25 0.15')");
+
+                case "density":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Fog density: {config.FogDensity:F4}. Use '/dv fog density <value>' (e.g., 0.004)");
+                    }
+                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float density))
+                    {
+                        config.FogDensity = Math.Clamp(density, 0f, 1f);
+                        SaveConfig();
+                        BroadcastFogConfig();
+                        return TextCommandResult.Success($"Fog density set to {config.FogDensity:F4}");
+                    }
+                    return TextCommandResult.Error("Invalid number for fog density");
+
+                case "min":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Fog minimum: {config.FogMin:F2}. Use '/dv fog min <value>' (0.0-1.0)");
+                    }
+                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float fogMin))
+                    {
+                        config.FogMin = Math.Clamp(fogMin, 0f, 1f);
+                        SaveConfig();
+                        BroadcastFogConfig();
+                        return TextCommandResult.Success($"Fog minimum set to {config.FogMin:F2}");
+                    }
+                    return TextCommandResult.Error("Invalid number for fog minimum");
+
+                case "weight":
+                case "weights":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Fog weights: color={config.FogColorWeight:F2} density={config.FogDensityWeight:F2} min={config.FogMinWeight:F2}. Use '/dv fog weight <color|density|min> <value>'");
+                    }
+                    var weightParts = value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    if (weightParts.Length >= 2 &&
+                        float.TryParse(weightParts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float weightVal))
+                    {
+                        weightVal = Math.Clamp(weightVal, 0f, 1f);
+                        switch (weightParts[0].ToLowerInvariant())
+                        {
+                            case "color":
+                                config.FogColorWeight = weightVal;
+                                SaveConfig();
+                                BroadcastFogConfig();
+                                return TextCommandResult.Success($"Fog color weight set to {config.FogColorWeight:F2}");
+                            case "density":
+                                config.FogDensityWeight = weightVal;
+                                SaveConfig();
+                                BroadcastFogConfig();
+                                return TextCommandResult.Success($"Fog density weight set to {config.FogDensityWeight:F2}");
+                            case "min":
+                                config.FogMinWeight = weightVal;
+                                SaveConfig();
+                                BroadcastFogConfig();
+                                return TextCommandResult.Success($"Fog min weight set to {config.FogMinWeight:F2}");
+                        }
+                    }
+                    return TextCommandResult.Error("Usage: /dv fog weight <color|density|min> <value> (0.0-1.0)");
+
+                case "transition":
+                case "speed":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Fog transition speed: {config.FogTransitionSpeed:F2}s. Use '/dv fog transition <seconds>'");
+                    }
+                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float transSpeed))
+                    {
+                        config.FogTransitionSpeed = Math.Clamp(transSpeed, 0.1f, 10f);
+                        SaveConfig();
+                        BroadcastFogConfig();
+                        return TextCommandResult.Success($"Fog transition speed set to {config.FogTransitionSpeed:F2}s");
+                    }
+                    return TextCommandResult.Error("Invalid number for transition speed");
+
+                case "":
+                case "info":
+                case "status":
+                    return SendChatLines(args, new[]
+                    {
+                        "=== Devastation Fog Settings ===",
+                        $"Enabled: {config.FogEffectEnabled}",
+                        $"Color (RGB): {config.FogColorR:F2}, {config.FogColorG:F2}, {config.FogColorB:F2}",
+                        $"Density: {config.FogDensity:F4}",
+                        $"Minimum fog: {config.FogMin:F2}",
+                        $"Weights: color={config.FogColorWeight:F2}, density={config.FogDensityWeight:F2}, min={config.FogMinWeight:F2}",
+                        $"Transition speed: {config.FogTransitionSpeed:F2}s",
+                        "",
+                        "Commands:",
+                        "  /dv fog on|off - Enable/disable fog effect",
+                        "  /dv fog color <r> <g> <b> - Set fog color (0.0-1.0)",
+                        "  /dv fog density <value> - Set fog density",
+                        "  /dv fog min <value> - Set minimum fog level",
+                        "  /dv fog weight <color|density|min> <value> - Set effect weights",
+                        "  /dv fog transition <seconds> - Set transition speed"
+                    }, "Fog settings sent to chat");
+
+                default:
+                    return TextCommandResult.Error($"Unknown fog setting: {setting}. Use: on, off, color, density, min, weight, transition, or info");
+            }
         }
 
         private TextCommandResult HandleAddCommand(TextCommandCallingArgs args, bool isHealing)
@@ -4849,5 +5326,144 @@ namespace SpreadingDevastation
         }
 
         #endregion
+    }
+
+    /// <summary>
+    /// Client-side renderer that applies fog and sky color effects when the player is in devastated chunks.
+    /// Creates a rusty, corrupted atmosphere similar to the base game Devastation area.
+    /// </summary>
+    public class DevastationFogRenderer : IRenderer
+    {
+        private ICoreClientAPI capi;
+        private SpreadingDevastationModSystem modSystem;
+        private AmbientModifier devastationAmbient;
+        private bool isAmbientRegistered = false;
+
+        // Config values (updated via UpdateConfig)
+        private bool enabled = true;
+        private float fogColorR = 0.55f;
+        private float fogColorG = 0.25f;
+        private float fogColorB = 0.15f;
+        private float fogDensity = 0.004f;
+        private float fogMin = 0.15f;
+        private float fogColorWeight = 0.7f;
+        private float fogDensityWeight = 0.5f;
+        private float fogMinWeight = 0.6f;
+        private float transitionSpeed = 2.0f; // 1/0.5 seconds
+
+        // Current effect weight (0 = no effect, 1 = full effect)
+        private float currentWeight = 0f;
+
+        public double RenderOrder => 0.0; // Render early in the pipeline
+        public int RenderRange => 0; // Not used
+
+        public DevastationFogRenderer(ICoreClientAPI capi, SpreadingDevastationModSystem modSystem)
+        {
+            this.capi = capi;
+            this.modSystem = modSystem;
+
+            // Create ambient modifier for devastation effect
+            // Must initialize ALL properties to avoid null reference exceptions in AmbientManager
+            devastationAmbient = new AmbientModifier()
+            {
+                // Fog properties we want to modify
+                FogColor = new WeightedFloatArray(new float[] { fogColorR, fogColorG, fogColorB, 1.0f }, 0),
+                FogDensity = new WeightedFloat(fogDensity, 0),
+                FogMin = new WeightedFloat(fogMin, 0),
+                AmbientColor = new WeightedFloatArray(new float[] { fogColorR + 0.15f, fogColorG + 0.25f, fogColorB + 0.25f }, 0),
+
+                // Other properties must be initialized with weight 0 to avoid null crashes
+                FlatFogDensity = new WeightedFloat(0, 0),
+                FlatFogYPos = new WeightedFloat(0, 0),
+                CloudBrightness = new WeightedFloat(1, 0),
+                CloudDensity = new WeightedFloat(0, 0),
+                SceneBrightness = new WeightedFloat(1, 0),
+                FogBrightness = new WeightedFloat(1, 0),
+                LerpSpeed = new WeightedFloat(1, 0)
+            };
+        }
+
+        /// <summary>
+        /// Updates the fog configuration from server-sent config.
+        /// </summary>
+        public void UpdateConfig(SpreadingDevastationModSystem.FogConfigPacket config)
+        {
+            if (config == null) return;
+
+            enabled = config.Enabled;
+            fogColorR = config.ColorR;
+            fogColorG = config.ColorG;
+            fogColorB = config.ColorB;
+            fogDensity = config.Density;
+            fogMin = config.Min;
+            fogColorWeight = config.ColorWeight;
+            fogDensityWeight = config.DensityWeight;
+            fogMinWeight = config.MinWeight;
+            transitionSpeed = config.TransitionSpeed > 0 ? 1f / config.TransitionSpeed : 2f;
+
+            // Update the ambient modifier values
+            devastationAmbient.FogColor.Value = new float[] { fogColorR, fogColorG, fogColorB, 1.0f };
+            devastationAmbient.FogDensity.Value = fogDensity;
+            devastationAmbient.FogMin.Value = fogMin;
+            devastationAmbient.AmbientColor.Value = new float[] {
+                Math.Min(1f, fogColorR + 0.15f),
+                Math.Min(1f, fogColorG + 0.25f),
+                Math.Min(1f, fogColorB + 0.25f)
+            };
+        }
+
+        public void OnRenderFrame(float deltaTime, EnumRenderStage stage)
+        {
+            if (capi?.World?.Player?.Entity == null) return;
+
+            // Check if effect is enabled and player is in a devastated chunk
+            bool inDevastatedChunk = enabled && modSystem.IsPlayerInDevastatedChunk();
+
+            // Calculate target weight
+            float targetWeight = inDevastatedChunk ? 1.0f : 0.0f;
+
+            // Smoothly transition towards target weight
+            if (currentWeight < targetWeight)
+            {
+                currentWeight = Math.Min(currentWeight + deltaTime * transitionSpeed, targetWeight);
+            }
+            else if (currentWeight > targetWeight)
+            {
+                currentWeight = Math.Max(currentWeight - deltaTime * transitionSpeed, targetWeight);
+            }
+
+            // Update ambient modifier weights based on config
+            devastationAmbient.FogColor.Weight = currentWeight * fogColorWeight;
+            devastationAmbient.FogDensity.Weight = currentWeight * fogDensityWeight;
+            devastationAmbient.FogMin.Weight = currentWeight * fogMinWeight;
+            devastationAmbient.AmbientColor.Weight = currentWeight * fogColorWeight * 0.5f; // Ambient is more subtle
+
+            // Register or update the ambient modifier
+            if (currentWeight > 0.001f)
+            {
+                if (!isAmbientRegistered)
+                {
+                    capi.Ambient.CurrentModifiers["devastation"] = devastationAmbient;
+                    isAmbientRegistered = true;
+                }
+            }
+            else
+            {
+                if (isAmbientRegistered)
+                {
+                    capi.Ambient.CurrentModifiers.Remove("devastation");
+                    isAmbientRegistered = false;
+                }
+            }
+        }
+
+        public void Dispose()
+        {
+            if (isAmbientRegistered && capi?.Ambient?.CurrentModifiers != null)
+            {
+                capi.Ambient.CurrentModifiers.Remove("devastation");
+                isAmbientRegistered = false;
+            }
+        }
     }
 }
