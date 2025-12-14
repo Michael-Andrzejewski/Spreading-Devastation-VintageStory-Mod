@@ -29,8 +29,8 @@ namespace SpreadingDevastation
         /// <summary>Maximum number of devastation sources (caps metastasis growth) (default: 20)</summary>
         public int MaxSources { get; set; } = 20;
         
-        /// <summary>Minimum Y level for new metastasis sources (default: -999)</summary>
-        public int MinYLevel { get; set; } = -999;
+        /// <summary>Minimum Y level for new metastasis sources (default: 100)</summary>
+        public int MinYLevel { get; set; } = 100;
         
         /// <summary>Default range for new devastation sources (default: 8)</summary>
         public int DefaultRange { get; set; } = 8;
@@ -53,9 +53,9 @@ namespace SpreadingDevastation
         /// <summary>
         /// When enabled, new metastasis source positions must be adjacent to air.
         /// This keeps spreading along surfaces rather than through solid rock.
-        /// Does NOT restrict which blocks can be devastated. (default: false)
+        /// Does NOT restrict which blocks can be devastated. (default: true)
         /// </summary>
-        public bool RequireSourceAirContact { get; set; } = false;
+        public bool RequireSourceAirContact { get; set; } = true;
         
         /// <summary>
         /// Variation in child source range as a fraction of parent range.
