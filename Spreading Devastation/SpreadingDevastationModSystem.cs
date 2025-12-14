@@ -1389,6 +1389,23 @@ namespace SpreadingDevastation
                     }
                     return TextCommandResult.Error("Invalid number for transition speed");
 
+                case "reset":
+                case "defaults":
+                    // Reset all fog values to defaults
+                    config.FogEffectEnabled = true;
+                    config.FogColorR = 0.55f;
+                    config.FogColorG = 0.25f;
+                    config.FogColorB = 0.15f;
+                    config.FogDensity = 0.004f;
+                    config.FogMin = 0.15f;
+                    config.FogColorWeight = 0.7f;
+                    config.FogDensityWeight = 0.5f;
+                    config.FogMinWeight = 0.6f;
+                    config.FogTransitionSpeed = 0.5f;
+                    SaveConfig();
+                    BroadcastFogConfig();
+                    return TextCommandResult.Success("Fog settings reset to defaults (rusty orange fog, enabled)");
+
                 case "":
                 case "info":
                 case "status":
@@ -1408,11 +1425,12 @@ namespace SpreadingDevastation
                         "  /dv fog density [value] - Set fog density",
                         "  /dv fog min [value] - Set minimum fog level",
                         "  /dv fog weight [color|density|min] [value] - Set effect weights",
-                        "  /dv fog transition [seconds] - Set transition speed"
+                        "  /dv fog transition [seconds] - Set transition speed",
+                        "  /dv fog reset - Reset all fog settings to defaults"
                     }, "Fog settings sent to chat");
 
                 default:
-                    return TextCommandResult.Error($"Unknown fog setting: {setting}. Use: on, off, color, density, min, weight, transition, or info");
+                    return TextCommandResult.Error($"Unknown fog setting: {setting}. Use: on, off, color, density, min, weight, transition, reset, or info");
             }
         }
 
