@@ -193,6 +193,13 @@ namespace SpreadingDevastation
         /// </summary>
         public double RiftWardScanIntervalSeconds { get; set; } = 30.0;
 
+        /// <summary>
+        /// Whether rift wards use radial clean mode (default: true).
+        /// In radial mode, healing expands outward smoothly from the center.
+        /// When false, uses random healing within the protection radius.
+        /// </summary>
+        public bool RiftWardRadialCleanEnabled { get; set; } = true;
+
         // === Devastation Fog Effect Settings ===
 
         /// <summary>
@@ -424,6 +431,15 @@ namespace SpreadingDevastation
 
             [ProtoMember(4)]
             public double LastHealTime = 0; // Last time this ward performed healing
+
+            [ProtoMember(5)]
+            public int CurrentCleanRadius = 0; // Current radius for radial clean mode (0 = starting from center)
+
+            [ProtoMember(6)]
+            public int RadialCleanFailures = 0; // Consecutive failures at current radius (used to advance radius)
+
+            [ProtoMember(7)]
+            public int MaxCleanRadiusReached = 0; // Highest radius reached (doesn't reset, used for fog clearing)
 
             // Cached active state (not serialized - recalculated on load)
             [ProtoIgnore]
@@ -1060,6 +1076,9 @@ namespace SpreadingDevastation
                 case "rate":
                     return HandleRiftWardRateCommand(value);
 
+                case "mode":
+                    return HandleRiftWardModeCommand(value);
+
                 case "radius":
                     if (string.IsNullOrWhiteSpace(value))
                     {
@@ -1079,11 +1098,13 @@ namespace SpreadingDevastation
                 case "status":
                     double effectiveSpeed = config.RiftWardSpeedMultiplier > 0 ? config.RiftWardSpeedMultiplier : config.SpeedMultiplier;
                     string speedSource = config.RiftWardSpeedMultiplier > 0 ? "custom" : "global";
+                    string healingMode = config.RiftWardRadialCleanEnabled ? "radial" : "random";
                     return SendChatLines(args, new[]
                     {
                         "=== Rift Ward Settings ===",
                         $"Protection radius: {config.RiftWardProtectionRadius} blocks",
                         $"Healing enabled: {config.RiftWardHealingEnabled}",
+                        $"Healing mode: {healingMode}",
                         $"Base healing rate: {config.RiftWardHealingRate:F1} blk/s",
                         $"Speed multiplier: {effectiveSpeed:F2}x ({speedSource})",
                         $"Effective rate: {config.RiftWardHealingRate * effectiveSpeed:F1} blk/s",
@@ -1093,11 +1114,12 @@ namespace SpreadingDevastation
                         "  /dv riftward radius [blocks] - Set protection radius",
                         "  /dv riftward speed [multiplier] - Set healing speed (or 'global' to use /dv speed)",
                         "  /dv riftward rate [blk/s] - Set base healing rate",
+                        "  /dv riftward mode [radial|random] - Set healing pattern mode",
                         "  /dv riftward list - Show all tracked rift wards"
                     }, "Rift ward info sent to chat");
 
                 default:
-                    return TextCommandResult.Error($"Unknown riftward action: {action}. Use: radius, speed, rate, list, or info");
+                    return TextCommandResult.Error($"Unknown riftward action: {action}. Use: radius, speed, rate, mode, list, or info");
             }
         }
 
@@ -1147,6 +1169,40 @@ namespace SpreadingDevastation
             return TextCommandResult.Success($"Rift ward base healing rate set to {config.RiftWardHealingRate:F1} blk/s (effective: {config.RiftWardHealingRate * effectiveSpeed:F1} blk/s)");
         }
 
+        private TextCommandResult HandleRiftWardModeCommand(string value)
+        {
+            string currentMode = config.RiftWardRadialCleanEnabled ? "radial" : "random";
+
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return TextCommandResult.Success($"Rift ward healing mode: {currentMode}. Use '/dv riftward mode [radial|random]' to change.");
+            }
+
+            switch (value.ToLowerInvariant())
+            {
+                case "radial":
+                case "r":
+                    config.RiftWardRadialCleanEnabled = true;
+                    SaveConfig();
+                    // Reset all ward clean progress when switching to radial mode
+                    foreach (var ward in activeRiftWards)
+                    {
+                        ward.CurrentCleanRadius = 0;
+                        ward.RadialCleanFailures = 0;
+                    }
+                    return TextCommandResult.Success("Rift ward healing mode set to radial. Devastation will be cleared outward from the center.");
+
+                case "random":
+                case "rand":
+                    config.RiftWardRadialCleanEnabled = false;
+                    SaveConfig();
+                    return TextCommandResult.Success("Rift ward healing mode set to random. Devastation will be cleared randomly within protection radius.");
+
+                default:
+                    return TextCommandResult.Error($"Unknown mode: {value}. Use 'radial' or 'random'.");
+            }
+        }
+
         private TextCommandResult HandleRiftWardListCommand(TextCommandCallingArgs args)
         {
             if (activeRiftWards == null || activeRiftWards.Count == 0)
@@ -1159,7 +1215,8 @@ namespace SpreadingDevastation
             {
                 bool isActive = IsRiftWardActive(ward.Pos);
                 string status = isActive ? "ACTIVE" : "inactive";
-                lines.Add($"  {ward.Pos} - {status}, healed {ward.BlocksHealed} blocks");
+                string radialInfo = config.RiftWardRadialCleanEnabled ? $", cleaned {ward.MaxCleanRadiusReached}/{config.RiftWardProtectionRadius}" : "";
+                lines.Add($"  {ward.Pos} - {status}, healed {ward.BlocksHealed} blocks{radialInfo}");
             }
             return SendChatLines(args, lines, "Rift ward list sent to chat");
         }
@@ -3388,6 +3445,9 @@ namespace SpreadingDevastation
 
                 foreach (var chunk in devastatedChunks.Values.ToList()) // ToList() to allow modification during iteration
                 {
+                    // Skip chunks protected by rift wards - no processing needed
+                    if (IsChunkProtectedByRiftWard(chunk.ChunkX, chunk.ChunkZ)) continue;
+
                     // Spawn corrupted entities periodically
                     TrySpawnCorruptedEntitiesInChunk(chunk, currentTime);
 
@@ -3536,6 +3596,10 @@ namespace SpreadingDevastation
                 long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
 
                 if (!devastatedChunks.ContainsKey(chunkKey)) continue;
+
+                // Skip if player is protected by a rift ward
+                BlockPos playerBlockPos = player.Entity.Pos.AsBlockPos;
+                if (IsBlockProtectedByRiftWard(playerBlockPos)) continue;
 
                 // Get the temporal stability behavior
                 var stabilityBehavior = player.Entity.GetBehavior<EntityBehaviorTemporalStabilityAffected>();
@@ -3700,6 +3764,9 @@ namespace SpreadingDevastation
         /// </summary>
         private void TrySpawnCorruptedEntitiesInChunk(DevastatedChunk chunk, double currentTime)
         {
+            // Skip chunks protected by rift wards - no mob spawning in protected areas
+            if (IsChunkProtectedByRiftWard(chunk.ChunkX, chunk.ChunkZ)) return;
+
             // Check cooldown first - if cooldown has passed, reset the mob counter
             if (chunk.LastSpawnTime > 0)
             {
@@ -3754,6 +3821,9 @@ namespace SpreadingDevastation
             int spawnChunkZ = spawnPos.Z / CHUNK_SIZE;
             long spawnChunkKey = DevastatedChunk.MakeChunkKey(spawnChunkX, spawnChunkZ);
             if (!devastatedChunks.ContainsKey(spawnChunkKey)) return;
+
+            // Also check if spawn position is protected by rift ward (block-level check)
+            if (IsBlockProtectedByRiftWard(spawnPos)) return;
 
             // Update spawn tracking
             chunk.LastSpawnTime = currentTime;
@@ -4931,6 +5001,9 @@ namespace SpreadingDevastation
             double speedMult = config.RiftWardSpeedMultiplier > 0 ? config.RiftWardSpeedMultiplier : config.SpeedMultiplier;
             double blocksToHealThisTick = config.RiftWardHealingRate * dt * speedMult;
 
+            // Track if any healing occurred - we'll update chunk status after
+            bool anyHealing = false;
+
             foreach (var ward in activeRiftWards)
             {
                 // Use cached active state, only check via reflection once per second
@@ -4955,17 +5028,229 @@ namespace SpreadingDevastation
                     int healed = HealBlocksAroundRiftWard(ward, blocksToProcess);
                     ward.BlocksHealed += healed;
                     ward.LastHealTime = currentTime;
+                    if (healed > 0) anyHealing = true;
                 }
+            }
+
+            // If healing occurred, check for chunks that can be removed from devastation tracking
+            // This removes fog effects from cleaned areas more responsively
+            if (anyHealing)
+            {
+                CleanFullyHealedChunksInRiftWardRadii();
+            }
+        }
+
+        /// <summary>
+        /// Removes chunks within the rift ward's current clean radius from devastatedChunks.
+        /// This makes fog disappear progressively as the radial clean expands outward.
+        /// </summary>
+        private void CleanFullyHealedChunksInRiftWardRadii()
+        {
+            if (activeRiftWards == null || activeRiftWards.Count == 0) return;
+            if (devastatedChunks == null || devastatedChunks.Count == 0) return;
+
+            var chunksToRemove = new List<long>();
+
+            foreach (var ward in activeRiftWards)
+            {
+                if (ward.Pos == null || !ward.CachedIsActive) continue;
+
+                // Use MaxCleanRadiusReached - this tracks the furthest the cleaning has expanded
+                // and doesn't reset when the cleaning loop restarts from center
+                // In random mode, use full protection radius since cleaning is random throughout
+                int cleanRadius = config.RiftWardRadialCleanEnabled ? ward.MaxCleanRadiusReached : config.RiftWardProtectionRadius;
+
+                // Need at least some radius to clear chunks
+                if (cleanRadius < 1) continue;
+
+                int minChunkX = (ward.Pos.X - cleanRadius) / CHUNK_SIZE;
+                int maxChunkX = (ward.Pos.X + cleanRadius) / CHUNK_SIZE;
+                int minChunkZ = (ward.Pos.Z - cleanRadius) / CHUNK_SIZE;
+                int maxChunkZ = (ward.Pos.Z + cleanRadius) / CHUNK_SIZE;
+
+                for (int cx = minChunkX; cx <= maxChunkX; cx++)
+                {
+                    for (int cz = minChunkZ; cz <= maxChunkZ; cz++)
+                    {
+                        long chunkKey = DevastatedChunk.MakeChunkKey(cx, cz);
+                        if (!devastatedChunks.ContainsKey(chunkKey)) continue;
+                        if (chunksToRemove.Contains(chunkKey)) continue;
+
+                        // Check if chunk center is within the cleaned radius
+                        int chunkCenterX = cx * CHUNK_SIZE + CHUNK_SIZE / 2;
+                        int chunkCenterZ = cz * CHUNK_SIZE + CHUNK_SIZE / 2;
+                        int dx = chunkCenterX - ward.Pos.X;
+                        int dz = chunkCenterZ - ward.Pos.Z;
+                        int distanceSquared = dx * dx + dz * dz;
+
+                        // Remove chunk from devastatedChunks when within clean radius
+                        // This clears fog progressively as the radial clean expands
+                        if (distanceSquared <= cleanRadius * cleanRadius)
+                        {
+                            chunksToRemove.Add(chunkKey);
+                        }
+                    }
+                }
+            }
+
+            // Remove chunks - this clears fog effects
+            foreach (long chunkKey in chunksToRemove)
+            {
+                devastatedChunks.Remove(chunkKey);
             }
         }
 
         /// <summary>
         /// Heals devastated blocks within the rift ward's protection radius.
+        /// Dispatches to radial or random mode based on config.
         /// </summary>
         private int HealBlocksAroundRiftWard(RiftWard ward, int blocksToHeal)
         {
             if (ward.Pos == null) return 0;
 
+            if (config.RiftWardRadialCleanEnabled)
+            {
+                return HealBlocksRadialClean(ward, blocksToHeal);
+            }
+            else
+            {
+                return HealBlocksRandom(ward, blocksToHeal);
+            }
+        }
+
+        /// <summary>
+        /// Heals devastated blocks using radial clean mode - expands outward from the center
+        /// in concentric shells, creating a smooth clearing pattern.
+        /// </summary>
+        private int HealBlocksRadialClean(RiftWard ward, int blocksToHeal)
+        {
+            int healedCount = 0;
+            int maxRadius = config.RiftWardProtectionRadius;
+            int maxFailuresPerRadius = 100; // How many failed attempts before advancing radius
+
+            // Calculate Y bounds for scanning - scan full column within protection sphere
+            // Underground can be quite deep, so scan from near bedrock up to reasonable height
+            int minY = Math.Max(1, ward.Pos.Y - maxRadius);
+            int maxY = Math.Min(sapi.World.BlockAccessor.MapSizeY - 1, ward.Pos.Y + maxRadius);
+
+            // Process blocks at current radius shell
+            for (int attempt = 0; attempt < blocksToHeal * 5 && healedCount < blocksToHeal; attempt++)
+            {
+                // Track the maximum radius we've reached (for fog clearing - doesn't reset)
+                if (ward.CurrentCleanRadius > ward.MaxCleanRadiusReached)
+                {
+                    ward.MaxCleanRadiusReached = ward.CurrentCleanRadius;
+                }
+
+                // If we've exceeded max radius, we're done - reset to check again from center
+                if (ward.CurrentCleanRadius > maxRadius)
+                {
+                    ward.MaxCleanRadiusReached = maxRadius; // Ensure max is set to full radius
+                    ward.CurrentCleanRadius = 0;
+                    ward.RadialCleanFailures = 0;
+                    return healedCount;
+                }
+
+                int r = ward.CurrentCleanRadius;
+                BlockPos targetPos;
+
+                if (r == 0)
+                {
+                    // At center, scan the entire column including below the ward
+                    // Pick a random Y in the full column range
+                    int targetY = minY + sapi.World.Rand.Next(maxY - minY + 1);
+                    targetPos = new BlockPos(ward.Pos.X, targetY, ward.Pos.Z);
+                }
+                else
+                {
+                    // Generate position on current radius shell
+                    double angle = sapi.World.Rand.NextDouble() * 2 * Math.PI;
+
+                    int offsetX = (int)(r * Math.Cos(angle));
+                    int offsetZ = (int)(r * Math.Sin(angle));
+
+                    // Calculate the max Y offset allowed at this horizontal radius to stay within sphere
+                    // For a sphere: x² + y² + z² <= r²  =>  y² <= maxRadius² - (horizontal distance)²
+                    int horizontalDistSq = offsetX * offsetX + offsetZ * offsetZ;
+                    int maxYOffsetSq = maxRadius * maxRadius - horizontalDistSq;
+                    int maxYOffset = maxYOffsetSq > 0 ? (int)Math.Sqrt(maxYOffsetSq) : 0;
+
+                    // Pick a random Y within the allowed vertical range
+                    int yMin = Math.Max(minY, ward.Pos.Y - maxYOffset);
+                    int yMax = Math.Min(maxY, ward.Pos.Y + maxYOffset);
+                    int targetY = yMin + sapi.World.Rand.Next(Math.Max(1, yMax - yMin + 1));
+
+                    targetPos = new BlockPos(
+                        ward.Pos.X + offsetX,
+                        targetY,
+                        ward.Pos.Z + offsetZ
+                    );
+                }
+
+                if (targetPos.Y < 1)
+                {
+                    ward.RadialCleanFailures++;
+                    if (ward.RadialCleanFailures >= maxFailuresPerRadius)
+                    {
+                        ward.CurrentCleanRadius++;
+                        ward.RadialCleanFailures = 0;
+                    }
+                    continue;
+                }
+
+                Block block = sapi.World.BlockAccessor.GetBlock(targetPos);
+                if (block == null || block.Id == 0)
+                {
+                    ward.RadialCleanFailures++;
+                    if (ward.RadialCleanFailures >= maxFailuresPerRadius)
+                    {
+                        ward.CurrentCleanRadius++;
+                        ward.RadialCleanFailures = 0;
+                    }
+                    continue;
+                }
+
+                // Check if this is a devastated block
+                if (!IsAlreadyDevastated(block))
+                {
+                    ward.RadialCleanFailures++;
+                    if (ward.RadialCleanFailures >= maxFailuresPerRadius)
+                    {
+                        ward.CurrentCleanRadius++;
+                        ward.RadialCleanFailures = 0;
+                    }
+                    continue;
+                }
+
+                // Found a devastated block - heal it
+                if (TryGetHealedForm(block, out string healedBlock))
+                {
+                    if (healedBlock == "none")
+                    {
+                        sapi.World.BlockAccessor.SetBlock(0, targetPos);
+                    }
+                    else
+                    {
+                        Block newBlock = sapi.World.GetBlock(new AssetLocation("game", healedBlock));
+                        if (newBlock != null)
+                        {
+                            sapi.World.BlockAccessor.SetBlock(newBlock.Id, targetPos);
+                        }
+                    }
+
+                    healedCount++;
+                    ward.RadialCleanFailures = 0; // Reset failures on success
+                }
+            }
+
+            return healedCount;
+        }
+
+        /// <summary>
+        /// Heals devastated blocks using random selection within the protection radius.
+        /// </summary>
+        private int HealBlocksRandom(RiftWard ward, int blocksToHeal)
+        {
             int healedCount = 0;
             int maxAttempts = blocksToHeal * 10;
             int radius = config.RiftWardProtectionRadius;
