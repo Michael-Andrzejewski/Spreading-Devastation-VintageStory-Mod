@@ -757,9 +757,16 @@ namespace SpreadingDevastation
         {
             if (serverNetworkChannel == null) return;
 
+            // Early exit if nothing to sync
+            bool hasChunks = devastatedChunks != null && devastatedChunks.Count > 0;
+            if (!fogConfigDirty && !hasChunks) return;
+
+            var players = sapi.World.AllOnlinePlayers;
+            if (players == null || players.Length == 0) return;
+
             const int SYNC_RADIUS_CHUNKS = 8; // Sync chunks within 8 chunk radius (~256 blocks)
 
-            // Only create and send fog config packet when it has changed
+            // Only create fog config packet when it has changed
             FogConfigPacket fogPacket = null;
             if (fogConfigDirty)
             {
@@ -779,8 +786,9 @@ namespace SpreadingDevastation
                 fogConfigDirty = false;
             }
 
-            foreach (IServerPlayer player in sapi.World.AllOnlinePlayers.Cast<IServerPlayer>())
+            for (int i = 0; i < players.Length; i++)
             {
+                var player = players[i] as IServerPlayer;
                 if (player?.Entity == null) continue;
 
                 // Send fog config only when it changed
@@ -790,7 +798,7 @@ namespace SpreadingDevastation
                 }
 
                 // Send chunk data if there are any devastated chunks
-                if (devastatedChunks == null || devastatedChunks.Count == 0) continue;
+                if (!hasChunks) continue;
 
                 var playerPos = player.Entity.Pos;
                 int playerChunkX = (int)playerPos.X / CHUNK_SIZE;
@@ -798,21 +806,26 @@ namespace SpreadingDevastation
 
                 var packet = new DevastatedChunkSyncPacket();
 
-                foreach (var chunk in devastatedChunks.Values)
+                foreach (var kvp in devastatedChunks)
                 {
+                    var chunk = kvp.Value;
                     // Only sync chunks within range of player
                     int dx = chunk.ChunkX - playerChunkX;
                     int dz = chunk.ChunkZ - playerChunkZ;
 
-                    if (Math.Abs(dx) <= SYNC_RADIUS_CHUNKS && Math.Abs(dz) <= SYNC_RADIUS_CHUNKS)
+                    if (dx >= -SYNC_RADIUS_CHUNKS && dx <= SYNC_RADIUS_CHUNKS &&
+                        dz >= -SYNC_RADIUS_CHUNKS && dz <= SYNC_RADIUS_CHUNKS)
                     {
                         packet.ChunkXs.Add(chunk.ChunkX);
                         packet.ChunkZs.Add(chunk.ChunkZ);
                     }
                 }
 
-                // Send packet to this specific player
-                serverNetworkChannel.SendPacket(packet, player);
+                // Only send if there are nearby chunks
+                if (packet.ChunkXs.Count > 0)
+                {
+                    serverNetworkChannel.SendPacket(packet, player);
+                }
             }
         }
 
@@ -2490,16 +2503,15 @@ namespace SpreadingDevastation
 
         private void SpreadDevastationFromRifts(float dt)
         {
-            // Skip all processing if paused
+            // Skip all processing if paused or no sources exist
             if (isPaused) return;
-            
-            // Safety check
-            if (sapi == null || devastationSources == null) return;
-            
+            if (sapi == null) return;
+            if (devastationSources == null || devastationSources.Count == 0) return;
+
             try
             {
                 // Spread from manual devastation sources
-                List<DevastationSource> toRemove = new List<DevastationSource>();
+                List<DevastationSource> toRemove = null; // Lazy init - only create if needed
                 double currentGameTime = sapi.World.Calendar.TotalHours;
                 
                 foreach (DevastationSource source in devastationSources)
@@ -2509,6 +2521,7 @@ namespace SpreadingDevastation
                     if (block == null || block.Id == 0)
                     {
                         // Block was removed, remove from sources
+                        if (toRemove == null) toRemove = new List<DevastationSource>();
                         toRemove.Add(source);
                         continue;
                     }
@@ -2596,9 +2609,12 @@ namespace SpreadingDevastation
                 }
             
                 // Clean up removed sources
-                foreach (var source in toRemove)
+                if (toRemove != null)
                 {
-                    devastationSources.Remove(source);
+                    foreach (var source in toRemove)
+                    {
+                        devastationSources.Remove(source);
+                    }
                 }
             
                 // Periodic cleanup: remove saturated sources to free slots for active spreading
@@ -3484,7 +3500,9 @@ namespace SpreadingDevastation
         /// </summary>
         private void ProcessDevastatedChunks(float dt)
         {
-            if (isPaused || sapi == null || devastatedChunks == null || devastatedChunks.Count == 0) return;
+            // Early exit - skip all work if nothing to process
+            if (isPaused || sapi == null) return;
+            if (devastatedChunks == null || devastatedChunks.Count == 0) return;
 
             perfStopwatch.Restart();
 
@@ -3499,7 +3517,8 @@ namespace SpreadingDevastation
                     tickDeltaTimes.Dequeue();
 
                 // Process any chunks needing repair (stuck chunks detected)
-                ProcessChunksNeedingRepair();
+                if (chunksNeedingRepair.Count > 0)
+                    ProcessChunksNeedingRepair();
 
                 // Drain temporal stability from players in devastated chunks
                 DrainPlayerTemporalStability(dt);
@@ -3507,7 +3526,7 @@ namespace SpreadingDevastation
                 // Check for chunk spreading to nearby chunks
                 TrySpreadToNearbyChunks(currentTime);
 
-                foreach (var chunk in devastatedChunks.Values.ToList()) // ToList() to allow modification during iteration
+                foreach (var chunk in devastatedChunks.Values) // Dictionary values are safe to iterate while modifying chunk properties
                 {
                     // Skip chunks protected by rift wards - no processing needed
                     if (IsChunkProtectedByRiftWard(chunk.ChunkX, chunk.ChunkZ)) continue;
@@ -3720,10 +3739,11 @@ namespace SpreadingDevastation
                 if (sapi.World.Rand.NextDouble() >= config.ChunkSpreadChance) continue;
 
                 // Try to spread to a random cardinal direction (no diagonals)
-                var shuffledDirections = ChunkCardinalOffsets.OrderBy(x => sapi.World.Rand.Next()).ToArray();
+                int[] shuffledDirIndices = GetShuffledIndices(ChunkCardinalOffsets.Length, sapi.World.Rand);
 
-                foreach (var direction in shuffledDirections)
+                for (int dirIdx = 0; dirIdx < shuffledDirIndices.Length; dirIdx++)
                 {
+                    var direction = ChunkCardinalOffsets[shuffledDirIndices[dirIdx]];
                     int offsetX = direction[0];
                     int offsetZ = direction[1];
 
@@ -3733,7 +3753,13 @@ namespace SpreadingDevastation
 
                     // Skip if already devastated or already queued
                     if (devastatedChunks.ContainsKey(newChunkKey)) continue;
-                    if (chunksToAdd.Any(c => c.ChunkKey == newChunkKey)) continue;
+                    // Check chunksToAdd without LINQ - direct loop
+                    bool alreadyQueued = false;
+                    for (int i = 0; i < chunksToAdd.Count; i++)
+                    {
+                        if (chunksToAdd[i].ChunkKey == newChunkKey) { alreadyQueued = true; break; }
+                    }
+                    if (alreadyQueued) continue;
 
                     // Skip if chunk is protected by a rift ward
                     if (IsChunkProtectedByRiftWard(newChunkX, newChunkZ)) continue;
@@ -4005,6 +4031,86 @@ namespace SpreadingDevastation
         };
 
         /// <summary>
+        /// Four horizontal cardinal directions (no up/down) for edge bleeding
+        /// </summary>
+        private static readonly BlockPos[] HorizontalOffsets = new BlockPos[]
+        {
+            new BlockPos(1, 0, 0),   // East
+            new BlockPos(-1, 0, 0),  // West
+            new BlockPos(0, 0, 1),   // South
+            new BlockPos(0, 0, -1)   // North
+        };
+
+        // Reusable array indices for in-place shuffling (avoids allocations)
+        private readonly int[] shuffleIndices6 = new int[] { 0, 1, 2, 3, 4, 5 };
+        private readonly int[] shuffleIndices4 = new int[] { 0, 1, 2, 3 };
+
+        /// <summary>
+        /// Fisher-Yates shuffle in place - avoids allocations unlike LINQ OrderBy.
+        /// </summary>
+        private void ShuffleInPlace<T>(T[] array, Random rand)
+        {
+            int n = array.Length;
+            for (int i = n - 1; i > 0; i--)
+            {
+                int j = rand.Next(i + 1);
+                T temp = array[j];
+                array[j] = array[i];
+                array[i] = temp;
+            }
+        }
+
+        /// <summary>
+        /// Shuffles index array in place and returns it for iterating another array.
+        /// </summary>
+        private int[] GetShuffledIndices(int count, Random rand)
+        {
+            int[] indices = count == 6 ? shuffleIndices6 : (count == 4 ? shuffleIndices4 : new int[count]);
+            if (count != 6 && count != 4)
+            {
+                for (int i = 0; i < count; i++) indices[i] = i;
+            }
+            // Fisher-Yates shuffle
+            for (int i = count - 1; i > 0; i--)
+            {
+                int j = rand.Next(i + 1);
+                int temp = indices[j];
+                indices[j] = indices[i];
+                indices[i] = temp;
+            }
+            return indices;
+        }
+
+        /// <summary>
+        /// Checks if a position exists in a frontier list using position key comparison.
+        /// More efficient than LINQ .Any() with position comparison.
+        /// </summary>
+        private bool FrontierContainsPosition(List<BlockPos> frontier, int x, int y, int z)
+        {
+            if (frontier == null) return false;
+            for (int i = 0; i < frontier.Count; i++)
+            {
+                var p = frontier[i];
+                if (p.X == x && p.Y == y && p.Z == z) return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Checks if a bleed frontier contains a position.
+        /// </summary>
+        private bool BleedFrontierContainsPosition(List<BleedBlock> frontier, int x, int y, int z)
+        {
+            if (frontier == null) return false;
+            for (int i = 0; i < frontier.Count; i++)
+            {
+                var b = frontier[i];
+                if (b.Pos.X == x && b.Pos.Y == y && b.Pos.Z == z) return true;
+            }
+            return false;
+        }
+
+        /// <summary>
         /// Rapidly spreads devastation within a chunk using cardinal-adjacent spreading.
         /// Devastation only spreads to blocks adjacent (in 6 cardinal directions) to existing devastation.
         /// </summary>
@@ -4056,11 +4162,12 @@ namespace SpreadingDevastation
 
                 // Try each cardinal direction from this frontier block
                 bool foundCandidate = false;
-                // Shuffle the cardinal directions to avoid bias
-                var shuffledOffsets = CardinalOffsets.OrderBy(x => sapi.World.Rand.Next()).ToArray();
+                // Shuffle the cardinal directions to avoid bias (in-place, no allocation)
+                int[] shuffledIndices = GetShuffledIndices(CardinalOffsets.Length, sapi.World.Rand);
 
-                foreach (var offset in shuffledOffsets)
+                for (int idx = 0; idx < shuffledIndices.Length; idx++)
                 {
+                    var offset = CardinalOffsets[shuffledIndices[idx]];
                     BlockPos targetPos = new BlockPos(
                         frontierPos.X + offset.X,
                         frontierPos.Y + offset.Y,
@@ -4184,7 +4291,7 @@ namespace SpreadingDevastation
                         }
                     }
 
-                    if (!hasValidNeighbors && !blocksToRemoveFromFrontier.Any(p => p.X == frontierPos.X && p.Y == frontierPos.Y && p.Z == frontierPos.Z))
+                    if (!hasValidNeighbors && !FrontierContainsPosition(blocksToRemoveFromFrontier, frontierPos.X, frontierPos.Y, frontierPos.Z))
                     {
                         blocksToRemoveFromFrontier.Add(frontierPos);
                     }
@@ -4192,9 +4299,10 @@ namespace SpreadingDevastation
             }
 
             // Update frontier: add new blocks, remove exhausted ones
-            foreach (var newBlock in newFrontierBlocks)
+            for (int i = 0; i < newFrontierBlocks.Count; i++)
             {
-                if (!chunk.DevastationFrontier.Any(p => p.X == newBlock.X && p.Y == newBlock.Y && p.Z == newBlock.Z))
+                var newBlock = newFrontierBlocks[i];
+                if (!FrontierContainsPosition(chunk.DevastationFrontier, newBlock.X, newBlock.Y, newBlock.Z))
                 {
                     chunk.DevastationFrontier.Add(newBlock);
                 }
@@ -4206,9 +4314,19 @@ namespace SpreadingDevastation
                 }
             }
 
-            foreach (var oldBlock in blocksToRemoveFromFrontier)
+            // Remove exhausted frontier blocks - iterate backwards to safely remove
+            for (int i = 0; i < blocksToRemoveFromFrontier.Count; i++)
             {
-                chunk.DevastationFrontier.RemoveAll(p => p.X == oldBlock.X && p.Y == oldBlock.Y && p.Z == oldBlock.Z);
+                var oldBlock = blocksToRemoveFromFrontier[i];
+                for (int j = chunk.DevastationFrontier.Count - 1; j >= 0; j--)
+                {
+                    var p = chunk.DevastationFrontier[j];
+                    if (p.X == oldBlock.X && p.Y == oldBlock.Y && p.Z == oldBlock.Z)
+                    {
+                        chunk.DevastationFrontier.RemoveAt(j);
+                        break; // Only remove first match
+                    }
+                }
             }
 
             // Process bleed frontier - spread limited devastation into adjacent non-devastated chunks
@@ -4233,18 +4351,27 @@ namespace SpreadingDevastation
                 // and blocks far from center (to maintain outward spread)
                 int centerX = startX + CHUNK_SIZE / 2;
                 int centerZ = startZ + CHUNK_SIZE / 2;
+                int edgeStartX = startX + 2;
+                int edgeEndX = endX - 2;
+                int edgeStartZ = startZ + 2;
+                int edgeEndZ = endZ - 2;
 
-                // Score blocks: higher score = keep. Edge blocks get bonus, distance from center adds to score
-                chunk.DevastationFrontier = chunk.DevastationFrontier
-                    .OrderByDescending(p =>
-                    {
-                        int distFromCenter = Math.Abs(p.X - centerX) + Math.Abs(p.Z - centerZ);
-                        // Bonus for being at chunk edge (within 2 blocks of edge)
-                        bool atEdge = p.X < startX + 2 || p.X >= endX - 2 || p.Z < startZ + 2 || p.Z >= endZ - 2;
-                        return distFromCenter + (atEdge ? 100 : 0);
-                    })
-                    .Take(300)
-                    .ToList();
+                // Sort in place - higher score = keep (edge blocks get bonus, distance from center adds to score)
+                chunk.DevastationFrontier.Sort((a, b) =>
+                {
+                    int distA = Math.Abs(a.X - centerX) + Math.Abs(a.Z - centerZ);
+                    int distB = Math.Abs(b.X - centerX) + Math.Abs(b.Z - centerZ);
+                    bool atEdgeA = a.X < edgeStartX || a.X >= edgeEndX || a.Z < edgeStartZ || a.Z >= edgeEndZ;
+                    bool atEdgeB = b.X < edgeStartX || b.X >= edgeEndX || b.Z < edgeStartZ || b.Z >= edgeEndZ;
+                    int scoreA = distA + (atEdgeA ? 100 : 0);
+                    int scoreB = distB + (atEdgeB ? 100 : 0);
+                    return scoreB.CompareTo(scoreA); // Descending order
+                });
+                // Keep top 300
+                if (chunk.DevastationFrontier.Count > 300)
+                {
+                    chunk.DevastationFrontier.RemoveRange(300, chunk.DevastationFrontier.Count - 300);
+                }
             }
 
             // Update devastation level estimate
@@ -4325,7 +4452,7 @@ namespace SpreadingDevastation
                             blocksFound++;
 
                             // Add to frontier
-                            if (!chunk.DevastationFrontier.Any(p => p.X == pos.X && p.Y == pos.Y && p.Z == pos.Z))
+                            if (!FrontierContainsPosition(chunk.DevastationFrontier, pos.X, pos.Y, pos.Z))
                             {
                                 chunk.DevastationFrontier.Add(pos.Copy());
                             }
@@ -4346,17 +4473,10 @@ namespace SpreadingDevastation
             }
 
             // Check each horizontal cardinal direction to see if we're at an edge
-            // Only bleed horizontally (not up/down)
-            BlockPos[] horizontalOffsets = new BlockPos[]
+            // Using static HorizontalOffsets array to avoid allocation
+            for (int i = 0; i < HorizontalOffsets.Length; i++)
             {
-                new BlockPos(1, 0, 0),   // East
-                new BlockPos(-1, 0, 0),  // West
-                new BlockPos(0, 0, 1),   // South
-                new BlockPos(0, 0, -1)   // North
-            };
-
-            foreach (var offset in horizontalOffsets)
-            {
+                var offset = HorizontalOffsets[i];
                 BlockPos adjacentPos = new BlockPos(
                     edgeBlock.X + offset.X,
                     edgeBlock.Y,
@@ -4403,7 +4523,7 @@ namespace SpreadingDevastation
                 }
 
                 // Check if we already have this position in the bleed frontier
-                if (chunk.BleedFrontier.Any(b => b.Pos.X == adjacentPos.X && b.Pos.Y == adjacentPos.Y && b.Pos.Z == adjacentPos.Z))
+                if (BleedFrontierContainsPosition(chunk.BleedFrontier, adjacentPos.X, adjacentPos.Y, adjacentPos.Z))
                 {
                     continue;
                 }
@@ -4443,39 +4563,41 @@ namespace SpreadingDevastation
             int maxToProcess = Math.Max(1, (int)(3 * config.SpeedMultiplier));
             int processed = 0;
 
-            List<BleedBlock> newBleedBlocks = new List<BleedBlock>();
-            List<BleedBlock> bleedBlocksToRemove = new List<BleedBlock>();
+            List<BleedBlock> newBleedBlocks = null; // Lazy init
+            List<BleedBlock> bleedBlocksToRemove = null; // Lazy init
 
-            // Shuffle to avoid directional bias
-            var shuffledBleed = chunk.BleedFrontier.OrderBy(x => sapi.World.Rand.Next()).ToList();
-
-            foreach (var bleedBlock in shuffledBleed)
+            // Process bleed blocks in random order using shuffled indices (no allocation)
+            int bleedCount = chunk.BleedFrontier.Count;
+            int[] bleedIndices = new int[bleedCount];
+            for (int i = 0; i < bleedCount; i++) bleedIndices[i] = i;
+            // Fisher-Yates shuffle
+            for (int i = bleedCount - 1; i > 0; i--)
             {
-                if (processed >= maxToProcess) break;
+                int j = sapi.World.Rand.Next(i + 1);
+                int temp = bleedIndices[j];
+                bleedIndices[j] = bleedIndices[i];
+                bleedIndices[i] = temp;
+            }
+
+            for (int bi = 0; bi < bleedCount && processed < maxToProcess; bi++)
+            {
+                var bleedBlock = chunk.BleedFrontier[bleedIndices[bi]];
 
                 // If no remaining spread, mark for removal
                 if (bleedBlock.RemainingSpread <= 0)
                 {
+                    if (bleedBlocksToRemove == null) bleedBlocksToRemove = new List<BleedBlock>();
                     bleedBlocksToRemove.Add(bleedBlock);
                     continue;
                 }
 
-                // Try to spread to an adjacent block (horizontal only for natural look)
-                BlockPos[] horizontalOffsets = new BlockPos[]
-                {
-                    new BlockPos(1, 0, 0),
-                    new BlockPos(-1, 0, 0),
-                    new BlockPos(0, 0, 1),
-                    new BlockPos(0, 0, -1),
-                    new BlockPos(0, 1, 0),  // Also allow up/down for terrain following
-                    new BlockPos(0, -1, 0)
-                };
-
-                var shuffledOffsets = horizontalOffsets.OrderBy(x => sapi.World.Rand.Next()).ToArray();
+                // Try to spread to an adjacent block (using CardinalOffsets - same 6 directions)
+                int[] shuffledOffsetIndices = GetShuffledIndices(CardinalOffsets.Length, sapi.World.Rand);
                 bool foundTarget = false;
 
-                foreach (var offset in shuffledOffsets)
+                for (int oi = 0; oi < shuffledOffsetIndices.Length; oi++)
                 {
+                    var offset = CardinalOffsets[shuffledOffsetIndices[oi]];
                     BlockPos targetPos = new BlockPos(
                         bleedBlock.Pos.X + offset.X,
                         bleedBlock.Pos.Y + offset.Y,
@@ -4530,6 +4652,7 @@ namespace SpreadingDevastation
                         });
 
                         // Add new bleed block with decremented spread budget
+                        if (newBleedBlocks == null) newBleedBlocks = new List<BleedBlock>();
                         newBleedBlocks.Add(new BleedBlock
                         {
                             Pos = targetPos.Copy(),
@@ -4545,31 +4668,38 @@ namespace SpreadingDevastation
                 // If we couldn't spread anywhere, remove this bleed block
                 if (!foundTarget)
                 {
+                    if (bleedBlocksToRemove == null) bleedBlocksToRemove = new List<BleedBlock>();
                     bleedBlocksToRemove.Add(bleedBlock);
                 }
             }
 
             // Update bleed frontier
-            foreach (var newBleed in newBleedBlocks)
+            if (newBleedBlocks != null)
             {
-                if (!chunk.BleedFrontier.Any(b => b.Pos.X == newBleed.Pos.X && b.Pos.Y == newBleed.Pos.Y && b.Pos.Z == newBleed.Pos.Z))
+                for (int i = 0; i < newBleedBlocks.Count; i++)
                 {
-                    chunk.BleedFrontier.Add(newBleed);
+                    var newBleed = newBleedBlocks[i];
+                    if (!BleedFrontierContainsPosition(chunk.BleedFrontier, newBleed.Pos.X, newBleed.Pos.Y, newBleed.Pos.Z))
+                    {
+                        chunk.BleedFrontier.Add(newBleed);
+                    }
                 }
             }
 
-            foreach (var oldBleed in bleedBlocksToRemove)
+            if (bleedBlocksToRemove != null)
             {
-                chunk.BleedFrontier.Remove(oldBleed);
+                for (int i = 0; i < bleedBlocksToRemove.Count; i++)
+                {
+                    chunk.BleedFrontier.Remove(bleedBlocksToRemove[i]);
+                }
             }
 
-            // Prune bleed frontier if too large
+            // Prune bleed frontier if too large - keep highest spread values
             if (chunk.BleedFrontier.Count > 200)
             {
-                chunk.BleedFrontier = chunk.BleedFrontier
-                    .OrderByDescending(b => b.RemainingSpread)
-                    .Take(100)
-                    .ToList();
+                // Sort in place instead of creating new list
+                chunk.BleedFrontier.Sort((a, b) => b.RemainingSpread.CompareTo(a.RemainingSpread));
+                chunk.BleedFrontier.RemoveRange(100, chunk.BleedFrontier.Count - 100);
             }
         }
 
@@ -4615,7 +4745,7 @@ namespace SpreadingDevastation
                                 if (TryGetDevastatedForm(neighborBlock, out _, out _))
                                 {
                                     // This is a valid frontier block
-                                    if (!chunk.DevastationFrontier.Any(p => p.X == pos.X && p.Y == pos.Y && p.Z == pos.Z))
+                                    if (!FrontierContainsPosition(chunk.DevastationFrontier, pos.X, pos.Y, pos.Z))
                                     {
                                         chunk.DevastationFrontier.Add(pos.Copy());
                                     }
@@ -4767,7 +4897,7 @@ namespace SpreadingDevastation
                         {
                             if (TryGetDevastatedForm(newChunkBlock, out _, out _))
                             {
-                                if (!edgeFrontier.Any(p => p.X == newChunkPos.X && p.Y == newChunkPos.Y && p.Z == newChunkPos.Z))
+                                if (!FrontierContainsPosition(edgeFrontier, newChunkPos.X, newChunkPos.Y, newChunkPos.Z))
                                 {
                                     edgeFrontier.Add(newChunkPos.Copy());
                                 }
@@ -4776,7 +4906,7 @@ namespace SpreadingDevastation
                         // Also check if the block is already devastated (can still be a frontier)
                         else if (newChunkBlock != null && IsAlreadyDevastated(newChunkBlock))
                         {
-                            if (!edgeFrontier.Any(p => p.X == newChunkPos.X && p.Y == newChunkPos.Y && p.Z == newChunkPos.Z))
+                            if (!FrontierContainsPosition(edgeFrontier, newChunkPos.X, newChunkPos.Y, newChunkPos.Z))
                             {
                                 edgeFrontier.Add(newChunkPos.Copy());
                             }
@@ -4845,12 +4975,12 @@ namespace SpreadingDevastation
 
             double currentTime = sapi.World.Calendar.TotalHours;
             double checkIntervalHours = config.RiftWardScanIntervalSeconds / 3600.0;
-            double fullScanIntervalHours = 5.0 / 60.0; // Re-scan every 5 minutes in game time
 
-            // Perform initial scan for existing rift wards (or periodic re-scan)
-            if (!initialRiftWardScanCompleted || (currentTime - lastFullRiftWardScanTime >= fullScanIntervalHours))
+            // Only scan for existing rift wards once on initial load, and only if there are players online
+            // The OnBlockPlaced event handles new rift ward placements efficiently
+            if (!initialRiftWardScanCompleted && sapi.World.AllOnlinePlayers.Length > 0)
             {
-                ScanForExistingRiftWards();
+                ScanForExistingRiftWardsOptimized();
             }
 
             // Skip the rest if no rift wards are tracked
@@ -4862,13 +4992,16 @@ namespace SpreadingDevastation
                 lastRiftWardScanTime = currentTime;
                 VerifyRiftWardActiveState();
 
-                // Remove any newly spawned devastation sources within rift ward radii
-                // This catches sources that spawn from rifts after the ward was placed
-                RemoveSourcesInAllRiftWardRadii();
+                // Only check for sources/chunks if there are active wards with sources to remove
+                if (devastationSources != null && devastationSources.Count > 0)
+                {
+                    RemoveSourcesInAllRiftWardRadii();
+                }
 
-                // Clear any new devastated chunks within rift ward radii
-                // This maintains temporal stability in protected areas
-                RemoveDevastatedChunksInAllRiftWardRadii();
+                if (devastatedChunks != null && devastatedChunks.Count > 0)
+                {
+                    RemoveDevastatedChunksInAllRiftWardRadii();
+                }
             }
 
             // Process healing for each active rift ward
@@ -5707,17 +5840,34 @@ namespace SpreadingDevastation
         }
 
         /// <summary>
-        /// Scans loaded chunks around players for rift ward blocks and adds them to tracking.
-        /// This catches rift wards that existed before the mod was installed, or rift wards
-        /// that weren't previously tracked for any reason.
+        /// Optimized version of rift ward scanning that uses sparse sampling instead of scanning every block.
+        /// This runs once on game load and is much more efficient than the full scan.
+        /// New rift ward placements are tracked via the OnBlockPlaced event.
         /// </summary>
-        private void ScanForExistingRiftWards()
+        private void ScanForExistingRiftWardsOptimized()
         {
             if (sapi == null) return;
 
-            int scanRadius = 8; // Scan 8 chunks in each direction around each player (256 blocks)
+            // Mark as completed immediately to prevent re-running
+            initialRiftWardScanCompleted = true;
+            lastFullRiftWardScanTime = sapi.World.Calendar.TotalHours;
+
+            int scanRadius = 4; // Smaller radius - 4 chunks in each direction (128 blocks)
             int newWardsFound = 0;
-            var existingPositions = new HashSet<long>(activeRiftWards.Select(w => GetPositionKey(w.Pos)));
+            HashSet<long> existingPositions = null;
+
+            // Only build the HashSet if we have existing wards
+            if (activeRiftWards.Count > 0)
+            {
+                existingPositions = new HashSet<long>();
+                for (int i = 0; i < activeRiftWards.Count; i++)
+                {
+                    existingPositions.Add(GetPositionKey(activeRiftWards[i].Pos));
+                }
+            }
+
+            // Reusable BlockPos to avoid allocations
+            BlockPos checkPos = new BlockPos(0, 0, 0);
 
             foreach (var player in sapi.World.AllOnlinePlayers)
             {
@@ -5727,7 +5877,7 @@ namespace SpreadingDevastation
                 int playerChunkX = playerPos.X / CHUNK_SIZE;
                 int playerChunkZ = playerPos.Z / CHUNK_SIZE;
 
-                // Scan chunks around the player
+                // Scan chunks around the player with sparse sampling
                 for (int cx = playerChunkX - scanRadius; cx <= playerChunkX + scanRadius; cx++)
                 {
                     for (int cz = playerChunkZ - scanRadius; cz <= playerChunkZ + scanRadius; cz++)
@@ -5736,46 +5886,52 @@ namespace SpreadingDevastation
                         var chunk = sapi.World.BlockAccessor.GetChunk(cx, 0, cz);
                         if (chunk == null) continue;
 
-                        // Scan all blocks in this chunk column for rift wards
                         int startX = cx * CHUNK_SIZE;
                         int startZ = cz * CHUNK_SIZE;
-                        int endX = startX + CHUNK_SIZE;
-                        int endZ = startZ + CHUNK_SIZE;
 
-                        // Scan at surface level and a bit below (rift wards are usually at ground level)
-                        int seaLevel = sapi.World.SeaLevel;
-                        int minY = Math.Max(1, seaLevel - 50);
-                        int maxY = Math.Min(sapi.World.BlockAccessor.MapSizeY - 1, seaLevel + 100);
-
-                        for (int x = startX; x < endX; x++)
+                        // Rift wards are rare - sample every 2 blocks in X/Z and scan a narrow Y range near surface
+                        // This reduces scan from 32*32*150 = 153,600 to 16*16*20 = 5,120 per chunk (30x reduction)
+                        for (int dx = 0; dx < CHUNK_SIZE; dx += 2)
                         {
-                            for (int z = startZ; z < endZ; z++)
+                            for (int dz = 0; dz < CHUNK_SIZE; dz += 2)
                             {
-                                for (int y = minY; y < maxY; y++)
-                                {
-                                    var pos = new BlockPos(x, y, z);
-                                    var block = sapi.World.BlockAccessor.GetBlock(pos);
+                                int x = startX + dx;
+                                int z = startZ + dz;
 
-                                    if (IsRiftWardBlock(block))
+                                // Get surface Y at this position
+                                int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(checkPos.Set(x, 0, z));
+                                if (surfaceY <= 0) continue;
+
+                                // Scan 10 blocks above and 5 blocks below surface (rift wards are usually at ground level)
+                                int minY = Math.Max(1, surfaceY - 5);
+                                int maxY = Math.Min(sapi.World.BlockAccessor.MapSizeY - 1, surfaceY + 10);
+
+                                for (int y = minY; y <= maxY; y++)
+                                {
+                                    checkPos.Set(x, y, z);
+                                    var block = sapi.World.BlockAccessor.GetBlock(checkPos);
+
+                                    if (block != null && IsRiftWardBlock(block))
                                     {
-                                        long posKey = GetPositionKey(pos);
-                                        if (!existingPositions.Contains(posKey))
+                                        long posKey = GetPositionKey(checkPos);
+                                        if (existingPositions == null || !existingPositions.Contains(posKey))
                                         {
                                             var newWard = new RiftWard
                                             {
-                                                Pos = pos.Copy(),
+                                                Pos = checkPos.Copy(),
                                                 DiscoveredTime = sapi.World.Calendar.TotalHours
                                             };
 
                                             // Check if it's active
-                                            newWard.CachedIsActive = IsRiftWardActive(pos);
+                                            newWard.CachedIsActive = IsRiftWardActive(checkPos);
                                             newWard.LastActiveCheck = sapi.World.Calendar.TotalHours;
 
                                             activeRiftWards.Add(newWard);
+                                            if (existingPositions == null) existingPositions = new HashSet<long>();
                                             existingPositions.Add(posKey);
                                             newWardsFound++;
 
-                                            sapi.Logger.Notification($"SpreadingDevastation: Discovered existing rift ward at {pos} (active: {newWard.CachedIsActive})");
+                                            sapi.Logger.Notification($"SpreadingDevastation: Discovered existing rift ward at {checkPos} (active: {newWard.CachedIsActive})");
 
                                             if (newWard.CachedIsActive)
                                             {
@@ -5794,12 +5950,9 @@ namespace SpreadingDevastation
 
             if (newWardsFound > 0)
             {
-                sapi.Logger.Notification($"SpreadingDevastation: Scan found {newWardsFound} previously untracked rift ward(s)");
+                sapi.Logger.Notification($"SpreadingDevastation: Initial scan found {newWardsFound} rift ward(s)");
                 RebuildProtectedChunkCache();
             }
-
-            initialRiftWardScanCompleted = true;
-            lastFullRiftWardScanTime = sapi.World.Calendar.TotalHours;
         }
 
         /// <summary>
