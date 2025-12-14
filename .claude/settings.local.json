@@ -9,7 +9,9 @@
       "WebFetch(domain:mods.vintagestory.at)",
       "WebFetch(domain:github.com)",
       "Bash(dir \"C:\\Users\\maaro\\AppData\\Roaming\\VintagestoryData\\Logs\")",
-      "WebFetch(domain:gitlab.com)"
+      "WebFetch(domain:gitlab.com)",
+      "WebFetch(domain:blog.andreaskahler.com)",
+      "WebFetch(domain:songho.ca)"
     ]
   }
 }
