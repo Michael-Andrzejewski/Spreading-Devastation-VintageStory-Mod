@@ -7,7 +7,7 @@
         "Soareverix"
     ],
     "description": "Manually marked blocks spread or heal devastation with customizable range and amount. Use /devastate add or /devastate heal to mark blocks. Use /devastate remove all to clear all sources.",
-    "version": "1.0.3",
+    "version": "1.0.5",
     "dependencies": {
         "game": "1.21.5"
     }

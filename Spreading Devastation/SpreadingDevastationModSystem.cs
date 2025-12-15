@@ -258,6 +258,44 @@ namespace SpreadingDevastation
         /// How fast the fog effect transitions in/out in seconds (default: 0.5).
         /// </summary>
         public float FogTransitionSpeed { get; set; } = 0.5f;
+
+        // === Animal Insanity Settings ===
+
+        /// <summary>
+        /// Whether animals in devastated chunks become permanently hostile (default: true).
+        /// Insane animals will attack players on sight and remain hostile even after leaving devastated areas.
+        /// </summary>
+        public bool AnimalInsanityEnabled { get; set; } = true;
+
+        /// <summary>
+        /// Interval in seconds between animal insanity checks (default: 3.0).
+        /// Lower values make animals go insane faster but use more CPU.
+        /// </summary>
+        public double AnimalInsanityCheckIntervalSeconds { get; set; } = 3.0;
+
+        /// <summary>
+        /// Radius in blocks around each player to search for animals to drive insane (default: 48).
+        /// Animals outside this radius won't be affected even if in devastated chunks.
+        /// </summary>
+        public int AnimalInsanitySearchRadius { get; set; } = 48;
+
+        /// <summary>
+        /// Chance (0.0-1.0) for an animal to go insane each check while in a devastated chunk (default: 0.3).
+        /// Lower values create more gradual onset of insanity.
+        /// </summary>
+        public double AnimalInsanityChance { get; set; } = 0.3;
+
+        /// <summary>
+        /// Comma-separated list of entity code prefixes for animals that can go insane (default: common animals).
+        /// Use wildcards like "wolf*" to match variants. Set to "*" to affect all creatures.
+        /// </summary>
+        public string AnimalInsanityEntityCodes { get; set; } = "wolf,bear,hyena,boar,pig,sheep,goat,chicken,hare,fox,raccoon,deer,gazelle,moose,aurochs";
+
+        /// <summary>
+        /// Comma-separated list of entity code prefixes to exclude from insanity (default: hostile mobs).
+        /// These entities will never go insane (they're typically already hostile).
+        /// </summary>
+        public string AnimalInsanityExcludeCodes { get; set; } = "drifter,locust,bell,bowtorn,eidolon,shiver";
     }
 
     public class SpreadingDevastationModSystem : ModSystem
@@ -582,12 +620,23 @@ namespace SpreadingDevastation
         private IServerNetworkChannel serverNetworkChannel;
         private bool fogConfigDirty = true; // Flag to track if fog config needs to be sent
 
+        // Temporal stability system hook for gear visual (server and client)
+        private SystemTemporalStability temporalStabilitySystemServer;
+        private SystemTemporalStability temporalStabilitySystemClient;
+
         // Client-side fields
         private ICoreClientAPI capi;
         private IClientNetworkChannel clientNetworkChannel;
         private HashSet<long> clientDevastatedChunks = new HashSet<long>(); // Chunk keys received from server
         private DevastationFogRenderer fogRenderer;
         private FogConfigPacket clientFogConfig = new FogConfigPacket(); // Fog config received from server
+
+        // Animal insanity tracking
+        private double lastInsanityCheckTime = 0; // Track last time we checked for animals to drive insane
+        private HashSet<long> insaneEntityIds = new HashSet<long>(); // Entity IDs that have been driven insane (for quick lookup)
+        private string[] insanityIncludePatterns = null; // Cached parsed patterns from config
+        private string[] insanityExcludePatterns = null; // Cached parsed patterns from config
+        private const string INSANITY_ATTRIBUTE = "devastationInsane"; // WatchedAttribute key for insane state
 
         public override void Start(ICoreAPI api)
         {
@@ -612,6 +661,22 @@ namespace SpreadingDevastation
             // Create and register the fog renderer
             fogRenderer = new DevastationFogRenderer(api, this);
             api.Event.RegisterRenderer(fogRenderer, EnumRenderStage.Before, "devastationfog");
+
+            // Hook into the client-side temporal stability system after player enters world
+            // This makes the gear spin counter-clockwise in devastated chunks
+            api.Event.PlayerEntitySpawn += (entity) => {
+                // Only hook once when the local player spawns (check if entity is the local player)
+                var localPlayer = api.World.Player;
+                if (temporalStabilitySystemClient == null && localPlayer != null && entity is EntityPlayer playerEntity && playerEntity.PlayerUID == localPlayer.PlayerUID)
+                {
+                    temporalStabilitySystemClient = api.ModLoader.GetModSystem<SystemTemporalStability>();
+                    if (temporalStabilitySystemClient != null)
+                    {
+                        temporalStabilitySystemClient.OnGetTemporalStability += OnGetTemporalStabilityOverrideClient;
+                        api.Logger.Notification("SpreadingDevastation: Hooked into client temporal stability system for gear visual");
+                    }
+                }
+            };
 
             api.Logger.Notification("SpreadingDevastation: Client-side fog renderer initialized");
         }
@@ -728,6 +793,9 @@ namespace SpreadingDevastation
             // Sync devastated chunks to clients every 5 seconds
             api.Event.RegisterGameTickListener(SyncDevastatedChunksToClients, 5000);
 
+            // Process animal insanity every 1 second (actual interval controlled by config)
+            api.Event.RegisterGameTickListener(ProcessAnimalInsanity, 1000);
+
             // Listen for block placement/removal to track rift wards efficiently
             api.Event.DidPlaceBlock += OnBlockPlaced;
             api.Event.DidBreakBlock += OnBlockBroken;
@@ -747,6 +815,68 @@ namespace SpreadingDevastation
                     LoadConfig();
                     return TextCommandResult.Success("Configuration reloaded from ModConfig/SpreadingDevastationConfig.json");
                 });
+
+            // Hook into the temporal stability system to make the gear spin correctly in devastated areas
+            // This is done after save game loads to ensure the system is available
+            api.Event.SaveGameLoaded += () => {
+                temporalStabilitySystemServer = api.ModLoader.GetModSystem<SystemTemporalStability>();
+                if (temporalStabilitySystemServer != null)
+                {
+                    temporalStabilitySystemServer.OnGetTemporalStability += OnGetTemporalStabilityOverrideServer;
+                    sapi.Logger.Notification("SpreadingDevastation: Hooked into server temporal stability system");
+                }
+            };
+        }
+
+        /// <summary>
+        /// Server-side hook for the temporal stability system. Returns a low stability value when
+        /// the position is in a devastated chunk (and not protected by a rift ward).
+        /// This affects stability drain rate on the server.
+        /// </summary>
+        private float OnGetTemporalStabilityOverrideServer(float stability, double x, double y, double z)
+        {
+            // Early exit if no devastated chunks
+            if (devastatedChunks == null || devastatedChunks.Count == 0) return stability;
+
+            // Check if this position is in a devastated chunk
+            int chunkX = (int)x / CHUNK_SIZE;
+            int chunkZ = (int)z / CHUNK_SIZE;
+            long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
+
+            if (!devastatedChunks.ContainsKey(chunkKey)) return stability;
+
+            // Check if protected by rift ward - if so, return normal stability
+            BlockPos blockPos = new BlockPos((int)x, (int)y, (int)z);
+            if (IsBlockProtectedByRiftWard(blockPos)) return stability;
+
+            // Return a very low stability value to make the gear spin counter-clockwise
+            // Using 0.0 ensures maximum instability visual effect
+            return 0f;
+        }
+
+        /// <summary>
+        /// Client-side hook for the temporal stability system. Returns a low stability value when
+        /// the position is in a devastated chunk. This makes the temporal gear spin counter-clockwise.
+        /// Uses the synced clientDevastatedChunks set to determine if in a devastated area.
+        /// </summary>
+        private float OnGetTemporalStabilityOverrideClient(float stability, double x, double y, double z)
+        {
+            // Early exit if no devastated chunks synced from server
+            if (clientDevastatedChunks == null || clientDevastatedChunks.Count == 0) return stability;
+
+            // Check if this position is in a devastated chunk
+            int chunkX = (int)x / CHUNK_SIZE;
+            int chunkZ = (int)z / CHUNK_SIZE;
+            long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
+
+            if (!clientDevastatedChunks.Contains(chunkKey)) return stability;
+
+            // Note: Rift ward protection is handled server-side - protected chunks
+            // are removed from devastatedChunks before syncing to clients
+
+            // Return a very low stability value to make the gear spin counter-clockwise
+            // Using 0.0 ensures maximum instability visual effect
+            return 0f;
         }
 
         /// <summary>
@@ -852,6 +982,10 @@ namespace SpreadingDevastation
                 {
                     sapi.Logger.Notification("SpreadingDevastation: Loaded config file");
                 }
+
+                // Clear cached insanity patterns so they get re-parsed from new config
+                insanityIncludePatterns = null;
+                insanityExcludePatterns = null;
             }
             catch (Exception ex)
             {
@@ -1066,7 +1200,165 @@ namespace SpreadingDevastation
                     .WithDescription("Reset all config values to defaults")
                     .WithArgs(api.ChatCommands.Parsers.OptionalWord("confirm"))
                     .HandleWith(HandleResetCommand)
+                .EndSubCommand()
+                .BeginSubCommand("blockinfo")
+                    .WithDescription("Show block code of the block you're looking at (for debugging)")
+                    .HandleWith(HandleBlockInfoCommand)
+                .EndSubCommand()
+                .BeginSubCommand("insanity")
+                    .WithDescription("Manage animal insanity in devastated chunks")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("action"),
+                              api.ChatCommands.Parsers.OptionalAll("value"))
+                    .HandleWith(HandleInsanityCommand)
                 .EndSubCommand();
+        }
+
+        private TextCommandResult HandleBlockInfoCommand(TextCommandCallingArgs args)
+        {
+            var player = args.Caller.Player as IServerPlayer;
+            if (player == null) return TextCommandResult.Error("Player not found");
+
+            var blockSel = player.CurrentBlockSelection;
+            if (blockSel == null) return TextCommandResult.Error("Not looking at a block");
+
+            Block block = sapi.World.BlockAccessor.GetBlock(blockSel.Position);
+            if (block == null) return TextCommandResult.Error("Block not found");
+
+            string fullCode = block.Code.ToString();
+            string path = block.Code.Path;
+            string domain = block.Code.Domain;
+
+            bool canDevastate = TryGetDevastatedForm(block, out string devForm, out string regenTo);
+
+            var lines = new List<string>
+            {
+                "=== Block Info ===",
+                $"Full code: {fullCode}",
+                $"Domain: {domain}",
+                $"Path: {path}",
+                $"Block ID: {block.Id}",
+                $"Can devastate: {canDevastate}",
+            };
+
+            if (canDevastate)
+            {
+                lines.Add($"Devastated form: {devForm}");
+                lines.Add($"Regenerates to: {regenTo}");
+            }
+
+            return SendChatLines(args, lines, "Block info sent to chat");
+        }
+
+        private TextCommandResult HandleInsanityCommand(TextCommandCallingArgs args)
+        {
+            string action = args.Parsers[0].GetValue() as string ?? "";
+            string value = args.Parsers[1].GetValue() as string ?? "";
+
+            switch (action.ToLowerInvariant())
+            {
+                case "enable":
+                case "on":
+                    config.AnimalInsanityEnabled = true;
+                    SaveConfig();
+                    return TextCommandResult.Success("Animal insanity ENABLED - animals in devastated chunks will go hostile");
+
+                case "disable":
+                case "off":
+                    config.AnimalInsanityEnabled = false;
+                    SaveConfig();
+                    return TextCommandResult.Success("Animal insanity DISABLED - animals will behave normally");
+
+                case "clear":
+                case "cure":
+                    int cured = ClearAllInsanity();
+                    return TextCommandResult.Success($"Cleared insanity from {cured} entities (Note: they may still be aggressive until they reset)");
+
+                case "chance":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Current insanity chance: {config.AnimalInsanityChance:P0}. Use '/dv insanity chance [0.0-1.0]' to set.");
+                    }
+                    if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double newChance))
+                    {
+                        config.AnimalInsanityChance = Math.Clamp(newChance, 0.0, 1.0);
+                        SaveConfig();
+                        return TextCommandResult.Success($"Insanity chance set to {config.AnimalInsanityChance:P0}");
+                    }
+                    return TextCommandResult.Error("Invalid number. Use a value between 0.0 and 1.0");
+
+                case "interval":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Current check interval: {config.AnimalInsanityCheckIntervalSeconds:F1}s. Use '/dv insanity interval [seconds]' to set.");
+                    }
+                    if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double newInterval))
+                    {
+                        config.AnimalInsanityCheckIntervalSeconds = Math.Clamp(newInterval, 0.5, 60.0);
+                        SaveConfig();
+                        return TextCommandResult.Success($"Insanity check interval set to {config.AnimalInsanityCheckIntervalSeconds:F1} seconds");
+                    }
+                    return TextCommandResult.Error("Invalid number. Use a value between 0.5 and 60.0");
+
+                case "radius":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Current search radius: {config.AnimalInsanitySearchRadius} blocks. Use '/dv insanity radius [blocks]' to set.");
+                    }
+                    if (int.TryParse(value, out int newRadius))
+                    {
+                        config.AnimalInsanitySearchRadius = Math.Clamp(newRadius, 8, 256);
+                        SaveConfig();
+                        return TextCommandResult.Success($"Insanity search radius set to {config.AnimalInsanitySearchRadius} blocks");
+                    }
+                    return TextCommandResult.Error("Invalid number for radius");
+
+                case "include":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Current include patterns: {config.AnimalInsanityEntityCodes}");
+                    }
+                    config.AnimalInsanityEntityCodes = value;
+                    insanityIncludePatterns = null; // Clear cache to force re-parse
+                    SaveConfig();
+                    return TextCommandResult.Success($"Insanity include patterns set to: {value}");
+
+                case "exclude":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Current exclude patterns: {config.AnimalInsanityExcludeCodes}");
+                    }
+                    config.AnimalInsanityExcludeCodes = value;
+                    insanityExcludePatterns = null; // Clear cache to force re-parse
+                    SaveConfig();
+                    return TextCommandResult.Success($"Insanity exclude patterns set to: {value}");
+
+                case "":
+                case "info":
+                case "status":
+                default:
+                    var lines = new List<string>
+                    {
+                        "=== Animal Insanity Settings ===",
+                        $"Enabled: {(config.AnimalInsanityEnabled ? "YES" : "NO")}",
+                        $"Insane entities tracked: {insaneEntityIds.Count}",
+                        $"Check interval: {config.AnimalInsanityCheckIntervalSeconds:F1}s",
+                        $"Search radius: {config.AnimalInsanitySearchRadius} blocks",
+                        $"Insanity chance: {config.AnimalInsanityChance:P0}",
+                        "",
+                        "Include patterns: " + config.AnimalInsanityEntityCodes,
+                        "Exclude patterns: " + config.AnimalInsanityExcludeCodes,
+                        "",
+                        "Commands:",
+                        "  /dv insanity on/off - Enable or disable",
+                        "  /dv insanity clear - Cure all insane animals",
+                        "  /dv insanity chance [0-1] - Set insanity chance",
+                        "  /dv insanity interval [sec] - Set check interval",
+                        "  /dv insanity radius [blocks] - Set search radius",
+                        "  /dv insanity include [codes] - Set affected animals",
+                        "  /dv insanity exclude [codes] - Set immune animals"
+                    };
+                    return SendChatLines(args, lines, "Insanity info sent to chat");
+            }
         }
 
         private TextCommandResult HandleSpeedCommand(TextCommandCallingArgs args)
@@ -3415,6 +3707,48 @@ namespace SpreadingDevastation
                 devastatedBlock = "devgrowth-thorns";
                 regeneratesTo = "none";
             }
+            // Big berry bushes (covers bigberrybush-ripe-blueberry, etc.)
+            else if (path.StartsWith("bigberrybush-"))
+            {
+                devastatedBlock = "devgrowth-thorns";
+                regeneratesTo = "leavesbranchy-grown-oak";
+            }
+            // Wild berry bushes (covers wildberrybush variants)
+            else if (path.StartsWith("wildberrybush-"))
+            {
+                devastatedBlock = "devgrowth-thorns";
+                regeneratesTo = "leavesbranchy-grown-oak";
+            }
+            // Log sections (placed logs, branches, etc. - e.g., logsection-placed-redwood-ne-ud)
+            else if (path.StartsWith("logsection-"))
+            {
+                devastatedBlock = "devastatedsoil-3";
+                regeneratesTo = "log-grown-aged-ud";
+            }
+            // Fruit tree foliage (fruittree-foliage, fruittree-foliage-ripe, etc.)
+            else if (path.StartsWith("fruittree-foliage"))
+            {
+                devastatedBlock = "devgrowth-bush";
+                regeneratesTo = "none";
+            }
+            // Fruit tree branches (fruittree-branch-*, etc.)
+            else if (path.StartsWith("fruittree-branch"))
+            {
+                devastatedBlock = "devastatedsoil-3";
+                regeneratesTo = "log-grown-aged-ud";
+            }
+            // Fruit tree stems/trunks
+            else if (path.StartsWith("fruittree-stem") || path.StartsWith("fruittree-trunk"))
+            {
+                devastatedBlock = "devastatedsoil-3";
+                regeneratesTo = "log-grown-aged-ud";
+            }
+            // Mushrooms (mushroom-bolete-normal, mushroom-fieldmushroom-harvested, etc.)
+            else if (path.StartsWith("mushroom-"))
+            {
+                devastatedBlock = "devgrowth-shard";
+                regeneratesTo = "none";
+            }
             // Loose stones, boulders, flints - skip these (they'll remain as-is, spreading passes through)
             // Not converting them since they're decorative surface items
             else if (path.StartsWith("looseboulders-") || path.StartsWith("looseflints-") ||
@@ -3695,6 +4029,216 @@ namespace SpreadingDevastation
 
                 stabilityBehavior.OwnStability = newStability;
             }
+        }
+
+        /// <summary>
+        /// Processes animal insanity - checks for animals in devastated chunks and drives them insane.
+        /// Insane animals become permanently hostile to players.
+        /// </summary>
+        private void ProcessAnimalInsanity(float dt)
+        {
+            // Early exits for performance
+            if (!config.AnimalInsanityEnabled) return;
+            if (isPaused || sapi == null) return;
+            if (devastatedChunks == null || devastatedChunks.Count == 0) return;
+
+            // Check interval (config is in seconds, we need to compare against real time)
+            double currentTime = sapi.World.ElapsedMilliseconds / 1000.0;
+            if (currentTime - lastInsanityCheckTime < config.AnimalInsanityCheckIntervalSeconds) return;
+            lastInsanityCheckTime = currentTime;
+
+            // Parse patterns from config if not already cached
+            if (insanityIncludePatterns == null)
+            {
+                insanityIncludePatterns = config.AnimalInsanityEntityCodes
+                    .Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(s => s.Trim().ToLowerInvariant())
+                    .ToArray();
+            }
+            if (insanityExcludePatterns == null)
+            {
+                insanityExcludePatterns = config.AnimalInsanityExcludeCodes
+                    .Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(s => s.Trim().ToLowerInvariant())
+                    .ToArray();
+            }
+
+            // Process animals near each player
+            foreach (IServerPlayer player in sapi.World.AllOnlinePlayers.Cast<IServerPlayer>())
+            {
+                if (player.Entity == null) continue;
+
+                var playerPos = player.Entity.ServerPos.XYZ;
+                int searchRadius = config.AnimalInsanitySearchRadius;
+
+                // Get all entities around the player
+                Entity[] nearbyEntities = sapi.World.GetEntitiesAround(
+                    playerPos,
+                    searchRadius,
+                    searchRadius,
+                    entity => entity.IsCreature && entity.Alive && !(entity is EntityPlayer)
+                );
+
+                foreach (var entity in nearbyEntities)
+                {
+                    // Skip if already insane (quick HashSet lookup first)
+                    if (insaneEntityIds.Contains(entity.EntityId)) continue;
+
+                    // Also check WatchedAttribute (for persistence across sessions)
+                    if (entity.WatchedAttributes.GetBool(INSANITY_ATTRIBUTE, false))
+                    {
+                        // Already insane but not in our HashSet (happens after load), add it
+                        insaneEntityIds.Add(entity.EntityId);
+                        continue;
+                    }
+
+                    // Check if entity is in a devastated chunk
+                    int chunkX = (int)entity.ServerPos.X / CHUNK_SIZE;
+                    int chunkZ = (int)entity.ServerPos.Z / CHUNK_SIZE;
+                    long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
+
+                    if (!devastatedChunks.ContainsKey(chunkKey)) continue;
+
+                    // Check if protected by rift ward
+                    if (IsBlockProtectedByRiftWard(entity.ServerPos.AsBlockPos)) continue;
+
+                    // Check if this entity type can go insane
+                    if (!CanEntityGoInsane(entity)) continue;
+
+                    // Roll for insanity chance
+                    if (sapi.World.Rand.NextDouble() >= config.AnimalInsanityChance) continue;
+
+                    // Drive the animal insane!
+                    DriveEntityInsane(entity);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Checks if an entity type is eligible to go insane based on config patterns.
+        /// </summary>
+        private bool CanEntityGoInsane(Entity entity)
+        {
+            if (entity?.Code?.Path == null) return false;
+
+            string entityCode = entity.Code.Path.ToLowerInvariant();
+
+            // Check exclusions first (these are typically already-hostile mobs)
+            foreach (var pattern in insanityExcludePatterns)
+            {
+                if (string.IsNullOrEmpty(pattern)) continue;
+                if (pattern == "*" || entityCode.StartsWith(pattern) || entityCode.Contains(pattern))
+                {
+                    return false;
+                }
+            }
+
+            // Check if wildcard match all
+            if (insanityIncludePatterns.Length == 1 && insanityIncludePatterns[0] == "*")
+            {
+                return true;
+            }
+
+            // Check inclusions
+            foreach (var pattern in insanityIncludePatterns)
+            {
+                if (string.IsNullOrEmpty(pattern)) continue;
+                if (entityCode.StartsWith(pattern) || entityCode.Contains(pattern))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Drives an entity insane, making it permanently hostile to players.
+        /// </summary>
+        private void DriveEntityInsane(Entity entity)
+        {
+            // Mark as insane (persists in save)
+            entity.WatchedAttributes.SetBool(INSANITY_ATTRIBUTE, true);
+            insaneEntityIds.Add(entity.EntityId);
+
+            // Try to trigger the aggressive emotion state
+            var emotionBehavior = entity.GetBehavior<EntityBehaviorEmotionStates>();
+            if (emotionBehavior != null)
+            {
+                // Trigger aggressiveondamage state with guaranteed activation (1.0 random value passes any chance check)
+                // The 0 source ID indicates environmental cause rather than another entity
+                emotionBehavior.TryTriggerState("aggressiveondamage", 0.0, 0);
+            }
+
+            // Also try to set the entity's target to nearest player for immediate aggression
+            TrySetEntityTargetToNearestPlayer(entity);
+
+            sapi.Logger.Debug($"SpreadingDevastation: {entity.Code.Path} at ({entity.ServerPos.X:F0}, {entity.ServerPos.Y:F0}, {entity.ServerPos.Z:F0}) driven insane by devastation");
+        }
+
+        /// <summary>
+        /// Attempts to set an entity's AI target to the nearest player for immediate aggression.
+        /// </summary>
+        private void TrySetEntityTargetToNearestPlayer(Entity entity)
+        {
+            if (entity == null) return;
+
+            // Find nearest player
+            double nearestDistSq = double.MaxValue;
+            EntityPlayer nearestPlayer = null;
+
+            foreach (IServerPlayer player in sapi.World.AllOnlinePlayers.Cast<IServerPlayer>())
+            {
+                if (player.Entity == null) continue;
+
+                double dx = player.Entity.ServerPos.X - entity.ServerPos.X;
+                double dy = player.Entity.ServerPos.Y - entity.ServerPos.Y;
+                double dz = player.Entity.ServerPos.Z - entity.ServerPos.Z;
+                double distSq = dx * dx + dy * dy + dz * dz;
+
+                if (distSq < nearestDistSq)
+                {
+                    nearestDistSq = distSq;
+                    nearestPlayer = player.Entity;
+                }
+            }
+
+            // If a player is nearby (within 32 blocks), set them as the target
+            if (nearestPlayer != null && nearestDistSq < 32 * 32)
+            {
+                // Set the attacked by entity attribute so AI tasks will target the player
+                entity.Attributes.SetLong("guardTargetEntityId", nearestPlayer.EntityId);
+            }
+        }
+
+        /// <summary>
+        /// Gets the count of currently tracked insane entities.
+        /// </summary>
+        public int GetInsaneEntityCount()
+        {
+            return insaneEntityIds.Count;
+        }
+
+        /// <summary>
+        /// Clears insanity from all entities (for admin commands).
+        /// </summary>
+        public int ClearAllInsanity()
+        {
+            int count = 0;
+
+            // Clear insanity from all loaded entities
+            foreach (var entity in sapi.World.LoadedEntities.Values)
+            {
+                if (entity == null) continue;
+                if (entity.WatchedAttributes.GetBool(INSANITY_ATTRIBUTE, false))
+                {
+                    entity.WatchedAttributes.RemoveAttribute(INSANITY_ATTRIBUTE);
+                    count++;
+                }
+            }
+
+            insaneEntityIds.Clear();
+            return count;
         }
 
         /// <summary>
@@ -4924,12 +5468,15 @@ namespace SpreadingDevastation
 
         /// <summary>
         /// Called when a block is placed. Checks if it's a rift ward and tracks it.
+        /// Also checks if the block is placed in a devastated chunk and queues it for re-devastation.
         /// </summary>
         private void OnBlockPlaced(IServerPlayer byPlayer, int oldblockId, BlockSelection blockSel, ItemStack withItemStack)
         {
             if (blockSel?.Position == null) return;
 
             Block block = sapi.World.BlockAccessor.GetBlock(blockSel.Position);
+
+            // Check if it's a rift ward
             if (IsRiftWardBlock(block))
             {
                 // Track this rift ward position (it might not be active yet until fueled)
@@ -4943,6 +5490,54 @@ namespace SpreadingDevastation
                     });
                     sapi.Logger.Notification($"SpreadingDevastation: Rift ward placed at {blockSel.Position}");
                     RebuildProtectedChunkCache();
+                }
+            }
+
+            // Check if block was placed in a devastated chunk - if so, queue it for re-devastation
+            TryQueueBlockForRedevastation(blockSel.Position, block);
+        }
+
+        /// <summary>
+        /// Checks if a newly placed block is in a devastated chunk and queues it for re-devastation.
+        /// Blocks protected by rift wards or that cannot be devastated are skipped.
+        /// </summary>
+        private void TryQueueBlockForRedevastation(BlockPos pos, Block block)
+        {
+            if (pos == null || block == null) return;
+            if (isPaused) return;
+            if (devastatedChunks == null || devastatedChunks.Count == 0) return;
+
+            // Check if this position is in a devastated chunk
+            int chunkX = pos.X / CHUNK_SIZE;
+            int chunkZ = pos.Z / CHUNK_SIZE;
+            long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
+
+            if (!devastatedChunks.TryGetValue(chunkKey, out var chunk)) return;
+
+            // Skip if protected by rift ward
+            if (IsBlockProtectedByRiftWard(pos)) return;
+
+            // Skip if block is already devastated
+            if (IsAlreadyDevastated(block)) return;
+
+            // Check if the block can be devastated
+            if (!TryGetDevastatedForm(block, out _, out _)) return;
+
+            // Add to the chunk's frontier for processing
+            if (chunk.DevastationFrontier == null)
+            {
+                chunk.DevastationFrontier = new List<BlockPos>();
+            }
+
+            // Only add if not already in frontier
+            if (!FrontierContainsPosition(chunk.DevastationFrontier, pos.X, pos.Y, pos.Z))
+            {
+                chunk.DevastationFrontier.Add(pos.Copy());
+
+                // Un-mark as fully devastated so processing continues
+                if (chunk.IsFullyDevastated)
+                {
+                    chunk.IsFullyDevastated = false;
                 }
             }
         }
@@ -5024,6 +5619,18 @@ namespace SpreadingDevastation
 
             foreach (var ward in activeRiftWards)
             {
+                // First check if the chunk is loaded - if not, skip verification for this ward
+                // This prevents incorrectly removing wards when the player leaves the area
+                int chunkX = ward.Pos.X / CHUNK_SIZE;
+                int chunkZ = ward.Pos.Z / CHUNK_SIZE;
+                var chunk = sapi.World.BlockAccessor.GetChunk(chunkX, ward.Pos.Y / CHUNK_SIZE, chunkZ);
+                if (chunk == null)
+                {
+                    // Chunk not loaded - keep the ward in the list but skip verification
+                    // Protection still applies based on stored position
+                    continue;
+                }
+
                 Block block = sapi.World.BlockAccessor.GetBlock(ward.Pos);
 
                 // Check if block still exists
