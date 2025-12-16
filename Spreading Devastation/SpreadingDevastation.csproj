@@ -40,11 +40,6 @@
       <PackageFiles Include="modinfo.json" />
     </ItemGroup>
     <Copy SourceFiles="@(PackageFiles)" DestinationFolder="$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\mod\" />
-    <!-- Copy shader assets (preserving assets/ prefix) -->
-    <ItemGroup>
-      <ShaderFiles Include="assets\**\*.*" />
-    </ItemGroup>
-    <Copy SourceFiles="@(ShaderFiles)" DestinationFiles="@(ShaderFiles->'$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\mod\assets\%(RecursiveDir)%(Filename)%(Extension)')" />
     <ZipDirectory SourceDirectory="$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\mod\" DestinationFile="$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\SpreadingDevastation.zip" Overwrite="true" />
     <!-- Auto-deploy to Vintagestory Mods folder -->
     <Copy SourceFiles="$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\SpreadingDevastation.zip" DestinationFolder="$(APPDATA)\VintagestoryData\Mods\" />
