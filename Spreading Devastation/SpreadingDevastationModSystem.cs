@@ -296,6 +296,49 @@ namespace SpreadingDevastation
         /// These entities will never go insane (they're typically already hostile).
         /// </summary>
         public string AnimalInsanityExcludeCodes { get; set; } = "drifter,locust,bell,bowtorn,eidolon,shiver";
+
+        // === Flat Fog Effect Settings ===
+
+        /// <summary>
+        /// Whether flat fog is enabled in devastated chunks (default: true).
+        /// Flat fog creates a visible fog layer at ground level that can be seen from outside.
+        /// </summary>
+        public bool FlatFogEnabled { get; set; } = true;
+
+        /// <summary>
+        /// Y level where flat fog sits (default: 110). Use 0 for automatic surface detection.
+        /// </summary>
+        public int FlatFogYLevel { get; set; } = 110;
+
+        /// <summary>
+        /// Density of the flat fog effect (default: 0.1). Higher = thicker fog.
+        /// </summary>
+        public float FlatFogDensity { get; set; } = 0.1f;
+
+        /// <summary>
+        /// Flat fog color R component (0.0-1.0). Default rusty red: 0.6
+        /// </summary>
+        public float FlatFogColorR { get; set; } = 0.6f;
+
+        /// <summary>
+        /// Flat fog color G component (0.0-1.0). Default rusty red: 0.2
+        /// </summary>
+        public float FlatFogColorG { get; set; } = 0.2f;
+
+        /// <summary>
+        /// Flat fog color B component (0.0-1.0). Default rusty red: 0.15
+        /// </summary>
+        public float FlatFogColorB { get; set; } = 0.15f;
+
+        /// <summary>
+        /// How strongly the flat fog is applied (0.0-1.0, default: 0.8).
+        /// </summary>
+        public float FlatFogWeight { get; set; } = 0.8f;
+
+        /// <summary>
+        /// Maximum distance in chunks from flat fog chunks where effect is visible (default: 6).
+        /// </summary>
+        public int FlatFogViewDistance { get; set; } = 6;
     }
 
     public class SpreadingDevastationModSystem : ModSystem
@@ -583,6 +626,39 @@ namespace SpreadingDevastation
             public float MinWeight = 0.6f;
             [ProtoMember(10)]
             public float TransitionSpeed = 0.5f;
+
+            // Flat fog settings
+            [ProtoMember(11)]
+            public bool FlatFogEnabled = true;
+            [ProtoMember(12)]
+            public int FlatFogYLevel = 110;
+            [ProtoMember(13)]
+            public float FlatFogDensity = 0.1f;
+            [ProtoMember(14)]
+            public float FlatFogColorR = 0.6f;
+            [ProtoMember(15)]
+            public float FlatFogColorG = 0.2f;
+            [ProtoMember(16)]
+            public float FlatFogColorB = 0.15f;
+            [ProtoMember(17)]
+            public float FlatFogWeight = 0.8f;
+            [ProtoMember(18)]
+            public int FlatFogViewDistance = 6;
+        }
+
+        /// <summary>
+        /// Network packet for syncing flat fog test chunks from server to client.
+        /// These are manually-added chunks for testing flat fog before integrating with devastation.
+        /// </summary>
+        [ProtoContract]
+        public class FlatFogChunkSyncPacket
+        {
+            [ProtoMember(1)]
+            public List<int> ChunkXs = new List<int>();
+            [ProtoMember(2)]
+            public List<int> ChunkZs = new List<int>();
+            [ProtoMember(3)]
+            public List<int> YLevels = new List<int>(); // Per-chunk Y level override (0 = use global)
         }
 
         private ICoreServerAPI sapi;
@@ -620,6 +696,10 @@ namespace SpreadingDevastation
         private IServerNetworkChannel serverNetworkChannel;
         private bool fogConfigDirty = true; // Flag to track if fog config needs to be sent
 
+        // Flat fog test chunks (manually added for testing, before integrating with devastation)
+        private Dictionary<long, int> flatFogTestChunks = new Dictionary<long, int>(); // chunk key -> Y level (0 = use global)
+        private bool flatFogChunksDirty = false; // Flag to track if flat fog chunks need to be synced
+
         // Temporal stability system hook for gear visual (server and client)
         private SystemTemporalStability temporalStabilitySystemServer;
         private SystemTemporalStability temporalStabilitySystemClient;
@@ -630,6 +710,7 @@ namespace SpreadingDevastation
         private HashSet<long> clientDevastatedChunks = new HashSet<long>(); // Chunk keys received from server
         private DevastationFogRenderer fogRenderer;
         private FogConfigPacket clientFogConfig = new FogConfigPacket(); // Fog config received from server
+        private Dictionary<long, int> clientFlatFogChunks = new Dictionary<long, int>(); // Flat fog test chunks (chunk key -> Y level)
 
         // Animal insanity tracking
         private double lastInsanityCheckTime = 0; // Track last time we checked for animals to drive insane
@@ -646,7 +727,8 @@ namespace SpreadingDevastation
             api.Network
                 .RegisterChannel(NETWORK_CHANNEL_NAME)
                 .RegisterMessageType(typeof(DevastatedChunkSyncPacket))
-                .RegisterMessageType(typeof(FogConfigPacket));
+                .RegisterMessageType(typeof(FogConfigPacket))
+                .RegisterMessageType(typeof(FlatFogChunkSyncPacket));
         }
 
         public override void StartClientSide(ICoreClientAPI api)
@@ -656,7 +738,8 @@ namespace SpreadingDevastation
             // Get the network channel and set up message handlers
             clientNetworkChannel = api.Network.GetChannel(NETWORK_CHANNEL_NAME)
                 .SetMessageHandler<DevastatedChunkSyncPacket>(OnDevastatedChunkSync)
-                .SetMessageHandler<FogConfigPacket>(OnFogConfigSync);
+                .SetMessageHandler<FogConfigPacket>(OnFogConfigSync)
+                .SetMessageHandler<FlatFogChunkSyncPacket>(OnFlatFogChunkSync);
 
             // Create and register the fog renderer
             fogRenderer = new DevastationFogRenderer(api, this);
@@ -714,6 +797,41 @@ namespace SpreadingDevastation
                     clientDevastatedChunks.Add(chunkKey);
                 }
             }
+        }
+
+        /// <summary>
+        /// Called when the client receives flat fog chunk data from the server.
+        /// </summary>
+        private void OnFlatFogChunkSync(FlatFogChunkSyncPacket packet)
+        {
+            clientFlatFogChunks.Clear();
+
+            if (packet.ChunkXs != null && packet.ChunkZs != null && packet.YLevels != null)
+            {
+                int count = Math.Min(packet.ChunkXs.Count, Math.Min(packet.ChunkZs.Count, packet.YLevels.Count));
+                for (int i = 0; i < count; i++)
+                {
+                    long chunkKey = DevastatedChunk.MakeChunkKey(packet.ChunkXs[i], packet.ChunkZs[i]);
+                    clientFlatFogChunks[chunkKey] = packet.YLevels[i];
+                }
+
+                if (count > 0)
+                {
+                    capi.Logger.Debug($"SpreadingDevastation: Received {count} flat fog chunks from server");
+                }
+            }
+
+            // Update the fog renderer with the new flat fog chunks
+            fogRenderer?.UpdateFlatFogChunks(clientFlatFogChunks);
+        }
+
+        /// <summary>
+        /// Gets the flat fog chunks for the client-side renderer.
+        /// Returns dictionary of chunk key -> Y level (0 = use global config).
+        /// </summary>
+        public Dictionary<long, int> GetFlatFogChunks()
+        {
+            return clientFlatFogChunks;
         }
 
         /// <summary>
@@ -889,7 +1007,8 @@ namespace SpreadingDevastation
 
             // Early exit if nothing to sync
             bool hasChunks = devastatedChunks != null && devastatedChunks.Count > 0;
-            if (!fogConfigDirty && !hasChunks) return;
+            bool hasFlatFogChunks = flatFogTestChunks != null && flatFogTestChunks.Count > 0;
+            if (!fogConfigDirty && !flatFogChunksDirty && !hasChunks && !hasFlatFogChunks) return;
 
             var players = sapi.World.AllOnlinePlayers;
             if (players == null || players.Length == 0) return;
@@ -911,7 +1030,16 @@ namespace SpreadingDevastation
                     ColorWeight = config.FogColorWeight,
                     DensityWeight = config.FogDensityWeight,
                     MinWeight = config.FogMinWeight,
-                    TransitionSpeed = config.FogTransitionSpeed
+                    TransitionSpeed = config.FogTransitionSpeed,
+                    // Flat fog settings
+                    FlatFogEnabled = config.FlatFogEnabled,
+                    FlatFogYLevel = config.FlatFogYLevel,
+                    FlatFogDensity = config.FlatFogDensity,
+                    FlatFogColorR = config.FlatFogColorR,
+                    FlatFogColorG = config.FlatFogColorG,
+                    FlatFogColorB = config.FlatFogColorB,
+                    FlatFogWeight = config.FlatFogWeight,
+                    FlatFogViewDistance = config.FlatFogViewDistance
                 };
                 fogConfigDirty = false;
             }
@@ -927,36 +1055,70 @@ namespace SpreadingDevastation
                     serverNetworkChannel.SendPacket(fogPacket, player);
                 }
 
-                // Send chunk data if there are any devastated chunks
-                if (!hasChunks) continue;
-
                 var playerPos = player.Entity.Pos;
                 int playerChunkX = (int)playerPos.X / CHUNK_SIZE;
                 int playerChunkZ = (int)playerPos.Z / CHUNK_SIZE;
 
-                var packet = new DevastatedChunkSyncPacket();
-
-                foreach (var kvp in devastatedChunks)
+                // Send devastated chunk data
+                if (hasChunks)
                 {
-                    var chunk = kvp.Value;
-                    // Only sync chunks within range of player
-                    int dx = chunk.ChunkX - playerChunkX;
-                    int dz = chunk.ChunkZ - playerChunkZ;
+                    var packet = new DevastatedChunkSyncPacket();
 
-                    if (dx >= -SYNC_RADIUS_CHUNKS && dx <= SYNC_RADIUS_CHUNKS &&
-                        dz >= -SYNC_RADIUS_CHUNKS && dz <= SYNC_RADIUS_CHUNKS)
+                    foreach (var kvp in devastatedChunks)
                     {
-                        packet.ChunkXs.Add(chunk.ChunkX);
-                        packet.ChunkZs.Add(chunk.ChunkZ);
+                        var chunk = kvp.Value;
+                        // Only sync chunks within range of player
+                        int dx = chunk.ChunkX - playerChunkX;
+                        int dz = chunk.ChunkZ - playerChunkZ;
+
+                        if (dx >= -SYNC_RADIUS_CHUNKS && dx <= SYNC_RADIUS_CHUNKS &&
+                            dz >= -SYNC_RADIUS_CHUNKS && dz <= SYNC_RADIUS_CHUNKS)
+                        {
+                            packet.ChunkXs.Add(chunk.ChunkX);
+                            packet.ChunkZs.Add(chunk.ChunkZ);
+                        }
+                    }
+
+                    // Only send if there are nearby chunks
+                    if (packet.ChunkXs.Count > 0)
+                    {
+                        serverNetworkChannel.SendPacket(packet, player);
                     }
                 }
 
-                // Only send if there are nearby chunks
-                if (packet.ChunkXs.Count > 0)
+                // Send flat fog test chunk data (always sync, like devastated chunks)
+                if (hasFlatFogChunks || flatFogChunksDirty)
                 {
-                    serverNetworkChannel.SendPacket(packet, player);
+                    var flatFogPacket = new FlatFogChunkSyncPacket();
+
+                    if (flatFogTestChunks != null)
+                    {
+                        foreach (var kvp in flatFogTestChunks)
+                        {
+                            int chunkX = (int)(kvp.Key >> 32);
+                            int chunkZ = (int)(kvp.Key & 0xFFFFFFFF);
+                            int yLevel = kvp.Value;
+
+                            // Only sync chunks within range of player
+                            int dx = chunkX - playerChunkX;
+                            int dz = chunkZ - playerChunkZ;
+
+                            if (dx >= -SYNC_RADIUS_CHUNKS && dx <= SYNC_RADIUS_CHUNKS &&
+                                dz >= -SYNC_RADIUS_CHUNKS && dz <= SYNC_RADIUS_CHUNKS)
+                            {
+                                flatFogPacket.ChunkXs.Add(chunkX);
+                                flatFogPacket.ChunkZs.Add(chunkZ);
+                                flatFogPacket.YLevels.Add(yLevel);
+                            }
+                        }
+                    }
+
+                    // Always send to keep client in sync
+                    serverNetworkChannel.SendPacket(flatFogPacket, player);
                 }
             }
+
+            flatFogChunksDirty = false;
         }
 
         /// <summary>
@@ -1210,6 +1372,12 @@ namespace SpreadingDevastation
                     .WithArgs(api.ChatCommands.Parsers.OptionalWord("action"),
                               api.ChatCommands.Parsers.OptionalAll("value"))
                     .HandleWith(HandleInsanityCommand)
+                .EndSubCommand()
+                .BeginSubCommand("flatfog")
+                    .WithDescription("Manage flat fog test chunks (visible fog layer at ground level)")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("action"),
+                              api.ChatCommands.Parsers.OptionalAll("value"))
+                    .HandleWith(HandleFlatFogCommand)
                 .EndSubCommand();
         }
 
@@ -1358,6 +1526,199 @@ namespace SpreadingDevastation
                         "  /dv insanity exclude [codes] - Set immune animals"
                     };
                     return SendChatLines(args, lines, "Insanity info sent to chat");
+            }
+        }
+
+        private TextCommandResult HandleFlatFogCommand(TextCommandCallingArgs args)
+        {
+            var player = args.Caller.Player as IServerPlayer;
+            if (player == null) return TextCommandResult.Error("Player not found");
+
+            string action = (args.Parsers[0].GetValue() as string ?? "").ToLowerInvariant();
+            string value = args.Parsers[1].GetValue() as string ?? "";
+
+            switch (action)
+            {
+                case "":
+                case "add":
+                case "toggle":
+                    // Toggle flat fog on the chunk the player is looking at
+                    var blockSel = player.CurrentBlockSelection;
+                    if (blockSel == null) return TextCommandResult.Error("Not looking at a block. Look at a block in the chunk you want to add flat fog to.");
+
+                    int chunkX = blockSel.Position.X / CHUNK_SIZE;
+                    int chunkZ = blockSel.Position.Z / CHUNK_SIZE;
+                    long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
+
+                    if (flatFogTestChunks.ContainsKey(chunkKey))
+                    {
+                        flatFogTestChunks.Remove(chunkKey);
+                        flatFogChunksDirty = true;
+                        return TextCommandResult.Success($"Removed flat fog from chunk ({chunkX}, {chunkZ})");
+                    }
+                    else
+                    {
+                        // Use 0 to indicate "use global Y level"
+                        flatFogTestChunks[chunkKey] = 0;
+                        flatFogChunksDirty = true;
+                        return TextCommandResult.Success($"Added flat fog to chunk ({chunkX}, {chunkZ}) at Y={config.FlatFogYLevel}");
+                    }
+
+                case "y":
+                case "ylevel":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Flat fog Y level: {config.FlatFogYLevel}. Use '/dv flatfog y [level]' to set.");
+                    }
+                    if (int.TryParse(value, out int newY))
+                    {
+                        config.FlatFogYLevel = Math.Clamp(newY, 0, 400);
+                        SaveConfig();
+                        BroadcastFogConfig();
+                        return TextCommandResult.Success($"Flat fog Y level set to {config.FlatFogYLevel}");
+                    }
+                    return TextCommandResult.Error("Invalid number for Y level");
+
+                case "surface":
+                    // Set Y level to surface at player position
+                    int surfaceY = (int)player.Entity.Pos.Y;
+                    config.FlatFogYLevel = surfaceY;
+                    SaveConfig();
+                    BroadcastFogConfig();
+                    return TextCommandResult.Success($"Flat fog Y level set to surface ({surfaceY})");
+
+                case "density":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Flat fog density: {config.FlatFogDensity:F3}. Use '/dv flatfog density [value]' to set (e.g., 0.02).");
+                    }
+                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float newDensity))
+                    {
+                        config.FlatFogDensity = Math.Clamp(newDensity, 0f, 1f);
+                        SaveConfig();
+                        BroadcastFogConfig();
+                        return TextCommandResult.Success($"Flat fog density set to {config.FlatFogDensity:F3}");
+                    }
+                    return TextCommandResult.Error("Invalid number for density");
+
+                case "color":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Flat fog color: R={config.FlatFogColorR:F2} G={config.FlatFogColorG:F2} B={config.FlatFogColorB:F2}. Use '/dv flatfog color [r] [g] [b]' (0.0-1.0).");
+                    }
+                    var parts = value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length >= 3 &&
+                        float.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out float r) &&
+                        float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float g) &&
+                        float.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out float b))
+                    {
+                        config.FlatFogColorR = Math.Clamp(r, 0f, 1f);
+                        config.FlatFogColorG = Math.Clamp(g, 0f, 1f);
+                        config.FlatFogColorB = Math.Clamp(b, 0f, 1f);
+                        SaveConfig();
+                        BroadcastFogConfig();
+                        return TextCommandResult.Success($"Flat fog color set to R={config.FlatFogColorR:F2} G={config.FlatFogColorG:F2} B={config.FlatFogColorB:F2}");
+                    }
+                    return TextCommandResult.Error("Usage: /dv flatfog color [r] [g] [b] (values 0.0-1.0, e.g., '0.6 0.2 0.15')");
+
+                case "weight":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Flat fog weight: {config.FlatFogWeight:F2}. Use '/dv flatfog weight [0.0-1.0]' to set.");
+                    }
+                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float newWeight))
+                    {
+                        config.FlatFogWeight = Math.Clamp(newWeight, 0f, 1f);
+                        SaveConfig();
+                        BroadcastFogConfig();
+                        return TextCommandResult.Success($"Flat fog weight set to {config.FlatFogWeight:F2}");
+                    }
+                    return TextCommandResult.Error("Invalid number for weight");
+
+                case "distance":
+                case "viewdistance":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Flat fog view distance: {config.FlatFogViewDistance} chunks. Use '/dv flatfog distance [chunks]' to set.");
+                    }
+                    if (int.TryParse(value, out int newDist))
+                    {
+                        config.FlatFogViewDistance = Math.Clamp(newDist, 1, 16);
+                        SaveConfig();
+                        BroadcastFogConfig();
+                        return TextCommandResult.Success($"Flat fog view distance set to {config.FlatFogViewDistance} chunks");
+                    }
+                    return TextCommandResult.Error("Invalid number for view distance");
+
+                case "on":
+                case "enable":
+                    config.FlatFogEnabled = true;
+                    SaveConfig();
+                    BroadcastFogConfig();
+                    return TextCommandResult.Success("Flat fog ENABLED");
+
+                case "off":
+                case "disable":
+                    config.FlatFogEnabled = false;
+                    SaveConfig();
+                    BroadcastFogConfig();
+                    return TextCommandResult.Success("Flat fog DISABLED");
+
+                case "clear":
+                    int count = flatFogTestChunks.Count;
+                    flatFogTestChunks.Clear();
+                    flatFogChunksDirty = true;
+                    return TextCommandResult.Success($"Cleared {count} flat fog test chunks");
+
+                case "list":
+                    if (flatFogTestChunks.Count == 0)
+                    {
+                        return TextCommandResult.Success("No flat fog test chunks. Use '/dv flatfog' while looking at a block to add one.");
+                    }
+                    var listLines = new List<string> { $"=== Flat Fog Test Chunks ({flatFogTestChunks.Count}) ===" };
+                    int shown = 0;
+                    foreach (var kvp in flatFogTestChunks)
+                    {
+                        if (shown >= 20)
+                        {
+                            listLines.Add($"... and {flatFogTestChunks.Count - 20} more");
+                            break;
+                        }
+                        int cx = (int)(kvp.Key >> 32);
+                        int cz = (int)(kvp.Key & 0xFFFFFFFF);
+                        int yLvl = kvp.Value > 0 ? kvp.Value : config.FlatFogYLevel;
+                        listLines.Add($"  Chunk ({cx}, {cz}) Y={yLvl}");
+                        shown++;
+                    }
+                    return SendChatLines(args, listLines, "Flat fog list sent to chat");
+
+                case "info":
+                case "status":
+                default:
+                    var infoLines = new List<string>
+                    {
+                        "=== Flat Fog Settings ===",
+                        $"Enabled: {(config.FlatFogEnabled ? "YES" : "NO")}",
+                        $"Test chunks: {flatFogTestChunks.Count}",
+                        $"Y level: {config.FlatFogYLevel}",
+                        $"Density: {config.FlatFogDensity:F3}",
+                        $"Color (RGB): {config.FlatFogColorR:F2}, {config.FlatFogColorG:F2}, {config.FlatFogColorB:F2}",
+                        $"Weight: {config.FlatFogWeight:F2}",
+                        $"View distance: {config.FlatFogViewDistance} chunks",
+                        "",
+                        "Commands:",
+                        "  /dv flatfog - Toggle flat fog on looked-at chunk",
+                        "  /dv flatfog y [level] - Set fog Y level",
+                        "  /dv flatfog surface - Set Y to current surface",
+                        "  /dv flatfog density [value] - Set fog density",
+                        "  /dv flatfog color [r] [g] [b] - Set fog color",
+                        "  /dv flatfog weight [0-1] - Set effect weight",
+                        "  /dv flatfog distance [chunks] - Set view distance",
+                        "  /dv flatfog on/off - Enable or disable",
+                        "  /dv flatfog clear - Remove all test chunks",
+                        "  /dv flatfog list - List test chunks"
+                    };
+                    return SendChatLines(args, infoLines, "Flat fog info sent to chat");
             }
         }
 
@@ -6800,6 +7161,7 @@ namespace SpreadingDevastation
     /// <summary>
     /// Client-side renderer that applies fog and sky color effects when the player is in devastated chunks.
     /// Creates a rusty, corrupted atmosphere similar to the base game Devastation area.
+    /// Also handles flat fog effects for chunks with flat fog enabled.
     /// </summary>
     public class DevastationFogRenderer : IRenderer
     {
@@ -6807,6 +7169,8 @@ namespace SpreadingDevastation
         private SpreadingDevastationModSystem modSystem;
         private AmbientModifier devastationAmbient;
         private bool isAmbientRegistered = false;
+
+        private const int CHUNK_SIZE = 32; // VS chunk size in blocks
 
         // Config values (updated via UpdateConfig)
         private bool enabled = true;
@@ -6820,8 +7184,22 @@ namespace SpreadingDevastation
         private float fogMinWeight = 0.6f;
         private float transitionSpeed = 2.0f; // 1/0.5 seconds
 
+        // Flat fog config values
+        private bool flatFogEnabled = true;
+        private int flatFogYLevel = 110;
+        private float flatFogDensity = 0.1f;
+        private float flatFogColorR = 0.6f;
+        private float flatFogColorG = 0.2f;
+        private float flatFogColorB = 0.15f;
+        private float flatFogWeight = 0.8f;
+        private int flatFogViewDistance = 6; // In chunks
+
+        // Flat fog chunks (chunk key -> Y level override, 0 = use global)
+        private Dictionary<long, int> flatFogChunks = new Dictionary<long, int>();
+
         // Current effect weight (0 = no effect, 1 = full effect)
         private float currentWeight = 0f;
+        private float currentFlatFogWeight = 0f;
 
         public double RenderOrder => 0.0; // Render early in the pipeline
         public int RenderRange => 0; // Not used
@@ -6841,9 +7219,11 @@ namespace SpreadingDevastation
                 FogMin = new WeightedFloat(fogMin, 0),
                 AmbientColor = new WeightedFloatArray(new float[] { fogColorR + 0.15f, fogColorG + 0.25f, fogColorB + 0.25f }, 0),
 
+                // Flat fog properties
+                FlatFogDensity = new WeightedFloat(flatFogDensity, 0),
+                FlatFogYPos = new WeightedFloat(flatFogYLevel, 0),
+
                 // Other properties must be initialized with weight 0 to avoid null crashes
-                FlatFogDensity = new WeightedFloat(0, 0),
-                FlatFogYPos = new WeightedFloat(0, 0),
                 CloudBrightness = new WeightedFloat(1, 0),
                 CloudDensity = new WeightedFloat(0, 0),
                 SceneBrightness = new WeightedFloat(1, 0),
@@ -6870,6 +7250,16 @@ namespace SpreadingDevastation
             fogMinWeight = config.MinWeight;
             transitionSpeed = config.TransitionSpeed > 0 ? 1f / config.TransitionSpeed : 2f;
 
+            // Flat fog settings
+            flatFogEnabled = config.FlatFogEnabled;
+            flatFogYLevel = config.FlatFogYLevel;
+            flatFogDensity = config.FlatFogDensity;
+            flatFogColorR = config.FlatFogColorR;
+            flatFogColorG = config.FlatFogColorG;
+            flatFogColorB = config.FlatFogColorB;
+            flatFogWeight = config.FlatFogWeight;
+            flatFogViewDistance = config.FlatFogViewDistance;
+
             // Update the ambient modifier values
             devastationAmbient.FogColor.Value = new float[] { fogColorR, fogColorG, fogColorB, 1.0f };
             devastationAmbient.FogDensity.Value = fogDensity;
@@ -6879,6 +7269,65 @@ namespace SpreadingDevastation
                 Math.Min(1f, fogColorG + 0.25f),
                 Math.Min(1f, fogColorB + 0.25f)
             };
+
+            // Update flat fog ambient values
+            devastationAmbient.FlatFogDensity.Value = flatFogDensity;
+            devastationAmbient.FlatFogYPos.Value = flatFogYLevel;
+        }
+
+        /// <summary>
+        /// Updates the flat fog chunks from server sync.
+        /// </summary>
+        public void UpdateFlatFogChunks(Dictionary<long, int> chunks)
+        {
+            flatFogChunks = chunks ?? new Dictionary<long, int>();
+            if (flatFogChunks.Count > 0)
+            {
+                capi.Logger.Notification($"SpreadingDevastation: Renderer updated with {flatFogChunks.Count} flat fog chunks");
+            }
+        }
+
+        // Debug: track last log time to avoid spam
+        private double lastDebugLogTime = 0;
+
+        /// <summary>
+        /// Calculates the distance to the nearest flat fog chunk and returns the Y level to use.
+        /// Returns (distance in blocks, Y level) or (float.MaxValue, 0) if no chunks.
+        /// </summary>
+        private (float distance, int yLevel) GetNearestFlatFogChunkInfo()
+        {
+            if (flatFogChunks == null || flatFogChunks.Count == 0)
+                return (float.MaxValue, 0);
+
+            var playerPos = capi.World.Player.Entity.Pos;
+            int playerChunkX = (int)playerPos.X / CHUNK_SIZE;
+            int playerChunkZ = (int)playerPos.Z / CHUNK_SIZE;
+
+            float nearestDistSq = float.MaxValue;
+            int nearestYLevel = flatFogYLevel;
+
+            foreach (var kvp in flatFogChunks)
+            {
+                int chunkX = (int)(kvp.Key >> 32);
+                int chunkZ = (int)(kvp.Key & 0xFFFFFFFF);
+                int yLevel = kvp.Value > 0 ? kvp.Value : flatFogYLevel;
+
+                // Calculate distance to chunk center
+                float chunkCenterX = chunkX * CHUNK_SIZE + CHUNK_SIZE / 2f;
+                float chunkCenterZ = chunkZ * CHUNK_SIZE + CHUNK_SIZE / 2f;
+
+                float dx = (float)playerPos.X - chunkCenterX;
+                float dz = (float)playerPos.Z - chunkCenterZ;
+                float distSq = dx * dx + dz * dz;
+
+                if (distSq < nearestDistSq)
+                {
+                    nearestDistSq = distSq;
+                    nearestYLevel = yLevel;
+                }
+            }
+
+            return ((float)Math.Sqrt(nearestDistSq), nearestYLevel);
         }
 
         public void OnRenderFrame(float deltaTime, EnumRenderStage stage)
@@ -6888,7 +7337,7 @@ namespace SpreadingDevastation
             // Check if effect is enabled and player is in a devastated chunk
             bool inDevastatedChunk = enabled && modSystem.IsPlayerInDevastatedChunk();
 
-            // Calculate target weight
+            // Calculate target weight for regular fog (when in devastated chunk)
             float targetWeight = inDevastatedChunk ? 1.0f : 0.0f;
 
             // Smoothly transition towards target weight
@@ -6901,14 +7350,75 @@ namespace SpreadingDevastation
                 currentWeight = Math.Max(currentWeight - deltaTime * transitionSpeed, targetWeight);
             }
 
-            // Update ambient modifier weights based on config
-            devastationAmbient.FogColor.Weight = currentWeight * fogColorWeight;
-            devastationAmbient.FogDensity.Weight = currentWeight * fogDensityWeight;
-            devastationAmbient.FogMin.Weight = currentWeight * fogMinWeight;
-            devastationAmbient.AmbientColor.Weight = currentWeight * fogColorWeight * 0.5f; // Ambient is more subtle
+            // Calculate flat fog effect based on distance to flat fog chunks
+            float targetFlatFogWeight = 0f;
+            if (flatFogEnabled && flatFogChunks.Count > 0)
+            {
+                var (distance, yLevel) = GetNearestFlatFogChunkInfo();
+                float maxDistance = flatFogViewDistance * CHUNK_SIZE;
+
+                if (distance <= maxDistance)
+                {
+                    // Full effect when inside or very close, fade out with distance
+                    float distanceFactor = 1f - (distance / maxDistance);
+                    targetFlatFogWeight = distanceFactor * distanceFactor; // Quadratic falloff
+
+                    // Update Y level based on nearest chunk
+                    devastationAmbient.FlatFogYPos.Value = yLevel;
+                }
+
+                // Debug logging (every 5 seconds to avoid spam)
+                double currentTime = capi.World.Calendar.TotalHours;
+                if (currentTime - lastDebugLogTime > 0.001) // ~5 seconds in game time
+                {
+                    lastDebugLogTime = currentTime;
+                    capi.Logger.Notification($"SpreadingDevastation FlatFog: chunks={flatFogChunks.Count}, dist={distance:F1}, maxDist={maxDistance:F1}, targetWeight={targetFlatFogWeight:F3}, yLevel={yLevel}, density={flatFogDensity:F3}");
+                }
+            }
+
+            // Smoothly transition flat fog weight
+            if (currentFlatFogWeight < targetFlatFogWeight)
+            {
+                currentFlatFogWeight = Math.Min(currentFlatFogWeight + deltaTime * transitionSpeed, targetFlatFogWeight);
+            }
+            else if (currentFlatFogWeight > targetFlatFogWeight)
+            {
+                currentFlatFogWeight = Math.Max(currentFlatFogWeight - deltaTime * transitionSpeed, targetFlatFogWeight);
+            }
+
+            // Combine regular devastation weight with flat fog weight for overall fog effect
+            // This makes flat fog chunks visible from outside by applying regular fog based on proximity
+            float combinedWeight = Math.Max(currentWeight, currentFlatFogWeight);
+
+            // Update ambient modifier weights based on combined weight
+            // When near flat fog chunks, use flat fog color; when in devastated chunk, use devastation color
+            if (currentFlatFogWeight > currentWeight)
+            {
+                // Near flat fog chunks - use flat fog color and higher density
+                devastationAmbient.FogColor.Value = new float[] { flatFogColorR, flatFogColorG, flatFogColorB, 1.0f };
+                devastationAmbient.FogDensity.Value = flatFogDensity;
+                devastationAmbient.FogMin.Value = Math.Max(fogMin, 0.3f); // Higher minimum for visibility
+            }
+            else if (currentWeight > 0.001f)
+            {
+                // In devastated chunk - use normal devastation fog
+                devastationAmbient.FogColor.Value = new float[] { fogColorR, fogColorG, fogColorB, 1.0f };
+                devastationAmbient.FogDensity.Value = fogDensity;
+                devastationAmbient.FogMin.Value = fogMin;
+            }
+
+            devastationAmbient.FogColor.Weight = combinedWeight * fogColorWeight;
+            devastationAmbient.FogDensity.Weight = combinedWeight * fogDensityWeight;
+            devastationAmbient.FogMin.Weight = combinedWeight * fogMinWeight;
+            devastationAmbient.AmbientColor.Weight = combinedWeight * fogColorWeight * 0.5f; // Ambient is more subtle
+
+            // Also try flat fog (may or may not have visible effect depending on VS version)
+            devastationAmbient.FlatFogDensity.Weight = currentFlatFogWeight * flatFogWeight;
+            devastationAmbient.FlatFogYPos.Weight = currentFlatFogWeight * flatFogWeight;
 
             // Register or update the ambient modifier
-            if (currentWeight > 0.001f)
+            bool hasAnyEffect = currentWeight > 0.001f || currentFlatFogWeight > 0.001f;
+            if (hasAnyEffect)
             {
                 if (!isAmbientRegistered)
                 {
