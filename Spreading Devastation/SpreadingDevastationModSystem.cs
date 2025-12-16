@@ -215,19 +215,19 @@ namespace SpreadingDevastation
         public bool FogEffectEnabled { get; set; } = true;
 
         /// <summary>
-        /// Fog color R component (0.0-1.0). Default earthy brown: 0.35
+        /// Fog color R component (0.0-1.0). Default rusty orange: 0.55
         /// </summary>
-        public float FogColorR { get; set; } = 0.35f;
+        public float FogColorR { get; set; } = 0.55f;
 
         /// <summary>
-        /// Fog color G component (0.0-1.0). Default earthy brown: 0.28
+        /// Fog color G component (0.0-1.0). Default rusty orange: 0.25
         /// </summary>
-        public float FogColorG { get; set; } = 0.28f;
+        public float FogColorG { get; set; } = 0.25f;
 
         /// <summary>
-        /// Fog color B component (0.0-1.0). Default earthy brown: 0.18
+        /// Fog color B component (0.0-1.0). Default rusty orange: 0.15
         /// </summary>
-        public float FogColorB { get; set; } = 0.18f;
+        public float FogColorB { get; set; } = 0.15f;
 
         /// <summary>
         /// Fog density in devastated areas (default: 0.004). Higher = thicker fog.
@@ -258,61 +258,6 @@ namespace SpreadingDevastation
         /// How fast the fog effect transitions in/out in seconds (default: 0.5).
         /// </summary>
         public float FogTransitionSpeed { get; set; } = 0.5f;
-
-        /// <summary>
-        /// Width of the fog transition zone in blocks (default: 24).
-        /// Fog will smoothly fade over this distance at devastation boundaries.
-        /// </summary>
-        public float FogTransitionZoneBlocks { get; set; } = 24f;
-
-        /// <summary>
-        /// Minimum fog intensity when inside devastation near a clean border (0.0-1.0, default: 0.4).
-        /// Prevents fog from completely disappearing at the very edge of devastation.
-        /// </summary>
-        public float FogMinIntensityInside { get; set; } = 0.4f;
-
-        /// <summary>
-        /// Maximum fog intensity when outside devastation near a border (0.0-1.0, default: 0.6).
-        /// Controls how much fog bleeds into clean areas at boundaries.
-        /// </summary>
-        public float FogMaxIntensityOutside { get; set; } = 0.6f;
-
-        // === Fog Sphere Settings (Visible Fog Dome) ===
-
-        /// <summary>
-        /// Whether to render a visible fog sphere/dome over devastated areas (default: true).
-        /// This creates a brown haze visible from outside, similar to The Devastation.
-        /// </summary>
-        public bool FogSphereEnabled { get; set; } = true;
-
-        /// <summary>
-        /// Density of the fog sphere (default: 0.003). Higher values make the fog more opaque.
-        /// </summary>
-        public float FogSphereDensity { get; set; } = 0.003f;
-
-        /// <summary>
-        /// Extra radius added to the calculated sphere (default: 32 blocks).
-        /// Adds padding around the devastation boundary.
-        /// </summary>
-        public float FogSphereRadiusPadding { get; set; } = 32f;
-
-        /// <summary>
-        /// Minimum radius for the fog sphere (default: 48 blocks).
-        /// Ensures small devastation areas still have a visible dome.
-        /// </summary>
-        public float FogSphereMinRadius { get; set; } = 48f;
-
-        /// <summary>
-        /// Y offset for the fog sphere center relative to sea level (default: 20).
-        /// Positive values raise the sphere center.
-        /// </summary>
-        public float FogSphereCenterYOffset { get; set; } = 20f;
-
-        /// <summary>
-        /// Time in seconds for the fog sphere to fade in from 0 to full density (default: 30).
-        /// Set to 0 for instant fog appearance.
-        /// </summary>
-        public float FogSphereFadeInSeconds { get; set; } = 30f;
 
         // === Animal Insanity Settings ===
 
@@ -638,36 +583,6 @@ namespace SpreadingDevastation
             public float MinWeight = 0.6f;
             [ProtoMember(10)]
             public float TransitionSpeed = 0.5f;
-            [ProtoMember(11)]
-            public float TransitionZoneBlocks = 24f;
-            [ProtoMember(12)]
-            public float MinIntensityInside = 0.4f;
-            [ProtoMember(13)]
-            public float MaxIntensityOutside = 0.6f;
-            // Fog sphere settings
-            [ProtoMember(14)]
-            public bool SphereEnabled = true;
-            [ProtoMember(15)]
-            public float SphereDensity = 0.003f;
-            [ProtoMember(16)]
-            public float SphereRadiusPadding = 32f;
-            [ProtoMember(17)]
-            public float SphereMinRadius = 48f;
-            [ProtoMember(18)]
-            public float SphereCenterYOffset = 20f;
-            [ProtoMember(24)]
-            public float SphereFadeInSeconds = 30f;
-            // Test sphere (for debugging)
-            [ProtoMember(19)]
-            public bool TestSphereActive = false;
-            [ProtoMember(20)]
-            public float TestSphereX = 0f;
-            [ProtoMember(21)]
-            public float TestSphereY = 0f;
-            [ProtoMember(22)]
-            public float TestSphereZ = 0f;
-            [ProtoMember(23)]
-            public float TestSphereRadius = 100f;
         }
 
         private ICoreServerAPI sapi;
@@ -744,10 +659,8 @@ namespace SpreadingDevastation
                 .SetMessageHandler<FogConfigPacket>(OnFogConfigSync);
 
             // Create and register the fog renderer
-            // Register for multiple stages to ensure uniforms are set at the right time
             fogRenderer = new DevastationFogRenderer(api, this);
-            api.Event.RegisterRenderer(fogRenderer, EnumRenderStage.Before, "devastationfog-before");
-            api.Event.RegisterRenderer(fogRenderer, EnumRenderStage.Opaque, "devastationfog-opaque");
+            api.Event.RegisterRenderer(fogRenderer, EnumRenderStage.Before, "devastationfog");
 
             // Hook into the client-side temporal stability system after player enters world
             // This makes the gear spin counter-clockwise in devastated chunks
@@ -783,14 +696,6 @@ namespace SpreadingDevastation
         public FogConfigPacket GetFogConfig()
         {
             return clientFogConfig;
-        }
-
-        /// <summary>
-        /// Gets the set of devastated chunk keys for the client (for fog sphere rendering).
-        /// </summary>
-        public HashSet<long> GetClientDevastatedChunks()
-        {
-            return clientDevastatedChunks;
         }
 
         /// <summary>
@@ -864,94 +769,6 @@ namespace SpreadingDevastation
             }
 
             return (float)Math.Sqrt(nearestDistSq);
-        }
-
-        /// <summary>
-        /// Gets fog intensity (0.0-1.0) based on player distance to devastation boundaries.
-        /// Returns 1.0 deep inside devastation, 0.0 far from any devastation,
-        /// and intermediate values in transition zones near chunk boundaries.
-        /// </summary>
-        public float GetDevastationIntensity()
-        {
-            if (capi?.World?.Player?.Entity == null) return 0f;
-            if (clientDevastatedChunks == null || clientDevastatedChunks.Count == 0) return 0f;
-
-            var playerPos = capi.World.Player.Entity.Pos;
-            float playerX = (float)playerPos.X;
-            float playerZ = (float)playerPos.Z;
-            int playerChunkX = (int)playerX / CHUNK_SIZE;
-            int playerChunkZ = (int)playerZ / CHUNK_SIZE;
-
-            // Get config values
-            float transitionZone = clientFogConfig?.TransitionZoneBlocks ?? 24f;
-            float minIntensityInside = clientFogConfig?.MinIntensityInside ?? 0.4f;
-            float maxIntensityOutside = clientFogConfig?.MaxIntensityOutside ?? 0.6f;
-
-            // Check player's own chunk first
-            long playerChunkKey = DevastatedChunk.MakeChunkKey(playerChunkX, playerChunkZ);
-            bool playerInDevastated = clientDevastatedChunks.Contains(playerChunkKey);
-
-            // Scan nearby chunks to find nearest devastated and clean chunk edges
-            float nearestDevastatedEdgeDist = float.MaxValue;
-            float nearestCleanEdgeDist = float.MaxValue;
-
-            int scanRadius = 3; // chunks (~96 blocks)
-            for (int dx = -scanRadius; dx <= scanRadius; dx++)
-            {
-                for (int dz = -scanRadius; dz <= scanRadius; dz++)
-                {
-                    int checkChunkX = playerChunkX + dx;
-                    int checkChunkZ = playerChunkZ + dz;
-                    long chunkKey = DevastatedChunk.MakeChunkKey(checkChunkX, checkChunkZ);
-                    bool isDevastated = clientDevastatedChunks.Contains(chunkKey);
-
-                    // Calculate distance to chunk EDGE (not center)
-                    float chunkMinX = checkChunkX * CHUNK_SIZE;
-                    float chunkMaxX = chunkMinX + CHUNK_SIZE;
-                    float chunkMinZ = checkChunkZ * CHUNK_SIZE;
-                    float chunkMaxZ = chunkMinZ + CHUNK_SIZE;
-
-                    // Closest point on chunk boundary to player (clamped)
-                    float closestX = Math.Clamp(playerX, chunkMinX, chunkMaxX);
-                    float closestZ = Math.Clamp(playerZ, chunkMinZ, chunkMaxZ);
-
-                    float distX = playerX - closestX;
-                    float distZ = playerZ - closestZ;
-                    float dist = (float)Math.Sqrt(distX * distX + distZ * distZ);
-
-                    if (isDevastated)
-                    {
-                        nearestDevastatedEdgeDist = Math.Min(nearestDevastatedEdgeDist, dist);
-                    }
-                    else
-                    {
-                        nearestCleanEdgeDist = Math.Min(nearestCleanEdgeDist, dist);
-                    }
-                }
-            }
-
-            if (playerInDevastated)
-            {
-                // Inside devastated chunk: full intensity, but fade near clean chunk edges
-                if (nearestCleanEdgeDist < transitionZone)
-                {
-                    // Linear fade: 1.0 at distance=0 from clean edge, down toward minIntensityInside at transitionZone
-                    float t = nearestCleanEdgeDist / transitionZone;
-                    return minIntensityInside + (1.0f - minIntensityInside) * t;
-                }
-                return 1.0f;
-            }
-            else
-            {
-                // Outside devastated chunk: fade in as approaching devastation
-                if (nearestDevastatedEdgeDist < transitionZone)
-                {
-                    // Linear fade from 0 (at transition zone edge) to maxIntensityOutside (at devastation edge)
-                    float t = 1.0f - (nearestDevastatedEdgeDist / transitionZone);
-                    return t * maxIntensityOutside;
-                }
-                return 0f;
-            }
         }
 
         public override void StartServerSide(ICoreServerAPI api)
@@ -1094,23 +911,7 @@ namespace SpreadingDevastation
                     ColorWeight = config.FogColorWeight,
                     DensityWeight = config.FogDensityWeight,
                     MinWeight = config.FogMinWeight,
-                    TransitionSpeed = config.FogTransitionSpeed,
-                    TransitionZoneBlocks = config.FogTransitionZoneBlocks,
-                    MinIntensityInside = config.FogMinIntensityInside,
-                    MaxIntensityOutside = config.FogMaxIntensityOutside,
-                    // Fog sphere settings
-                    SphereEnabled = config.FogSphereEnabled,
-                    SphereDensity = config.FogSphereDensity,
-                    SphereRadiusPadding = config.FogSphereRadiusPadding,
-                    SphereMinRadius = config.FogSphereMinRadius,
-                    SphereCenterYOffset = config.FogSphereCenterYOffset,
-                    SphereFadeInSeconds = config.FogSphereFadeInSeconds,
-                    // Test sphere (for debugging)
-                    TestSphereActive = testSphereActive,
-                    TestSphereX = testSphereX,
-                    TestSphereY = testSphereY,
-                    TestSphereZ = testSphereZ,
-                    TestSphereRadius = testSphereRadius
+                    TransitionSpeed = config.FogTransitionSpeed
                 };
                 fogConfigDirty = false;
             }
@@ -1409,12 +1210,6 @@ namespace SpreadingDevastation
                     .WithArgs(api.ChatCommands.Parsers.OptionalWord("action"),
                               api.ChatCommands.Parsers.OptionalAll("value"))
                     .HandleWith(HandleInsanityCommand)
-                .EndSubCommand()
-                .BeginSubCommand("testsphere")
-                    .WithDescription("Create a test fog sphere at looked-at block (for debugging)")
-                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("action"),
-                              api.ChatCommands.Parsers.OptionalAll("value"))
-                    .HandleWith(HandleTestSphereCommand)
                 .EndSubCommand();
         }
 
@@ -1563,156 +1358,6 @@ namespace SpreadingDevastation
                         "  /dv insanity exclude [codes] - Set immune animals"
                     };
                     return SendChatLines(args, lines, "Insanity info sent to chat");
-            }
-        }
-
-        // Test sphere state (server-side)
-        private bool testSphereActive = false;
-        private float testSphereX = 0f;
-        private float testSphereY = 0f;
-        private float testSphereZ = 0f;
-        private float testSphereRadius = 100f;
-
-        private TextCommandResult HandleTestSphereCommand(TextCommandCallingArgs args)
-        {
-            string action = args.Parsers[0].GetValue() as string ?? "";
-            string value = args.Parsers[1].GetValue() as string ?? "";
-
-            switch (action.ToLowerInvariant())
-            {
-                case "":
-                case "create":
-                case "add":
-                    // Create a test sphere at the looked-at block
-                    var player = args.Caller.Player as IServerPlayer;
-                    if (player == null) return TextCommandResult.Error("Player not found");
-
-                    var blockSel = player.CurrentBlockSelection;
-                    if (blockSel == null) return TextCommandResult.Error("Not looking at a block. Look at a block to place the test sphere there.");
-
-                    testSphereActive = true;
-                    testSphereX = blockSel.Position.X + 0.5f;
-                    testSphereY = blockSel.Position.Y + 0.5f;
-                    testSphereZ = blockSel.Position.Z + 0.5f;
-
-                    // Default radius or use provided value
-                    if (!string.IsNullOrWhiteSpace(value) && float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float rad))
-                    {
-                        testSphereRadius = Math.Clamp(rad, 10f, 1000f);
-                    }
-
-                    fogConfigDirty = true;
-                    return TextCommandResult.Success($"Test fog sphere created at ({testSphereX:F0}, {testSphereY:F0}, {testSphereZ:F0}) with radius {testSphereRadius:F0}");
-
-                case "remove":
-                case "clear":
-                case "off":
-                    testSphereActive = false;
-                    fogConfigDirty = true;
-                    return TextCommandResult.Success("Test fog sphere removed");
-
-                case "radius":
-                    if (string.IsNullOrWhiteSpace(value))
-                    {
-                        return TextCommandResult.Success($"Current test sphere radius: {testSphereRadius:F0}. Use '/dv testsphere radius [blocks]' to set.");
-                    }
-                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float newRadius))
-                    {
-                        testSphereRadius = Math.Clamp(newRadius, 10f, 1000f);
-                        fogConfigDirty = true;
-                        return TextCommandResult.Success($"Test sphere radius set to {testSphereRadius:F0}");
-                    }
-                    return TextCommandResult.Error("Invalid number for radius");
-
-                case "move":
-                    // Move test sphere to current look position
-                    var movePlayer = args.Caller.Player as IServerPlayer;
-                    if (movePlayer == null) return TextCommandResult.Error("Player not found");
-
-                    var moveSel = movePlayer.CurrentBlockSelection;
-                    if (moveSel == null) return TextCommandResult.Error("Not looking at a block");
-
-                    if (!testSphereActive)
-                    {
-                        return TextCommandResult.Error("No test sphere active. Use '/dv testsphere' to create one first.");
-                    }
-
-                    testSphereX = moveSel.Position.X + 0.5f;
-                    testSphereY = moveSel.Position.Y + 0.5f;
-                    testSphereZ = moveSel.Position.Z + 0.5f;
-                    fogConfigDirty = true;
-                    return TextCommandResult.Success($"Test sphere moved to ({testSphereX:F0}, {testSphereY:F0}, {testSphereZ:F0})");
-
-                case "density":
-                    if (string.IsNullOrWhiteSpace(value))
-                    {
-                        return TextCommandResult.Success($"Current test sphere density (from fog config): {config.FogSphereDensity:F4}. Use '/dv testsphere density [value]' to set.");
-                    }
-                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float newDensity))
-                    {
-                        config.FogSphereDensity = Math.Clamp(newDensity, 0.0001f, 10f);
-                        SaveConfig();
-                        fogConfigDirty = true;
-                        return TextCommandResult.Success($"Sphere density set to {config.FogSphereDensity:F4}. Use high values (0.1-1.0) for visible fog.");
-                    }
-                    return TextCommandResult.Error("Invalid number for density");
-
-                case "fadein":
-                case "fade":
-                    if (string.IsNullOrWhiteSpace(value))
-                    {
-                        return TextCommandResult.Success($"Current fade-in time: {config.FogSphereFadeInSeconds:F1} seconds. Use '/dv testsphere fadein [seconds]' to set. Use 0 for instant.");
-                    }
-                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float newFadeTime))
-                    {
-                        config.FogSphereFadeInSeconds = Math.Clamp(newFadeTime, 0f, 300f);
-                        SaveConfig();
-                        fogConfigDirty = true;
-                        return TextCommandResult.Success($"Fog sphere fade-in time set to {config.FogSphereFadeInSeconds:F1} seconds");
-                    }
-                    return TextCommandResult.Error("Invalid number for fade-in time");
-
-                case "info":
-                case "status":
-                    var lines = new List<string>
-                    {
-                        "=== Test Fog Sphere ===",
-                        $"Active: {(testSphereActive ? "YES" : "NO")}",
-                        $"Position: ({testSphereX:F0}, {testSphereY:F0}, {testSphereZ:F0})",
-                        $"Radius: {testSphereRadius:F0}",
-                        $"Density: {config.FogSphereDensity:F4}",
-                        $"Fade-in time: {config.FogSphereFadeInSeconds:F1}s",
-                        "",
-                        "Commands:",
-                        "  /dv testsphere - Create at looked-at block",
-                        "  /dv testsphere [radius] - Create with specific radius",
-                        "  /dv testsphere move - Move to looked-at block",
-                        "  /dv testsphere radius [n] - Set radius",
-                        "  /dv testsphere density [n] - Set density (try 0.5-1.0)",
-                        "  /dv testsphere fadein [sec] - Set fade-in time (0=instant)",
-                        "  /dv testsphere off - Remove test sphere"
-                    };
-                    return SendChatLines(args, lines, "Test sphere info");
-
-                default:
-                    // Try to parse as radius
-                    if (float.TryParse(action, NumberStyles.Float, CultureInfo.InvariantCulture, out float directRadius))
-                    {
-                        var directPlayer = args.Caller.Player as IServerPlayer;
-                        if (directPlayer == null) return TextCommandResult.Error("Player not found");
-
-                        var directSel = directPlayer.CurrentBlockSelection;
-                        if (directSel == null) return TextCommandResult.Error("Not looking at a block");
-
-                        testSphereActive = true;
-                        testSphereX = directSel.Position.X + 0.5f;
-                        testSphereY = directSel.Position.Y + 0.5f;
-                        testSphereZ = directSel.Position.Z + 0.5f;
-                        testSphereRadius = Math.Clamp(directRadius, 10f, 1000f);
-                        fogConfigDirty = true;
-                        return TextCommandResult.Success($"Test fog sphere created at ({testSphereX:F0}, {testSphereY:F0}, {testSphereZ:F0}) with radius {testSphereRadius:F0}");
-                    }
-                    return TextCommandResult.Error("Unknown action. Use '/dv testsphere info' for help.");
             }
         }
 
@@ -2049,170 +1694,22 @@ namespace SpreadingDevastation
                     }
                     return TextCommandResult.Error("Invalid number for transition speed");
 
-                case "zone":
-                    if (string.IsNullOrWhiteSpace(value))
-                    {
-                        return TextCommandResult.Success($"Fog transition zone: {config.FogTransitionZoneBlocks:F0} blocks. Use '/dv fog zone [blocks]' (4-128)");
-                    }
-                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float zoneBlocks))
-                    {
-                        config.FogTransitionZoneBlocks = Math.Clamp(zoneBlocks, 4f, 128f);
-                        SaveConfig();
-                        BroadcastFogConfig();
-                        return TextCommandResult.Success($"Fog transition zone set to {config.FogTransitionZoneBlocks:F0} blocks");
-                    }
-                    return TextCommandResult.Error("Invalid number for transition zone");
-
-                case "minintensity":
-                case "minin":
-                    if (string.IsNullOrWhiteSpace(value))
-                    {
-                        return TextCommandResult.Success($"Min fog intensity inside: {config.FogMinIntensityInside:F2}. Use '/dv fog minintensity [value]' (0.0-1.0)");
-                    }
-                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float minIn))
-                    {
-                        config.FogMinIntensityInside = Math.Clamp(minIn, 0f, 1f);
-                        SaveConfig();
-                        BroadcastFogConfig();
-                        return TextCommandResult.Success($"Min fog intensity inside set to {config.FogMinIntensityInside:F2}");
-                    }
-                    return TextCommandResult.Error("Invalid number for min intensity inside");
-
-                case "maxintensity":
-                case "maxout":
-                    if (string.IsNullOrWhiteSpace(value))
-                    {
-                        return TextCommandResult.Success($"Max fog intensity outside: {config.FogMaxIntensityOutside:F2}. Use '/dv fog maxintensity [value]' (0.0-1.0)");
-                    }
-                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float maxOut))
-                    {
-                        config.FogMaxIntensityOutside = Math.Clamp(maxOut, 0f, 1f);
-                        SaveConfig();
-                        BroadcastFogConfig();
-                        return TextCommandResult.Success($"Max fog intensity outside set to {config.FogMaxIntensityOutside:F2}");
-                    }
-                    return TextCommandResult.Error("Invalid number for max intensity outside");
-
-                // Fog sphere (visible dome) commands
-                case "sphere":
-                    if (string.IsNullOrWhiteSpace(value))
-                    {
-                        return TextCommandResult.Success($"Fog sphere: {(config.FogSphereEnabled ? "ON" : "OFF")}, density={config.FogSphereDensity:F4}, padding={config.FogSphereRadiusPadding:F0}, minRadius={config.FogSphereMinRadius:F0}");
-                    }
-                    switch (value.ToLowerInvariant())
-                    {
-                        case "on":
-                        case "true":
-                        case "1":
-                            config.FogSphereEnabled = true;
-                            SaveConfig();
-                            BroadcastFogConfig();
-                            return TextCommandResult.Success("Fog sphere (visible dome) enabled");
-                        case "off":
-                        case "false":
-                        case "0":
-                            config.FogSphereEnabled = false;
-                            SaveConfig();
-                            BroadcastFogConfig();
-                            return TextCommandResult.Success("Fog sphere (visible dome) disabled");
-                    }
-                    return TextCommandResult.Error("Use '/dv fog sphere on' or '/dv fog sphere off'");
-
-                case "spheredensity":
-                case "sdensity":
-                    if (string.IsNullOrWhiteSpace(value))
-                    {
-                        return TextCommandResult.Success($"Fog sphere density: {config.FogSphereDensity:F4}. Use '/dv fog spheredensity [value]' (0.0001-0.1)");
-                    }
-                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float sDensity))
-                    {
-                        config.FogSphereDensity = Math.Clamp(sDensity, 0.0001f, 0.1f);
-                        SaveConfig();
-                        BroadcastFogConfig();
-                        return TextCommandResult.Success($"Fog sphere density set to {config.FogSphereDensity:F4}");
-                    }
-                    return TextCommandResult.Error("Invalid number for sphere density");
-
-                case "spherepadding":
-                case "spadding":
-                    if (string.IsNullOrWhiteSpace(value))
-                    {
-                        return TextCommandResult.Success($"Fog sphere radius padding: {config.FogSphereRadiusPadding:F0} blocks. Use '/dv fog spherepadding [blocks]'");
-                    }
-                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float sPadding))
-                    {
-                        config.FogSphereRadiusPadding = Math.Clamp(sPadding, 0f, 200f);
-                        SaveConfig();
-                        BroadcastFogConfig();
-                        return TextCommandResult.Success($"Fog sphere radius padding set to {config.FogSphereRadiusPadding:F0} blocks");
-                    }
-                    return TextCommandResult.Error("Invalid number for sphere padding");
-
-                case "sphereminradius":
-                case "sminradius":
-                    if (string.IsNullOrWhiteSpace(value))
-                    {
-                        return TextCommandResult.Success($"Fog sphere min radius: {config.FogSphereMinRadius:F0} blocks. Use '/dv fog sphereminradius [blocks]'");
-                    }
-                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float sMinRad))
-                    {
-                        config.FogSphereMinRadius = Math.Clamp(sMinRad, 16f, 500f);
-                        SaveConfig();
-                        BroadcastFogConfig();
-                        return TextCommandResult.Success($"Fog sphere min radius set to {config.FogSphereMinRadius:F0} blocks");
-                    }
-                    return TextCommandResult.Error("Invalid number for sphere min radius");
-
-                case "sphereyoffset":
-                case "syoffset":
-                    if (string.IsNullOrWhiteSpace(value))
-                    {
-                        return TextCommandResult.Success($"Fog sphere Y offset: {config.FogSphereCenterYOffset:F0} blocks. Use '/dv fog sphereyoffset [blocks]'");
-                    }
-                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float sYOff))
-                    {
-                        config.FogSphereCenterYOffset = Math.Clamp(sYOff, -100f, 200f);
-                        SaveConfig();
-                        BroadcastFogConfig();
-                        return TextCommandResult.Success($"Fog sphere Y offset set to {config.FogSphereCenterYOffset:F0} blocks");
-                    }
-                    return TextCommandResult.Error("Invalid number for sphere Y offset");
-
-                case "spheredebug":
-                case "sdebug":
-                case "debug":
-                    // This only works on the client that calls it
-                    if (fogRenderer != null)
-                    {
-                        string debugInfo = fogRenderer.GetSphereDebugInfo();
-                        return TextCommandResult.Success($"Fog Sphere Debug:\n{debugInfo}");
-                    }
-                    return TextCommandResult.Error("Fog renderer not available (client-side only)");
-
                 case "reset":
                 case "defaults":
                     // Reset all fog values to defaults
                     config.FogEffectEnabled = true;
-                    config.FogColorR = 0.35f;
-                    config.FogColorG = 0.28f;
-                    config.FogColorB = 0.18f;
+                    config.FogColorR = 0.55f;
+                    config.FogColorG = 0.25f;
+                    config.FogColorB = 0.15f;
                     config.FogDensity = 0.004f;
                     config.FogMin = 0.15f;
                     config.FogColorWeight = 0.7f;
                     config.FogDensityWeight = 0.5f;
                     config.FogMinWeight = 0.6f;
                     config.FogTransitionSpeed = 0.5f;
-                    config.FogTransitionZoneBlocks = 24f;
-                    config.FogMinIntensityInside = 0.4f;
-                    config.FogMaxIntensityOutside = 0.6f;
-                    config.FogSphereEnabled = true;
-                    config.FogSphereDensity = 0.003f;
-                    config.FogSphereRadiusPadding = 32f;
-                    config.FogSphereMinRadius = 48f;
-                    config.FogSphereCenterYOffset = 20f;
                     SaveConfig();
                     BroadcastFogConfig();
-                    return TextCommandResult.Success("Fog settings reset to defaults (rusty orange fog + sphere, enabled)");
+                    return TextCommandResult.Success("Fog settings reset to defaults (rusty orange fog, enabled)");
 
                 case "":
                 case "info":
@@ -2225,24 +1722,20 @@ namespace SpreadingDevastation
                         $"Density: {config.FogDensity:F4}",
                         $"Minimum fog: {config.FogMin:F2}",
                         $"Weights: color={config.FogColorWeight:F2}, density={config.FogDensityWeight:F2}, min={config.FogMinWeight:F2}",
-                        $"Transition: speed={config.FogTransitionSpeed:F2}s, zone={config.FogTransitionZoneBlocks:F0} blocks",
-                        $"Intensity: inside min={config.FogMinIntensityInside:F2}, outside max={config.FogMaxIntensityOutside:F2}",
+                        $"Transition speed: {config.FogTransitionSpeed:F2}s",
                         "",
-                        $"=== Fog Sphere (Visible Dome) ===",
-                        $"Sphere enabled: {config.FogSphereEnabled}",
-                        $"Sphere density: {config.FogSphereDensity:F4}",
-                        $"Sphere padding: {config.FogSphereRadiusPadding:F0} blocks",
-                        $"Sphere min radius: {config.FogSphereMinRadius:F0} blocks",
-                        $"Sphere Y offset: {config.FogSphereCenterYOffset:F0} blocks",
-                        "",
-                        "Commands: /dv fog [setting] [value]",
-                        "  on|off, color, density, min, weight, transition, zone",
-                        "  minintensity, maxintensity, sphere, spheredensity",
-                        "  spherepadding, sphereminradius, sphereyoffset, reset"
+                        "Commands:",
+                        "  /dv fog on|off - Enable/disable fog effect",
+                        "  /dv fog color [r] [g] [b] - Set fog color (0.0-1.0)",
+                        "  /dv fog density [value] - Set fog density",
+                        "  /dv fog min [value] - Set minimum fog level",
+                        "  /dv fog weight [color|density|min] [value] - Set effect weights",
+                        "  /dv fog transition [seconds] - Set transition speed",
+                        "  /dv fog reset - Reset all fog settings to defaults"
                     }, "Fog settings sent to chat");
 
                 default:
-                    return TextCommandResult.Error($"Unknown fog setting: {setting}. Use /dv fog for full list");
+                    return TextCommandResult.Error($"Unknown fog setting: {setting}. Use: on, off, color, density, min, weight, transition, reset, or info");
             }
         }
 
@@ -7327,35 +6820,8 @@ namespace SpreadingDevastation
         private float fogMinWeight = 0.6f;
         private float transitionSpeed = 2.0f; // 1/0.5 seconds
 
-        // Fog sphere config values
-        private bool sphereEnabled = true;
-        private float sphereDensity = 0.003f;
-        private float sphereRadiusPadding = 32f;
-        private float sphereMinRadius = 48f;
-        private float sphereCenterYOffset = 20f;
-        private float sphereFadeInSeconds = 30f;
-
-        // Fade-in tracking
-        private float currentSphereDensity = 0f; // Current faded density (0 to sphereDensity)
-        private bool wasSphereActive = false; // Track if sphere was active last frame
-
-        // Test sphere (for debugging the fog sphere system)
-        private bool testSphereActive = false;
-        private float testSphereX = 0f;
-        private float testSphereY = 0f;
-        private float testSphereZ = 0f;
-        private float testSphereRadius = 100f;
-
         // Current effect weight (0 = no effect, 1 = full effect)
         private float currentWeight = 0f;
-
-        // Cached fog sphere data (recalculated periodically)
-        private float cachedSphereX = 0f;
-        private float cachedSphereY = 0f;
-        private float cachedSphereZ = 0f;
-        private float cachedSphereRadius = 0f;
-        private double lastSphereCalcTime = 0;
-        private const double SPHERE_CALC_INTERVAL_MS = 500; // Recalculate every 500ms
 
         public double RenderOrder => 0.0; // Render early in the pipeline
         public int RenderRange => 0; // Not used
@@ -7413,317 +6879,17 @@ namespace SpreadingDevastation
                 Math.Min(1f, fogColorG + 0.25f),
                 Math.Min(1f, fogColorB + 0.25f)
             };
-
-            // Update fog sphere settings
-            sphereEnabled = config.SphereEnabled;
-            sphereDensity = config.SphereDensity;
-            sphereRadiusPadding = config.SphereRadiusPadding;
-            sphereMinRadius = config.SphereMinRadius;
-            sphereCenterYOffset = config.SphereCenterYOffset;
-            sphereFadeInSeconds = config.SphereFadeInSeconds;
-
-            // Update test sphere settings
-            testSphereActive = config.TestSphereActive;
-            testSphereX = config.TestSphereX;
-            testSphereY = config.TestSphereY;
-            testSphereZ = config.TestSphereZ;
-            testSphereRadius = config.TestSphereRadius;
-        }
-
-        /// <summary>
-        /// Calculates the fog sphere that encompasses all devastated chunks.
-        /// Uses 3 maximally spread frontier points to define a circumcircle.
-        /// </summary>
-        private void CalculateFogSphere()
-        {
-            var chunks = modSystem.GetClientDevastatedChunks();
-            if (chunks == null || chunks.Count == 0)
-            {
-                cachedSphereRadius = 0;
-                return;
-            }
-
-            // Find frontier chunks (devastated chunks with at least one clean neighbor)
-            var frontierPoints = new List<(float x, float z)>();
-            const int CHUNK_SIZE = 32;
-
-            foreach (long chunkKey in chunks)
-            {
-                int chunkX = (int)(chunkKey >> 32);
-                int chunkZ = (int)(chunkKey & 0xFFFFFFFF);
-
-                // Check if any neighbor is NOT devastated (making this a frontier chunk)
-                bool isFrontier = false;
-                for (int dx = -1; dx <= 1 && !isFrontier; dx++)
-                {
-                    for (int dz = -1; dz <= 1 && !isFrontier; dz++)
-                    {
-                        if (dx == 0 && dz == 0) continue;
-                        long neighborKey = ((long)(chunkX + dx) << 32) | (uint)(chunkZ + dz);
-                        if (!chunks.Contains(neighborKey))
-                        {
-                            isFrontier = true;
-                        }
-                    }
-                }
-
-                if (isFrontier)
-                {
-                    // Use chunk center as frontier point
-                    float centerX = chunkX * CHUNK_SIZE + CHUNK_SIZE / 2f;
-                    float centerZ = chunkZ * CHUNK_SIZE + CHUNK_SIZE / 2f;
-                    frontierPoints.Add((centerX, centerZ));
-                }
-            }
-
-            // If no frontier (all chunks surrounded), use all chunks
-            if (frontierPoints.Count == 0)
-            {
-                foreach (long chunkKey in chunks)
-                {
-                    int chunkX = (int)(chunkKey >> 32);
-                    int chunkZ = (int)(chunkKey & 0xFFFFFFFF);
-                    float centerX = chunkX * CHUNK_SIZE + CHUNK_SIZE / 2f;
-                    float centerZ = chunkZ * CHUNK_SIZE + CHUNK_SIZE / 2f;
-                    frontierPoints.Add((centerX, centerZ));
-                }
-            }
-
-            // Pick 3 maximally spread points
-            var (p1, p2, p3) = FindMaximallySpreadPoints(frontierPoints);
-
-            // Calculate circumcircle of the 3 points
-            var (centerX2d, centerZ2d, radius) = CalculateCircumcircle(p1, p2, p3);
-
-            // Apply padding and minimum radius
-            radius = Math.Max(radius + sphereRadiusPadding, sphereMinRadius);
-
-            // Store the sphere center (world coordinates) and radius
-            cachedSphereX = centerX2d;
-            cachedSphereY = (capi.World.SeaLevel + sphereCenterYOffset);
-            cachedSphereZ = centerZ2d;
-            cachedSphereRadius = radius;
-        }
-
-        /// <summary>
-        /// Finds 3 points that are maximally spread apart from each other.
-        /// </summary>
-        private ((float x, float z) p1, (float x, float z) p2, (float x, float z) p3) FindMaximallySpreadPoints(List<(float x, float z)> points)
-        {
-            if (points.Count < 3)
-            {
-                // Not enough points - duplicate as needed
-                var p = points.Count > 0 ? points[0] : (0, 0);
-                var p2 = points.Count > 1 ? points[1] : p;
-                return (p, p2, p);
-            }
-
-            // Start with any point as P1
-            var point1 = points[0];
-
-            // Find point farthest from P1 as P2
-            float maxDist1 = 0;
-            var point2 = point1;
-            foreach (var p in points)
-            {
-                float dist = DistanceSquared(point1, p);
-                if (dist > maxDist1)
-                {
-                    maxDist1 = dist;
-                    point2 = p;
-                }
-            }
-
-            // Find point that maximizes min(dist to P1, dist to P2) as P3
-            float maxMinDist = 0;
-            var point3 = point1;
-            foreach (var p in points)
-            {
-                float distTo1 = DistanceSquared(point1, p);
-                float distTo2 = DistanceSquared(point2, p);
-                float minDist = Math.Min(distTo1, distTo2);
-                if (minDist > maxMinDist)
-                {
-                    maxMinDist = minDist;
-                    point3 = p;
-                }
-            }
-
-            return (point1, point2, point3);
-        }
-
-        private float DistanceSquared((float x, float z) a, (float x, float z) b)
-        {
-            float dx = a.x - b.x;
-            float dz = a.z - b.z;
-            return dx * dx + dz * dz;
-        }
-
-        /// <summary>
-        /// Calculates the circumcircle of 3 points in 2D (XZ plane).
-        /// Returns (centerX, centerZ, radius).
-        /// </summary>
-        private (float centerX, float centerZ, float radius) CalculateCircumcircle(
-            (float x, float z) p1, (float x, float z) p2, (float x, float z) p3)
-        {
-            float ax = p1.x, az = p1.z;
-            float bx = p2.x, bz = p2.z;
-            float cx = p3.x, cz = p3.z;
-
-            float d = 2 * (ax * (bz - cz) + bx * (cz - az) + cx * (az - bz));
-
-            // Handle collinear points (d == 0)
-            if (Math.Abs(d) < 0.0001f)
-            {
-                // Points are collinear - use midpoint of the longest segment and half that distance
-                float dist1 = DistanceSquared(p1, p2);
-                float dist2 = DistanceSquared(p2, p3);
-                float dist3 = DistanceSquared(p1, p3);
-
-                if (dist1 >= dist2 && dist1 >= dist3)
-                {
-                    return ((ax + bx) / 2, (az + bz) / 2, (float)Math.Sqrt(dist1) / 2);
-                }
-                else if (dist2 >= dist1 && dist2 >= dist3)
-                {
-                    return ((bx + cx) / 2, (bz + cz) / 2, (float)Math.Sqrt(dist2) / 2);
-                }
-                else
-                {
-                    return ((ax + cx) / 2, (az + cz) / 2, (float)Math.Sqrt(dist3) / 2);
-                }
-            }
-
-            float ax2 = ax * ax + az * az;
-            float bx2 = bx * bx + bz * bz;
-            float cx2 = cx * cx + cz * cz;
-
-            float ux = (ax2 * (bz - cz) + bx2 * (cz - az) + cx2 * (az - bz)) / d;
-            float uz = (ax2 * (cx - bx) + bx2 * (ax - cx) + cx2 * (bx - ax)) / d;
-
-            float radius = (float)Math.Sqrt((ax - ux) * (ax - ux) + (az - uz) * (az - uz));
-
-            return (ux, uz, radius);
-        }
-
-        // Debug logging throttle
-        private double lastDebugLogTime = 0;
-        private const double DEBUG_LOG_INTERVAL_MS = 5000; // Log every 5 seconds
-
-        /// <summary>
-        /// Updates the game's fog sphere shader uniforms.
-        /// Test sphere takes priority over calculated devastation sphere.
-        /// </summary>
-        private void UpdateFogSphereUniforms()
-        {
-            var playerPos = capi.World.Player.Entity.Pos;
-            var uniforms = capi.Render.ShaderUniforms;
-
-            // Test sphere takes priority (for debugging)
-            if (testSphereActive)
-            {
-                // The fog sphere position is relative to the player
-                float offsetX = testSphereX - (float)playerPos.X;
-                float offsetY = testSphereY - (float)playerPos.Y;
-                float offsetZ = testSphereZ - (float)playerPos.Z;
-
-                uniforms.FogSphereQuantity = 1;
-                uniforms.FogSpheres[0] = offsetX;           // X offset from player
-                uniforms.FogSpheres[1] = offsetY;           // Y offset from player
-                uniforms.FogSpheres[2] = offsetZ;           // Z offset from player
-                uniforms.FogSpheres[3] = testSphereRadius;  // Radius
-                uniforms.FogSpheres[4] = currentSphereDensity; // Faded density
-                uniforms.FogSpheres[5] = fogColorR;         // R
-                uniforms.FogSpheres[6] = fogColorG;         // G
-                uniforms.FogSpheres[7] = fogColorB;         // B
-
-                // Debug logging (throttled)
-                double now = capi.World.ElapsedMilliseconds;
-                if (now - lastDebugLogTime > DEBUG_LOG_INTERVAL_MS)
-                {
-                    lastDebugLogTime = now;
-                    float dist = (float)Math.Sqrt(offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ);
-                    float fadePercent = sphereDensity > 0 ? (currentSphereDensity / sphereDensity * 100f) : 0f;
-
-                    capi.Logger.Notification($"[FogSphere DEBUG] Test sphere: offset=({offsetX:F1}, {offsetY:F1}, {offsetZ:F1}), dist={dist:F1}, radius={testSphereRadius:F1}");
-                    capi.Logger.Notification($"[FogSphere DEBUG] Density: {currentSphereDensity:F4} / {sphereDensity:F4} ({fadePercent:F0}% faded in), fadeTime={sphereFadeInSeconds:F1}s");
-                }
-                return;
-            }
-
-            // Normal devastation sphere
-            if (!sphereEnabled || cachedSphereRadius <= 0)
-            {
-                // Clear fog spheres
-                uniforms.FogSphereQuantity = 0;
-                return;
-            }
-
-            // The fog sphere position is relative to the player
-            float devOffsetX = cachedSphereX - (float)playerPos.X;
-            float devOffsetY = cachedSphereY - (float)playerPos.Y;
-            float devOffsetZ = cachedSphereZ - (float)playerPos.Z;
-
-            // Set fog sphere 0
-            uniforms.FogSphereQuantity = 1;
-            uniforms.FogSpheres[0] = devOffsetX;        // X offset from player
-            uniforms.FogSpheres[1] = devOffsetY;        // Y offset from player
-            uniforms.FogSpheres[2] = devOffsetZ;        // Z offset from player
-            uniforms.FogSpheres[3] = cachedSphereRadius; // Radius
-            uniforms.FogSpheres[4] = currentSphereDensity; // Faded density
-            uniforms.FogSpheres[5] = fogColorR;          // R
-            uniforms.FogSpheres[6] = fogColorG;          // G
-            uniforms.FogSpheres[7] = fogColorB;          // B
         }
 
         public void OnRenderFrame(float deltaTime, EnumRenderStage stage)
         {
             if (capi?.World?.Player?.Entity == null) return;
 
-            // Update fog sphere (visible dome effect)
-            double currentTime = capi.World.ElapsedMilliseconds;
-            if (sphereEnabled && currentTime - lastSphereCalcTime > SPHERE_CALC_INTERVAL_MS)
-            {
-                CalculateFogSphere();
-                lastSphereCalcTime = currentTime;
-            }
+            // Check if effect is enabled and player is in a devastated chunk
+            bool inDevastatedChunk = enabled && modSystem.IsPlayerInDevastatedChunk();
 
-            // Determine if sphere should be active
-            bool isSphereActive = testSphereActive || (sphereEnabled && cachedSphereRadius > 0);
-
-            // Handle fade-in logic
-            if (isSphereActive)
-            {
-                // If sphere just became active, start fade from 0
-                if (!wasSphereActive)
-                {
-                    currentSphereDensity = 0f;
-                }
-
-                // Gradually increase density toward target
-                if (sphereFadeInSeconds > 0)
-                {
-                    float fadeSpeed = sphereDensity / sphereFadeInSeconds;
-                    currentSphereDensity = Math.Min(currentSphereDensity + deltaTime * fadeSpeed, sphereDensity);
-                }
-                else
-                {
-                    // Instant (no fade)
-                    currentSphereDensity = sphereDensity;
-                }
-            }
-            else
-            {
-                // Sphere not active - could add fade-out here if desired
-                currentSphereDensity = 0f;
-            }
-            wasSphereActive = isSphereActive;
-
-            UpdateFogSphereUniforms();
-
-            // Get continuous fog intensity based on distance to devastation boundaries
-            // Returns 0.0-1.0 with smooth transitions at chunk edges
-            float targetWeight = enabled ? modSystem.GetDevastationIntensity() : 0f;
+            // Calculate target weight
+            float targetWeight = inDevastatedChunk ? 1.0f : 0.0f;
 
             // Smoothly transition towards target weight
             if (currentWeight < targetWeight)
@@ -7760,37 +6926,12 @@ namespace SpreadingDevastation
             }
         }
 
-        /// <summary>
-        /// Gets debug info about the current fog sphere calculation for diagnostics.
-        /// </summary>
-        public string GetSphereDebugInfo()
-        {
-            var chunks = modSystem.GetClientDevastatedChunks();
-            int chunkCount = chunks?.Count ?? 0;
-
-            var playerPos = capi?.World?.Player?.Entity?.Pos;
-            string playerInfo = playerPos != null ? $"({playerPos.X:F0}, {playerPos.Y:F0}, {playerPos.Z:F0})" : "null";
-
-            return $"Sphere enabled: {sphereEnabled}\n" +
-                   $"Client chunks: {chunkCount}\n" +
-                   $"Player pos: {playerInfo}\n" +
-                   $"Cached sphere: center=({cachedSphereX:F0}, {cachedSphereY:F0}, {cachedSphereZ:F0}), radius={cachedSphereRadius:F0}\n" +
-                   $"Density: {sphereDensity:F4}\n" +
-                   $"Uniforms set: qty={capi?.Render?.ShaderUniforms?.FogSphereQuantity ?? -1}";
-        }
-
         public void Dispose()
         {
             if (isAmbientRegistered && capi?.Ambient?.CurrentModifiers != null)
             {
                 capi.Ambient.CurrentModifiers.Remove("devastation");
                 isAmbientRegistered = false;
-            }
-
-            // Clear fog sphere uniforms
-            if (capi?.Render?.ShaderUniforms != null)
-            {
-                capi.Render.ShaderUniforms.FogSphereQuantity = 0;
             }
         }
     }
