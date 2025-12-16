@@ -259,6 +259,59 @@ namespace SpreadingDevastation
         /// </summary>
         public float FogTransitionSpeed { get; set; } = 0.5f;
 
+        // === Fog Wall Settings (visible cube fog over devastated areas) ===
+
+        /// <summary>
+        /// Whether the fog wall effect is enabled (default: true).
+        /// Creates visible fog cubes over devastated chunks that can be seen from outside.
+        /// </summary>
+        public bool FogWallEnabled { get; set; } = true;
+
+        /// <summary>
+        /// Fog color R component for the wall effect (0.0-1.0, default: 0.45 brownish).
+        /// </summary>
+        public float FogWallColorR { get; set; } = 0.45f;
+
+        /// <summary>
+        /// Fog color G component for the wall effect (0.0-1.0, default: 0.35 brownish).
+        /// </summary>
+        public float FogWallColorG { get; set; } = 0.35f;
+
+        /// <summary>
+        /// Fog color B component for the wall effect (0.0-1.0, default: 0.25 brownish).
+        /// </summary>
+        public float FogWallColorB { get; set; } = 0.25f;
+
+        /// <summary>
+        /// Fog density at the bottom of the fog wall (default: 0.8). Higher = more opaque.
+        /// The fog is denser at the bottom to create a "rising from ground" effect.
+        /// </summary>
+        public float FogWallBottomDensity { get; set; } = 0.8f;
+
+        /// <summary>
+        /// Fog density at the top of the fog wall (default: 0.1). Lower = more transparent.
+        /// The fog fades out toward the top.
+        /// </summary>
+        public float FogWallTopDensity { get; set; } = 0.1f;
+
+        /// <summary>
+        /// Minimum Y level where the fog wall starts (default: 50).
+        /// Below this level, no fog is rendered.
+        /// </summary>
+        public float FogWallMinY { get; set; } = 50f;
+
+        /// <summary>
+        /// Maximum Y level where the fog wall ends (default: 180).
+        /// Above this level, no fog is rendered.
+        /// </summary>
+        public float FogWallMaxY { get; set; } = 180f;
+
+        /// <summary>
+        /// Maximum view distance for fog wall rendering in blocks (default: 256).
+        /// Beyond this distance, fog cubes are not rendered.
+        /// </summary>
+        public float FogWallViewDistance { get; set; } = 256f;
+
         // === Animal Insanity Settings ===
 
         /// <summary>
@@ -583,6 +636,26 @@ namespace SpreadingDevastation
             public float MinWeight = 0.6f;
             [ProtoMember(10)]
             public float TransitionSpeed = 0.5f;
+
+            // Fog Wall (cube) settings
+            [ProtoMember(11)]
+            public bool FogWallEnabled = true;
+            [ProtoMember(12)]
+            public float FogWallColorR = 0.45f;
+            [ProtoMember(13)]
+            public float FogWallColorG = 0.35f;
+            [ProtoMember(14)]
+            public float FogWallColorB = 0.25f;
+            [ProtoMember(15)]
+            public float FogWallBottomDensity = 0.8f;
+            [ProtoMember(16)]
+            public float FogWallTopDensity = 0.1f;
+            [ProtoMember(17)]
+            public float FogWallMinY = 50f;
+            [ProtoMember(18)]
+            public float FogWallMaxY = 180f;
+            [ProtoMember(19)]
+            public float FogWallViewDistance = 256f;
         }
 
         private ICoreServerAPI sapi;
@@ -658,9 +731,15 @@ namespace SpreadingDevastation
                 .SetMessageHandler<DevastatedChunkSyncPacket>(OnDevastatedChunkSync)
                 .SetMessageHandler<FogConfigPacket>(OnFogConfigSync);
 
-            // Create and register the fog renderer
+            // Create the fog renderer (shader will be loaded after assets are finalized)
             fogRenderer = new DevastationFogRenderer(api, this);
-            api.Event.RegisterRenderer(fogRenderer, EnumRenderStage.Before, "devastationfog");
+            // Register for AfterOIT stage so fog cubes render over the world but with proper blending
+            api.Event.RegisterRenderer(fogRenderer, EnumRenderStage.AfterOIT, "devastationfog");
+
+            // Load the fog cube shader after assets are finalized
+            api.Event.LevelFinalize += () => {
+                fogRenderer.LoadShaderNow();
+            };
 
             // Hook into the client-side temporal stability system after player enters world
             // This makes the gear spin counter-clockwise in devastated chunks
@@ -769,6 +848,54 @@ namespace SpreadingDevastation
             }
 
             return (float)Math.Sqrt(nearestDistSq);
+        }
+
+        /// <summary>
+        /// Gets the world positions (center) of up to 3 nearest devastated chunks for fog sphere rendering.
+        /// Returns positions as Vec3d with X,Y,Z where Y is the player's Y for now.
+        /// </summary>
+        public List<Vec3d> GetNearestDevastatedChunkPositions(int maxCount = 3, float maxDistance = 256f)
+        {
+            var result = new List<Vec3d>();
+            if (capi?.World?.Player?.Entity == null) return result;
+            if (clientDevastatedChunks.Count == 0) return result;
+
+            var playerPos = capi.World.Player.Entity.Pos;
+            float maxDistSq = maxDistance * maxDistance;
+
+            // Build list of chunks with their distances
+            var chunksWithDist = new List<(long key, float distSq, float centerX, float centerZ)>();
+
+            foreach (long chunkKey in clientDevastatedChunks)
+            {
+                int chunkX = (int)(chunkKey >> 32);
+                int chunkZ = (int)(chunkKey & 0xFFFFFFFF);
+
+                float chunkCenterX = chunkX * CHUNK_SIZE + CHUNK_SIZE / 2f;
+                float chunkCenterZ = chunkZ * CHUNK_SIZE + CHUNK_SIZE / 2f;
+
+                float dx = (float)playerPos.X - chunkCenterX;
+                float dz = (float)playerPos.Z - chunkCenterZ;
+                float distSq = dx * dx + dz * dz;
+
+                if (distSq <= maxDistSq)
+                {
+                    chunksWithDist.Add((chunkKey, distSq, chunkCenterX, chunkCenterZ));
+                }
+            }
+
+            // Sort by distance and take closest
+            chunksWithDist.Sort((a, b) => a.distSq.CompareTo(b.distSq));
+
+            int count = Math.Min(maxCount, chunksWithDist.Count);
+            for (int i = 0; i < count; i++)
+            {
+                var chunk = chunksWithDist[i];
+                // Use player's Y position as the base, fog spheres will be offset from there
+                result.Add(new Vec3d(chunk.centerX, playerPos.Y, chunk.centerZ));
+            }
+
+            return result;
         }
 
         public override void StartServerSide(ICoreServerAPI api)
@@ -911,7 +1038,17 @@ namespace SpreadingDevastation
                     ColorWeight = config.FogColorWeight,
                     DensityWeight = config.FogDensityWeight,
                     MinWeight = config.FogMinWeight,
-                    TransitionSpeed = config.FogTransitionSpeed
+                    TransitionSpeed = config.FogTransitionSpeed,
+                    // Fog wall (cube) settings
+                    FogWallEnabled = config.FogWallEnabled,
+                    FogWallColorR = config.FogWallColorR,
+                    FogWallColorG = config.FogWallColorG,
+                    FogWallColorB = config.FogWallColorB,
+                    FogWallBottomDensity = config.FogWallBottomDensity,
+                    FogWallTopDensity = config.FogWallTopDensity,
+                    FogWallMinY = config.FogWallMinY,
+                    FogWallMaxY = config.FogWallMaxY,
+                    FogWallViewDistance = config.FogWallViewDistance
                 };
                 fogConfigDirty = false;
             }
@@ -1694,6 +1831,9 @@ namespace SpreadingDevastation
                     }
                     return TextCommandResult.Error("Invalid number for transition speed");
 
+                case "wall":
+                    return HandleFogWallCommand(args, value);
+
                 case "reset":
                 case "defaults":
                     // Reset all fog values to defaults
@@ -1724,6 +1864,13 @@ namespace SpreadingDevastation
                         $"Weights: color={config.FogColorWeight:F2}, density={config.FogDensityWeight:F2}, min={config.FogMinWeight:F2}",
                         $"Transition speed: {config.FogTransitionSpeed:F2}s",
                         "",
+                        "=== Fog Wall Settings (visible from outside) ===",
+                        $"Wall Enabled: {config.FogWallEnabled}",
+                        $"Wall Color (RGB): {config.FogWallColorR:F2}, {config.FogWallColorG:F2}, {config.FogWallColorB:F2}",
+                        $"Density: bottom={config.FogWallBottomDensity:F2}, top={config.FogWallTopDensity:F2}",
+                        $"Y Range: {config.FogWallMinY:F0} - {config.FogWallMaxY:F0}",
+                        $"View Distance: {config.FogWallViewDistance:F0}",
+                        "",
                         "Commands:",
                         "  /dv fog on|off - Enable/disable fog effect",
                         "  /dv fog color [r] [g] [b] - Set fog color (0.0-1.0)",
@@ -1731,11 +1878,177 @@ namespace SpreadingDevastation
                         "  /dv fog min [value] - Set minimum fog level",
                         "  /dv fog weight [color|density|min] [value] - Set effect weights",
                         "  /dv fog transition [seconds] - Set transition speed",
+                        "  /dv fog wall [subcommand] - Fog wall settings (use '/dv fog wall' for help)",
                         "  /dv fog reset - Reset all fog settings to defaults"
                     }, "Fog settings sent to chat");
 
                 default:
-                    return TextCommandResult.Error($"Unknown fog setting: {setting}. Use: on, off, color, density, min, weight, transition, reset, or info");
+                    return TextCommandResult.Error($"Unknown fog setting: {setting}. Use: on, off, color, density, min, weight, transition, wall, reset, or info");
+            }
+        }
+
+        /// <summary>
+        /// Handles /dv fog wall subcommands for fog wall (visible cube fog) configuration.
+        /// </summary>
+        private TextCommandResult HandleFogWallCommand(TextCommandCallingArgs args, string value)
+        {
+            // Parse subcommand from value
+            var parts = value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            string subCmd = parts.Length > 0 ? parts[0].ToLowerInvariant() : "";
+            string subValue = parts.Length > 1 ? string.Join(" ", parts.Skip(1)) : "";
+
+            switch (subCmd)
+            {
+                case "on":
+                    config.FogWallEnabled = true;
+                    SaveConfig();
+                    BroadcastFogConfig();
+                    return TextCommandResult.Success("Fog wall effect ENABLED");
+
+                case "off":
+                    config.FogWallEnabled = false;
+                    SaveConfig();
+                    BroadcastFogConfig();
+                    return TextCommandResult.Success("Fog wall effect DISABLED");
+
+                case "color":
+                    if (string.IsNullOrWhiteSpace(subValue))
+                    {
+                        return TextCommandResult.Success($"Fog wall color: R={config.FogWallColorR:F2} G={config.FogWallColorG:F2} B={config.FogWallColorB:F2}");
+                    }
+                    var colorParts = subValue.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    if (colorParts.Length >= 3 &&
+                        float.TryParse(colorParts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out float r) &&
+                        float.TryParse(colorParts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float g) &&
+                        float.TryParse(colorParts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out float b))
+                    {
+                        config.FogWallColorR = Math.Clamp(r, 0f, 1f);
+                        config.FogWallColorG = Math.Clamp(g, 0f, 1f);
+                        config.FogWallColorB = Math.Clamp(b, 0f, 1f);
+                        SaveConfig();
+                        BroadcastFogConfig();
+                        return TextCommandResult.Success($"Fog wall color set to R={config.FogWallColorR:F2} G={config.FogWallColorG:F2} B={config.FogWallColorB:F2}");
+                    }
+                    return TextCommandResult.Error("Usage: /dv fog wall color [r] [g] [b] (values 0.0-1.0)");
+
+                case "bottom":
+                case "bottomdensity":
+                    if (string.IsNullOrWhiteSpace(subValue))
+                    {
+                        return TextCommandResult.Success($"Fog wall bottom density: {config.FogWallBottomDensity:F2}");
+                    }
+                    if (float.TryParse(subValue, NumberStyles.Float, CultureInfo.InvariantCulture, out float bottomDensity))
+                    {
+                        config.FogWallBottomDensity = Math.Clamp(bottomDensity, 0f, 1f);
+                        SaveConfig();
+                        BroadcastFogConfig();
+                        return TextCommandResult.Success($"Fog wall bottom density set to {config.FogWallBottomDensity:F2}");
+                    }
+                    return TextCommandResult.Error("Invalid number for bottom density");
+
+                case "top":
+                case "topdensity":
+                    if (string.IsNullOrWhiteSpace(subValue))
+                    {
+                        return TextCommandResult.Success($"Fog wall top density: {config.FogWallTopDensity:F2}");
+                    }
+                    if (float.TryParse(subValue, NumberStyles.Float, CultureInfo.InvariantCulture, out float topDensity))
+                    {
+                        config.FogWallTopDensity = Math.Clamp(topDensity, 0f, 1f);
+                        SaveConfig();
+                        BroadcastFogConfig();
+                        return TextCommandResult.Success($"Fog wall top density set to {config.FogWallTopDensity:F2}");
+                    }
+                    return TextCommandResult.Error("Invalid number for top density");
+
+                case "miny":
+                case "min":
+                    if (string.IsNullOrWhiteSpace(subValue))
+                    {
+                        return TextCommandResult.Success($"Fog wall min Y: {config.FogWallMinY:F0}");
+                    }
+                    if (float.TryParse(subValue, NumberStyles.Float, CultureInfo.InvariantCulture, out float minY))
+                    {
+                        config.FogWallMinY = Math.Clamp(minY, 0f, 400f);
+                        SaveConfig();
+                        BroadcastFogConfig();
+                        return TextCommandResult.Success($"Fog wall min Y set to {config.FogWallMinY:F0}");
+                    }
+                    return TextCommandResult.Error("Invalid number for min Y");
+
+                case "maxy":
+                case "max":
+                    if (string.IsNullOrWhiteSpace(subValue))
+                    {
+                        return TextCommandResult.Success($"Fog wall max Y: {config.FogWallMaxY:F0}");
+                    }
+                    if (float.TryParse(subValue, NumberStyles.Float, CultureInfo.InvariantCulture, out float maxY))
+                    {
+                        config.FogWallMaxY = Math.Clamp(maxY, 0f, 400f);
+                        SaveConfig();
+                        BroadcastFogConfig();
+                        return TextCommandResult.Success($"Fog wall max Y set to {config.FogWallMaxY:F0}");
+                    }
+                    return TextCommandResult.Error("Invalid number for max Y");
+
+                case "distance":
+                case "viewdistance":
+                    if (string.IsNullOrWhiteSpace(subValue))
+                    {
+                        return TextCommandResult.Success($"Fog wall view distance: {config.FogWallViewDistance:F0}");
+                    }
+                    if (float.TryParse(subValue, NumberStyles.Float, CultureInfo.InvariantCulture, out float viewDist))
+                    {
+                        config.FogWallViewDistance = Math.Clamp(viewDist, 32f, 512f);
+                        SaveConfig();
+                        BroadcastFogConfig();
+                        return TextCommandResult.Success($"Fog wall view distance set to {config.FogWallViewDistance:F0}");
+                    }
+                    return TextCommandResult.Error("Invalid number for view distance");
+
+                case "reset":
+                    config.FogWallEnabled = true;
+                    config.FogWallColorR = 0.45f;
+                    config.FogWallColorG = 0.35f;
+                    config.FogWallColorB = 0.25f;
+                    config.FogWallBottomDensity = 0.8f;
+                    config.FogWallTopDensity = 0.1f;
+                    config.FogWallMinY = 50f;
+                    config.FogWallMaxY = 180f;
+                    config.FogWallViewDistance = 256f;
+                    SaveConfig();
+                    BroadcastFogConfig();
+                    return TextCommandResult.Success("Fog wall settings reset to defaults");
+
+                case "":
+                case "info":
+                case "help":
+                    return SendChatLines(args, new[]
+                    {
+                        "=== Fog Wall Commands ===",
+                        "The fog wall creates visible fog cubes over devastated chunks.",
+                        "Fog is denser at the bottom and lighter at the top.",
+                        "",
+                        $"Enabled: {config.FogWallEnabled}",
+                        $"Color: R={config.FogWallColorR:F2} G={config.FogWallColorG:F2} B={config.FogWallColorB:F2}",
+                        $"Bottom Density: {config.FogWallBottomDensity:F2}",
+                        $"Top Density: {config.FogWallTopDensity:F2}",
+                        $"Y Range: {config.FogWallMinY:F0} - {config.FogWallMaxY:F0}",
+                        $"View Distance: {config.FogWallViewDistance:F0}",
+                        "",
+                        "Commands:",
+                        "  /dv fog wall on|off - Enable/disable fog wall",
+                        "  /dv fog wall color [r] [g] [b] - Set fog wall color",
+                        "  /dv fog wall bottom [value] - Set bottom density (0.0-1.0)",
+                        "  /dv fog wall top [value] - Set top density (0.0-1.0)",
+                        "  /dv fog wall miny [value] - Set minimum Y level",
+                        "  /dv fog wall maxy [value] - Set maximum Y level",
+                        "  /dv fog wall distance [value] - Set view distance",
+                        "  /dv fog wall reset - Reset to defaults"
+                    }, "Fog wall settings sent to chat");
+
+                default:
+                    return TextCommandResult.Error($"Unknown fog wall setting: {subCmd}. Use '/dv fog wall' for help.");
             }
         }
 
@@ -6799,14 +7112,21 @@ namespace SpreadingDevastation
 
     /// <summary>
     /// Client-side renderer that applies fog and sky color effects when the player is in devastated chunks.
-    /// Creates a rusty, corrupted atmosphere similar to the base game Devastation area.
+    /// Also renders visible fog cubes over devastated chunks with vertical density gradient.
     /// </summary>
     public class DevastationFogRenderer : IRenderer
     {
+        private const int CHUNK_SIZE = 32;
+
         private ICoreClientAPI capi;
         private SpreadingDevastationModSystem modSystem;
         private AmbientModifier devastationAmbient;
         private bool isAmbientRegistered = false;
+
+        // Fog cube rendering
+        private IShaderProgram fogCubeShader;
+        private MeshRef cubeMeshRef;
+        private bool shaderLoaded = false;
 
         // Config values (updated via UpdateConfig)
         private bool enabled = true;
@@ -6820,10 +7140,21 @@ namespace SpreadingDevastation
         private float fogMinWeight = 0.6f;
         private float transitionSpeed = 2.0f; // 1/0.5 seconds
 
+        // Fog wall config (for visible fog cubes over devastated chunks)
+        private bool fogWallEnabled = true;
+        private float fogWallColorR = 0.45f;
+        private float fogWallColorG = 0.35f;
+        private float fogWallColorB = 0.25f;
+        private float fogWallBottomDensity = 0.8f;
+        private float fogWallTopDensity = 0.1f;
+        private float fogWallMinY = 50f;
+        private float fogWallMaxY = 180f;
+        private float fogWallViewDistance = 256f;
+
         // Current effect weight (0 = no effect, 1 = full effect)
         private float currentWeight = 0f;
 
-        public double RenderOrder => 0.0; // Render early in the pipeline
+        public double RenderOrder => 0.98; // Render late in pipeline for proper blending
         public int RenderRange => 0; // Not used
 
         public DevastationFogRenderer(ICoreClientAPI capi, SpreadingDevastationModSystem modSystem)
@@ -6832,16 +7163,12 @@ namespace SpreadingDevastation
             this.modSystem = modSystem;
 
             // Create ambient modifier for devastation effect
-            // Must initialize ALL properties to avoid null reference exceptions in AmbientManager
             devastationAmbient = new AmbientModifier()
             {
-                // Fog properties we want to modify
                 FogColor = new WeightedFloatArray(new float[] { fogColorR, fogColorG, fogColorB, 1.0f }, 0),
                 FogDensity = new WeightedFloat(fogDensity, 0),
                 FogMin = new WeightedFloat(fogMin, 0),
                 AmbientColor = new WeightedFloatArray(new float[] { fogColorR + 0.15f, fogColorG + 0.25f, fogColorB + 0.25f }, 0),
-
-                // Other properties must be initialized with weight 0 to avoid null crashes
                 FlatFogDensity = new WeightedFloat(0, 0),
                 FlatFogYPos = new WeightedFloat(0, 0),
                 CloudBrightness = new WeightedFloat(1, 0),
@@ -6850,6 +7177,119 @@ namespace SpreadingDevastation
                 FogBrightness = new WeightedFloat(1, 0),
                 LerpSpeed = new WeightedFloat(1, 0)
             };
+
+            // Create cube mesh (shader loaded later after assets finalize)
+            CreateCubeMesh();
+        }
+
+        /// <summary>
+        /// Public method to load the shader after assets are finalized.
+        /// Called from ModSystem after LevelFinalize event.
+        /// </summary>
+        public void LoadShaderNow()
+        {
+            LoadFogCubeShader();
+        }
+
+        /// <summary>
+        /// Loads the custom fog cube shader from mod assets.
+        /// </summary>
+        private void LoadFogCubeShader()
+        {
+            try
+            {
+                capi.Logger.Notification("[SpreadingDevastation] Starting fog cube shader load...");
+
+                fogCubeShader = capi.Shader.NewShaderProgram();
+                fogCubeShader.VertexShader = capi.Shader.NewShader(EnumShaderType.VertexShader);
+                fogCubeShader.FragmentShader = capi.Shader.NewShader(EnumShaderType.FragmentShader);
+
+                // Load shader source from mod assets
+                var vsAsset = capi.Assets.Get(new AssetLocation("spreadingdevastation", "shaders/fogcube.vsh"));
+                var fsAsset = capi.Assets.Get(new AssetLocation("spreadingdevastation", "shaders/fogcube.fsh"));
+
+                if (vsAsset == null)
+                {
+                    capi.Logger.Error("[SpreadingDevastation] Failed to load vertex shader asset (fogcube.vsh not found)");
+                    return;
+                }
+                if (fsAsset == null)
+                {
+                    capi.Logger.Error("[SpreadingDevastation] Failed to load fragment shader asset (fogcube.fsh not found)");
+                    return;
+                }
+
+                string vsCode = vsAsset.ToText();
+                string fsCode = fsAsset.ToText();
+
+                capi.Logger.Notification($"[SpreadingDevastation] Loaded shader sources: VS={vsCode.Length} chars, FS={fsCode.Length} chars");
+
+                fogCubeShader.VertexShader.Code = vsCode;
+                fogCubeShader.FragmentShader.Code = fsCode;
+
+                if (!fogCubeShader.Compile())
+                {
+                    capi.Logger.Error("[SpreadingDevastation] Failed to compile fog cube shader");
+                    return;
+                }
+
+                shaderLoaded = true;
+                capi.Logger.Notification("[SpreadingDevastation] Fog cube shader compiled and loaded successfully!");
+            }
+            catch (Exception ex)
+            {
+                capi.Logger.Error($"[SpreadingDevastation] Error loading fog cube shader: {ex.Message}\n{ex.StackTrace}");
+            }
+        }
+
+        /// <summary>
+        /// Creates a unit cube mesh for rendering fog volumes.
+        /// </summary>
+        private void CreateCubeMesh()
+        {
+            // Unit cube vertices (0-1 range, will be scaled and translated per chunk)
+            float[] vertices = {
+                // Front face
+                0, 0, 1,  1, 0, 1,  1, 1, 1,  0, 1, 1,
+                // Back face
+                1, 0, 0,  0, 0, 0,  0, 1, 0,  1, 1, 0,
+                // Left face
+                0, 0, 0,  0, 0, 1,  0, 1, 1,  0, 1, 0,
+                // Right face
+                1, 0, 1,  1, 0, 0,  1, 1, 0,  1, 1, 1,
+                // Top face
+                0, 1, 1,  1, 1, 1,  1, 1, 0,  0, 1, 0,
+                // Bottom face
+                0, 0, 0,  1, 0, 0,  1, 0, 1,  0, 0, 1
+            };
+
+            // Indices for the cube (two triangles per face)
+            int[] indices = {
+                0, 1, 2,  0, 2, 3,    // Front
+                4, 5, 6,  4, 6, 7,    // Back
+                8, 9, 10, 8, 10, 11,  // Left
+                12, 13, 14, 12, 14, 15, // Right
+                16, 17, 18, 16, 18, 19, // Top
+                20, 21, 22, 20, 22, 23  // Bottom
+            };
+
+            MeshData meshData = new MeshData(24, 36);
+            meshData.SetVerticesCount(24);
+            meshData.SetIndicesCount(36);
+
+            for (int i = 0; i < 24; i++)
+            {
+                meshData.xyz[i * 3 + 0] = vertices[i * 3 + 0];
+                meshData.xyz[i * 3 + 1] = vertices[i * 3 + 1];
+                meshData.xyz[i * 3 + 2] = vertices[i * 3 + 2];
+            }
+
+            for (int i = 0; i < 36; i++)
+            {
+                meshData.Indices[i] = indices[i];
+            }
+
+            cubeMeshRef = capi.Render.UploadMesh(meshData);
         }
 
         /// <summary>
@@ -6870,6 +7310,17 @@ namespace SpreadingDevastation
             fogMinWeight = config.MinWeight;
             transitionSpeed = config.TransitionSpeed > 0 ? 1f / config.TransitionSpeed : 2f;
 
+            // Fog wall (cube) settings
+            fogWallEnabled = config.FogWallEnabled;
+            fogWallColorR = config.FogWallColorR;
+            fogWallColorG = config.FogWallColorG;
+            fogWallColorB = config.FogWallColorB;
+            fogWallBottomDensity = config.FogWallBottomDensity;
+            fogWallTopDensity = config.FogWallTopDensity;
+            fogWallMinY = config.FogWallMinY;
+            fogWallMaxY = config.FogWallMaxY;
+            fogWallViewDistance = config.FogWallViewDistance;
+
             // Update the ambient modifier values
             devastationAmbient.FogColor.Value = new float[] { fogColorR, fogColorG, fogColorB, 1.0f };
             devastationAmbient.FogDensity.Value = fogDensity;
@@ -6885,10 +7336,12 @@ namespace SpreadingDevastation
         {
             if (capi?.World?.Player?.Entity == null) return;
 
+            var playerPos = capi.World.Player.Entity.Pos;
+
             // Check if effect is enabled and player is in a devastated chunk
             bool inDevastatedChunk = enabled && modSystem.IsPlayerInDevastatedChunk();
 
-            // Calculate target weight
+            // Calculate target weight for ambient fog (only when inside)
             float targetWeight = inDevastatedChunk ? 1.0f : 0.0f;
 
             // Smoothly transition towards target weight
@@ -6905,7 +7358,7 @@ namespace SpreadingDevastation
             devastationAmbient.FogColor.Weight = currentWeight * fogColorWeight;
             devastationAmbient.FogDensity.Weight = currentWeight * fogDensityWeight;
             devastationAmbient.FogMin.Weight = currentWeight * fogMinWeight;
-            devastationAmbient.AmbientColor.Weight = currentWeight * fogColorWeight * 0.5f; // Ambient is more subtle
+            devastationAmbient.AmbientColor.Weight = currentWeight * fogColorWeight * 0.5f;
 
             // Register or update the ambient modifier
             if (currentWeight > 0.001f)
@@ -6924,6 +7377,69 @@ namespace SpreadingDevastation
                     isAmbientRegistered = false;
                 }
             }
+
+            // === Render fog spheres over devastated chunks ===
+            if (fogWallEnabled)
+            {
+                RenderFogCubes(playerPos);
+            }
+            else
+            {
+                // Clear fog spheres when disabled
+                capi.Render.ShaderUniforms.FogSphereQuantity = 0;
+            }
+        }
+
+        /// <summary>
+        /// Renders fog over devastated chunks using VS's built-in fog sphere system.
+        /// Places fog spheres at each nearby devastated chunk to create visible fog walls.
+        /// </summary>
+        private void RenderFogCubes(EntityPos playerPos)
+        {
+            var uniforms = capi.Render.ShaderUniforms;
+
+            // Get nearby devastated chunk positions (up to 3 for fog spheres)
+            var chunkPositions = modSystem.GetNearestDevastatedChunkPositions(3, fogWallViewDistance);
+
+            if (chunkPositions.Count == 0)
+            {
+                uniforms.FogSphereQuantity = 0;
+                return;
+            }
+
+            uniforms.FogSphereQuantity = chunkPositions.Count;
+
+            // Radius to use - covers a chunk plus some overlap
+            float sphereRadius = CHUNK_SIZE * 0.8f;
+
+            for (int i = 0; i < chunkPositions.Count; i++)
+            {
+                var chunkCenter = chunkPositions[i];
+
+                // Calculate offset from player (fog spheres use player-relative coordinates)
+                float offsetX = (float)(chunkCenter.X - playerPos.X);
+                float offsetY = (fogWallMinY + fogWallMaxY) / 2f - (float)playerPos.Y; // Center of fog height range
+                float offsetZ = (float)(chunkCenter.Z - playerPos.Z);
+
+                // Calculate distance for density falloff
+                float dist = (float)Math.Sqrt(offsetX * offsetX + offsetZ * offsetZ);
+                float distFactor = 1f - Math.Clamp(dist / fogWallViewDistance, 0f, 1f);
+
+                // Calculate effective density (average of top/bottom for sphere)
+                float avgDensity = (fogWallBottomDensity + fogWallTopDensity) / 2f;
+                float effectiveDensity = avgDensity * distFactor * 0.01f; // Scale down for sphere density
+
+                // Set fog sphere uniforms (8 floats per sphere: x, y, z, radius, density, r, g, b)
+                int baseIndex = i * 8;
+                uniforms.FogSpheres[baseIndex + 0] = offsetX;
+                uniforms.FogSpheres[baseIndex + 1] = offsetY;
+                uniforms.FogSpheres[baseIndex + 2] = offsetZ;
+                uniforms.FogSpheres[baseIndex + 3] = sphereRadius;
+                uniforms.FogSpheres[baseIndex + 4] = effectiveDensity;
+                uniforms.FogSpheres[baseIndex + 5] = fogWallColorR;
+                uniforms.FogSpheres[baseIndex + 6] = fogWallColorG;
+                uniforms.FogSpheres[baseIndex + 7] = fogWallColorB;
+            }
         }
 
         public void Dispose()
@@ -6933,6 +7449,16 @@ namespace SpreadingDevastation
                 capi.Ambient.CurrentModifiers.Remove("devastation");
                 isAmbientRegistered = false;
             }
+
+            // Clear fog spheres
+            if (capi?.Render?.ShaderUniforms != null)
+            {
+                capi.Render.ShaderUniforms.FogSphereQuantity = 0;
+            }
+
+            // Dispose shader and mesh (if they were created)
+            cubeMeshRef?.Dispose();
+            fogCubeShader?.Dispose();
         }
     }
 }
