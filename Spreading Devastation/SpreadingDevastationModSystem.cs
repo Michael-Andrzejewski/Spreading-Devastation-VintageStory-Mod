@@ -1573,6 +1573,52 @@ namespace SpreadingDevastation
         private float testSphereZ = 0f;
         private float testSphereRadius = 100f;
 
+        /// <summary>
+        /// Immediately sends the fog config to all connected players (for responsive changes).
+        /// </summary>
+        private void SendFogConfigImmediately()
+        {
+            if (sapi == null || serverNetworkChannel == null) return;
+
+            var fogPacket = new FogConfigPacket
+            {
+                Enabled = config.FogEffectEnabled,
+                ColorR = config.FogColorR,
+                ColorG = config.FogColorG,
+                ColorB = config.FogColorB,
+                Density = config.FogDensity,
+                Min = config.FogMin,
+                ColorWeight = config.FogColorWeight,
+                DensityWeight = config.FogDensityWeight,
+                MinWeight = config.FogMinWeight,
+                TransitionSpeed = config.FogTransitionSpeed,
+                TransitionZoneBlocks = config.FogTransitionZoneBlocks,
+                MinIntensityInside = config.FogMinIntensityInside,
+                MaxIntensityOutside = config.FogMaxIntensityOutside,
+                SphereEnabled = config.FogSphereEnabled,
+                SphereDensity = config.FogSphereDensity,
+                SphereRadiusPadding = config.FogSphereRadiusPadding,
+                SphereMinRadius = config.FogSphereMinRadius,
+                SphereCenterYOffset = config.FogSphereCenterYOffset,
+                SphereFadeInSeconds = config.FogSphereFadeInSeconds,
+                TestSphereActive = testSphereActive,
+                TestSphereX = testSphereX,
+                TestSphereY = testSphereY,
+                TestSphereZ = testSphereZ,
+                TestSphereRadius = testSphereRadius
+            };
+
+            foreach (IServerPlayer player in sapi.World.AllOnlinePlayers)
+            {
+                if (player?.Entity != null)
+                {
+                    serverNetworkChannel.SendPacket(fogPacket, player);
+                }
+            }
+
+            fogConfigDirty = false; // Clear dirty flag since we just sent
+        }
+
         private TextCommandResult HandleTestSphereCommand(TextCommandCallingArgs args)
         {
             string action = args.Parsers[0].GetValue() as string ?? "";
@@ -1608,7 +1654,7 @@ namespace SpreadingDevastation
                 case "clear":
                 case "off":
                     testSphereActive = false;
-                    fogConfigDirty = true;
+                    SendFogConfigImmediately(); // Instant sync for responsive feel
                     return TextCommandResult.Success("Test fog sphere removed");
 
                 case "radius":
@@ -1672,6 +1718,26 @@ namespace SpreadingDevastation
                     }
                     return TextCommandResult.Error("Invalid number for fade-in time");
 
+                case "color":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Current sphere color: R={config.FogColorR:F2} G={config.FogColorG:F2} B={config.FogColorB:F2}. Use '/dv testsphere color [r] [g] [b]' (0.0-1.0)");
+                    }
+                    var colorParts = value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    if (colorParts.Length >= 3 &&
+                        float.TryParse(colorParts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out float cr) &&
+                        float.TryParse(colorParts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float cg) &&
+                        float.TryParse(colorParts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out float cb))
+                    {
+                        config.FogColorR = Math.Clamp(cr, 0f, 1f);
+                        config.FogColorG = Math.Clamp(cg, 0f, 1f);
+                        config.FogColorB = Math.Clamp(cb, 0f, 1f);
+                        SaveConfig();
+                        fogConfigDirty = true;
+                        return TextCommandResult.Success($"Sphere color set to R={config.FogColorR:F2} G={config.FogColorG:F2} B={config.FogColorB:F2}");
+                    }
+                    return TextCommandResult.Error("Invalid color. Use '/dv testsphere color [r] [g] [b]' with values 0.0-1.0. Example: /dv testsphere color 0.4 0.3 0.2");
+
                 case "info":
                 case "status":
                     var lines = new List<string>
@@ -1681,6 +1747,7 @@ namespace SpreadingDevastation
                         $"Position: ({testSphereX:F0}, {testSphereY:F0}, {testSphereZ:F0})",
                         $"Radius: {testSphereRadius:F0}",
                         $"Density: {config.FogSphereDensity:F4}",
+                        $"Color: R={config.FogColorR:F2} G={config.FogColorG:F2} B={config.FogColorB:F2}",
                         $"Fade-in time: {config.FogSphereFadeInSeconds:F1}s",
                         "",
                         "Commands:",
@@ -1689,6 +1756,7 @@ namespace SpreadingDevastation
                         "  /dv testsphere move - Move to looked-at block",
                         "  /dv testsphere radius [n] - Set radius",
                         "  /dv testsphere density [n] - Set density (try 0.5-1.0)",
+                        "  /dv testsphere color [r] [g] [b] - Set color (0-1)",
                         "  /dv testsphere fadein [sec] - Set fade-in time (0=instant)",
                         "  /dv testsphere off - Remove test sphere"
                     };
@@ -7610,43 +7678,79 @@ namespace SpreadingDevastation
         private double lastDebugLogTime = 0;
         private const double DEBUG_LOG_INTERVAL_MS = 5000; // Log every 5 seconds
 
+        // Effect distance for fog falloff (matches VS DevastationEffects)
+        private const float EFFECT_DIST = 5000f;
+
         /// <summary>
         /// Updates the game's fog sphere shader uniforms.
-        /// Test sphere takes priority over calculated devastation sphere.
+        /// Test sphere implementation matches VS's DevastationEffects exactly.
         /// </summary>
         private void UpdateFogSphereUniforms()
         {
-            var playerPos = capi.World.Player.Entity.Pos;
+            var playerPos = capi.World.Player.Entity.Pos.XYZ;
             var uniforms = capi.Render.ShaderUniforms;
 
-            // Test sphere takes priority (for debugging)
+            // Test sphere takes priority - uses VS DevastationEffects logic
             if (testSphereActive)
             {
-                // The fog sphere position is relative to the player
-                float offsetX = testSphereX - (float)playerPos.X;
-                float offsetY = testSphereY - (float)playerPos.Y;
-                float offsetZ = testSphereZ - (float)playerPos.Z;
+                // Calculate offset from player to sphere center (like VS's offsetToTowerCenter)
+                Vec3d sphereCenter = new Vec3d(testSphereX, testSphereY, testSphereZ);
+                Vec3d offsetToCenter = sphereCenter - playerPos;
+                double presentDist = offsetToCenter.Length();
+
+                // If too far away, disable fog sphere
+                if (presentDist > EFFECT_DIST)
+                {
+                    uniforms.FogSphereQuantity = 0;
+                    devastationAmbient.FogDensity.Weight = 0;
+                    devastationAmbient.FogColor.Weight = 0;
+                    return;
+                }
+
+                // Calculate ambient modifier weights based on distance (matches VS exactly)
+                // Weight increases as you get closer, starting from EffectRadius/2
+                float fogColorWeight = (float)GameMath.Clamp((1 - (presentDist - testSphereRadius / 2) / testSphereRadius) * 2f, 0, 1f);
+                float fogDensityWeight = (float)GameMath.Clamp((1 - (presentDist - testSphereRadius / 2) / testSphereRadius), 0, 1f);
+
+                devastationAmbient.FogColor.Weight = fogColorWeight;
+                devastationAmbient.FogDensity.Value = 0.05f;
+                devastationAmbient.FogDensity.Weight = fogDensityWeight;
+
+                // Calculate distance factor for fog sphere density
+                // f goes from 1 (at center) to 0 (at EFFECT_DIST)
+                float f = (float)(1 - presentDist / EFFECT_DIST);
+                f = GameMath.Clamp(1.5f * (f - 0.25f), 0, 1);
+
+                // Blend fog color with ambient fog based on distance (matches VS)
+                var fogColor = capi.Ambient.BlendedFogColor;
+                var fogDense = capi.Ambient.BlendedFogDensity;
+                float w = fogColorWeight;
+                float l = GameMath.Clamp(fogDense * 100 + (1 - w) - 1, 0, 1);
+
+                // Get scene brightness for color adjustment
+                var b = capi.Ambient.BlendedFogBrightness * capi.Ambient.BlendedSceneBrightness;
+
+                // Set fog sphere uniforms (adapted from VS DevastationEffects)
+                // Note: VS uses Y-300 for its 5000-radius tower. For smaller spheres, we scale proportionally
+                float yOffset = -testSphereRadius * 0.06f; // Scaled Y offset (300/5000 = 0.06)
 
                 uniforms.FogSphereQuantity = 1;
-                uniforms.FogSpheres[0] = offsetX;           // X offset from player
-                uniforms.FogSpheres[1] = offsetY;           // Y offset from player
-                uniforms.FogSpheres[2] = offsetZ;           // Z offset from player
-                uniforms.FogSpheres[3] = testSphereRadius;  // Radius
-                uniforms.FogSpheres[4] = currentSphereDensity; // Faded density
-                uniforms.FogSpheres[5] = fogColorR;         // R
-                uniforms.FogSpheres[6] = fogColorG;         // G
-                uniforms.FogSpheres[7] = fogColorB;         // B
+                uniforms.FogSpheres[0] = (float)offsetToCenter.X;
+                uniforms.FogSpheres[1] = (float)offsetToCenter.Y + yOffset;
+                uniforms.FogSpheres[2] = (float)offsetToCenter.Z;
+                uniforms.FogSpheres[3] = testSphereRadius * 1.6f; // Radius multiplier like VS
+                uniforms.FogSpheres[4] = 1f / 800f * f; // Density calculation like VS
+                uniforms.FogSpheres[5] = GameMath.Lerp(fogColorR * b, fogColor.R, l); // Blend with ambient
+                uniforms.FogSpheres[6] = GameMath.Lerp(fogColorG * b, fogColor.G, l);
+                uniforms.FogSpheres[7] = GameMath.Lerp(fogColorB * b, fogColor.B, l);
 
                 // Debug logging (throttled)
                 double now = capi.World.ElapsedMilliseconds;
                 if (now - lastDebugLogTime > DEBUG_LOG_INTERVAL_MS)
                 {
                     lastDebugLogTime = now;
-                    float dist = (float)Math.Sqrt(offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ);
-                    float fadePercent = sphereDensity > 0 ? (currentSphereDensity / sphereDensity * 100f) : 0f;
-
-                    capi.Logger.Notification($"[FogSphere DEBUG] Test sphere: offset=({offsetX:F1}, {offsetY:F1}, {offsetZ:F1}), dist={dist:F1}, radius={testSphereRadius:F1}");
-                    capi.Logger.Notification($"[FogSphere DEBUG] Density: {currentSphereDensity:F4} / {sphereDensity:F4} ({fadePercent:F0}% faded in), fadeTime={sphereFadeInSeconds:F1}s");
+                    capi.Logger.Notification($"[FogSphere DEBUG] VS-style sphere: dist={presentDist:F1}, radius={testSphereRadius:F1}, f={f:F3}");
+                    capi.Logger.Notification($"[FogSphere DEBUG] Weights: fogColor={fogColorWeight:F2}, fogDensity={fogDensityWeight:F2}, blend={l:F2}");
                 }
                 return;
             }
