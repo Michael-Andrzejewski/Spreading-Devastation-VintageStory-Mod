@@ -10,8 +10,7 @@
       "WebFetch(domain:github.com)",
       "Bash(dir \"C:\\Users\\maaro\\AppData\\Roaming\\VintagestoryData\\Logs\")",
       "WebFetch(domain:gitlab.com)",
-      "WebFetch(domain:raw.githubusercontent.com)",
-      "Bash(dir:*)"
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }
