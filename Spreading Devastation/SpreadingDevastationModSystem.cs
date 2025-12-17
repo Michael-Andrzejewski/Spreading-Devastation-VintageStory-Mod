@@ -14,6 +14,7 @@ using Vintagestory.API.Server;
 using Vintagestory.API.Client;
 using Vintagestory.API.Util;
 using Vintagestory.GameContent;
+using SpreadingDevastation.Rendering;
 
 namespace SpreadingDevastation
 {
@@ -585,6 +586,21 @@ namespace SpreadingDevastation
             public float TransitionSpeed = 0.5f;
         }
 
+        /// <summary>
+        /// Network packet sent from server to client containing cloud positions.
+        /// Used for rendering static clouds at specific world positions.
+        /// </summary>
+        [ProtoContract]
+        public class CloudSyncPacket
+        {
+            [ProtoMember(1)]
+            public List<double> PosX = new List<double>();
+            [ProtoMember(2)]
+            public List<double> PosY = new List<double>();
+            [ProtoMember(3)]
+            public List<double> PosZ = new List<double>();
+        }
+
         private ICoreServerAPI sapi;
         private List<RegrowingBlocks> regrowingBlocks;
         private List<DevastationSource> devastationSources;
@@ -629,7 +645,11 @@ namespace SpreadingDevastation
         private IClientNetworkChannel clientNetworkChannel;
         private HashSet<long> clientDevastatedChunks = new HashSet<long>(); // Chunk keys received from server
         private DevastationFogRenderer fogRenderer;
+        private DevastationCloudRenderer cloudRenderer;
         private FogConfigPacket clientFogConfig = new FogConfigPacket(); // Fog config received from server
+
+        // Static cloud tracking (server-side stores positions, syncs to clients)
+        private List<Vec3d> staticCloudPositions = new List<Vec3d>();
 
         // Animal insanity tracking
         private double lastInsanityCheckTime = 0; // Track last time we checked for animals to drive insane
@@ -646,7 +666,8 @@ namespace SpreadingDevastation
             api.Network
                 .RegisterChannel(NETWORK_CHANNEL_NAME)
                 .RegisterMessageType(typeof(DevastatedChunkSyncPacket))
-                .RegisterMessageType(typeof(FogConfigPacket));
+                .RegisterMessageType(typeof(FogConfigPacket))
+                .RegisterMessageType(typeof(CloudSyncPacket));
         }
 
         public override void StartClientSide(ICoreClientAPI api)
@@ -656,11 +677,17 @@ namespace SpreadingDevastation
             // Get the network channel and set up message handlers
             clientNetworkChannel = api.Network.GetChannel(NETWORK_CHANNEL_NAME)
                 .SetMessageHandler<DevastatedChunkSyncPacket>(OnDevastatedChunkSync)
-                .SetMessageHandler<FogConfigPacket>(OnFogConfigSync);
+                .SetMessageHandler<FogConfigPacket>(OnFogConfigSync)
+                .SetMessageHandler<CloudSyncPacket>(OnCloudSync);
 
             // Create and register the fog renderer
             fogRenderer = new DevastationFogRenderer(api, this);
             api.Event.RegisterRenderer(fogRenderer, EnumRenderStage.Before, "devastationfog");
+
+            // Create and register the cloud renderer (uses OIT for transparency)
+            cloudRenderer = new DevastationCloudRenderer(api);
+            cloudRenderer.Initialize();
+            api.Event.RegisterRenderer(cloudRenderer, EnumRenderStage.OIT, "devastationclouds");
 
             // Hook into the client-side temporal stability system after player enters world
             // This makes the gear spin counter-clockwise in devastated chunks
@@ -678,7 +705,7 @@ namespace SpreadingDevastation
                 }
             };
 
-            api.Logger.Notification("SpreadingDevastation: Client-side fog renderer initialized");
+            api.Logger.Notification("SpreadingDevastation: Client-side fog and cloud renderers initialized");
         }
 
         /// <summary>
@@ -688,6 +715,25 @@ namespace SpreadingDevastation
         {
             clientFogConfig = packet;
             fogRenderer?.UpdateConfig(packet);
+        }
+
+        /// <summary>
+        /// Called when the client receives cloud positions from the server.
+        /// </summary>
+        private void OnCloudSync(CloudSyncPacket packet)
+        {
+            if (cloudRenderer == null) return;
+
+            cloudRenderer.ClearClouds();
+
+            if (packet.PosX != null && packet.PosY != null && packet.PosZ != null)
+            {
+                int count = Math.Min(packet.PosX.Count, Math.Min(packet.PosY.Count, packet.PosZ.Count));
+                for (int i = 0; i < count; i++)
+                {
+                    cloudRenderer.AddCloud(new Vec3d(packet.PosX[i], packet.PosY[i], packet.PosZ[i]));
+                }
+            }
         }
 
         /// <summary>
@@ -1195,6 +1241,11 @@ namespace SpreadingDevastation
                     .WithArgs(api.ChatCommands.Parsers.OptionalWord("setting"),
                               api.ChatCommands.Parsers.OptionalAll("value"))
                     .HandleWith(HandleFogCommand)
+                .EndSubCommand()
+                .BeginSubCommand("cloudfront")
+                    .WithDescription("Spawn a static rust-colored cloud at looked-at block, or manage clouds")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("action"))
+                    .HandleWith(HandleCloudfrontCommand)
                 .EndSubCommand()
                 .BeginSubCommand("reset")
                     .WithDescription("Reset all config values to defaults")
@@ -1737,6 +1788,93 @@ namespace SpreadingDevastation
                 default:
                     return TextCommandResult.Error($"Unknown fog setting: {setting}. Use: on, off, color, density, min, weight, transition, reset, or info");
             }
+        }
+
+        private TextCommandResult HandleCloudfrontCommand(TextCommandCallingArgs args)
+        {
+            string action = (args.Parsers[0].GetValue() as string ?? "").ToLowerInvariant();
+
+            switch (action)
+            {
+                case "":
+                case "add":
+                case "spawn":
+                    // Spawn a cloud at the looked-at block
+                    var player = args.Caller.Player as IServerPlayer;
+                    if (player == null) return TextCommandResult.Error("Player not found");
+
+                    var blockSel = player.CurrentBlockSelection;
+                    if (blockSel == null) return TextCommandResult.Error("Not looking at a block. Look at a block and try again.");
+
+                    // Add cloud position (slightly above the block)
+                    var cloudPos = new Vec3d(
+                        blockSel.Position.X + 0.5,
+                        blockSel.Position.Y + 1.0,
+                        blockSel.Position.Z + 0.5
+                    );
+
+                    staticCloudPositions.Add(cloudPos);
+                    BroadcastCloudPositions();
+
+                    return TextCommandResult.Success($"Cloud spawned at {cloudPos.X:F1}, {cloudPos.Y:F1}, {cloudPos.Z:F1}. Total clouds: {staticCloudPositions.Count}");
+
+                case "clear":
+                case "remove":
+                case "removeall":
+                    int count = staticCloudPositions.Count;
+                    staticCloudPositions.Clear();
+                    BroadcastCloudPositions();
+                    return TextCommandResult.Success($"Removed all {count} clouds.");
+
+                case "list":
+                case "count":
+                    if (staticCloudPositions.Count == 0)
+                    {
+                        return TextCommandResult.Success("No clouds spawned.");
+                    }
+                    var lines = new List<string> { $"=== Static Clouds ({staticCloudPositions.Count}) ===" };
+                    for (int i = 0; i < Math.Min(staticCloudPositions.Count, 10); i++)
+                    {
+                        var pos = staticCloudPositions[i];
+                        lines.Add($"  {i + 1}. ({pos.X:F1}, {pos.Y:F1}, {pos.Z:F1})");
+                    }
+                    if (staticCloudPositions.Count > 10)
+                    {
+                        lines.Add($"  ... and {staticCloudPositions.Count - 10} more");
+                    }
+                    return SendChatLines(args, lines, "Cloud list sent to chat");
+
+                case "help":
+                case "?":
+                    return SendChatLines(args, new[]
+                    {
+                        "=== Cloudfront Commands ===",
+                        "/dv cloudfront - Spawn cloud at looked-at block",
+                        "/dv cloudfront clear - Remove all clouds",
+                        "/dv cloudfront list - List all cloud positions"
+                    }, "Cloudfront help sent to chat");
+
+                default:
+                    return TextCommandResult.Error($"Unknown action: {action}. Use: spawn, clear, list, or help");
+            }
+        }
+
+        /// <summary>
+        /// Broadcasts current cloud positions to all connected clients.
+        /// </summary>
+        private void BroadcastCloudPositions()
+        {
+            if (sapi == null || serverNetworkChannel == null) return;
+
+            var packet = new CloudSyncPacket();
+            foreach (var pos in staticCloudPositions)
+            {
+                packet.PosX.Add(pos.X);
+                packet.PosY.Add(pos.Y);
+                packet.PosZ.Add(pos.Z);
+            }
+
+            serverNetworkChannel.BroadcastPacket(packet);
         }
 
         private TextCommandResult HandleResetCommand(TextCommandCallingArgs args)
@@ -6935,4 +7073,5 @@ namespace SpreadingDevastation
             }
         }
     }
+
 }

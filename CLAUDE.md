@@ -103,3 +103,20 @@ When commands need multiple space-separated values, use `OptionalAll` instead of
 Use `OptionalAll` when the command accepts:
 - Multiple numeric values (e.g., `/dv fog color 0.5 0.3 0.2`)
 - Subcommands with their own arguments (e.g., `/dv chunk spawn interval 0.5 1.0`)
+
+## Error Handling
+
+**IMPORTANT**: When something doesn't work as expected in-game, ALWAYS check the Vintage Story logs before making changes:
+
+```bash
+# Check recent client logs for errors
+tail -100 'C:\Users\maaro\AppData\Roaming\VintagestoryData\Logs\client-main.log'
+
+# Search for specific errors
+grep -i "error\|warning\|devastation" 'C:\Users\maaro\AppData\Roaming\VintagestoryData\Logs\client-main.log'
+```
+
+Log locations:
+- Client logs: `%APPDATA%\VintagestoryData\Logs\client-main.log`
+- Server logs: `%APPDATA%\VintagestoryData\Logs\server-main.log`
+- Chat logs: `%APPDATA%\VintagestoryData\Logs\client-chat.log`
