@@ -18,6 +18,40 @@ dotnet build
 
 Note: The .csproj references Vintage Story DLLs at hardcoded paths (`C:\Users\maaro\AppData\Roaming\Vintagestory\`). You may need to update these paths or set up proper environment variables.
 
+## Troubleshooting Build Issues
+
+### After Git Revert or When Builds Seem Stale
+
+The incremental build system may not detect changes after `git revert` (file timestamps unchanged). If the build says "succeeded" but the mod isn't updated:
+
+```bash
+# Force a full rebuild
+dotnet build --no-incremental
+```
+
+Always verify the deployed zip has a current timestamp:
+```bash
+ls -la "C:/Users/maaro/AppData/Roaming/VintagestoryData/Mods/SpreadingDevastation.zip"
+```
+
+### When Reverting to an Older Version
+
+The mod config and cache may retain settings from newer versions, causing issues:
+
+1. **Backup/delete the config file:**
+   - Location: `C:\Users\maaro\AppData\Roaming\VintagestoryData\ModConfig\SpreadingDevastationConfig.json`
+   - The mod will recreate it with defaults on next load
+
+2. **Clear the mod cache (if issues persist):**
+   - Location: `C:\Users\maaro\AppData\Roaming\VintagestoryData\Cache\unpack\`
+
+### Quick Checklist After Reverting
+
+- [ ] Run `dotnet build --no-incremental`
+- [ ] Verify deployed zip timestamp matches current time
+- [ ] Backup/delete mod config file
+- [ ] Clear cache folder if issues persist
+
 ## Architecture
 
 This is a **Vintage Story mod** (single-file C# mod) that makes temporal rifts spread landscape devastation. The entire mod is contained in one file: `Spreading Devastation/SpreadingDevastationModSystem.cs`.
