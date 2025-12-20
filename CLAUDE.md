@@ -111,14 +111,21 @@ Key config fields in `SpreadingDevastationConfig`:
    - WRONG: `"Usage: /dv speed <multiplier>"`
    - RIGHT: `"Usage: /dv speed [multiplier]"`
 
-2. **Avoid forward slashes after words** (looks like closing HTML tags):
+2. **Avoid forward slashes after ANY letters** (looks like closing HTML tags):
    - WRONG: `"Rate: 10 blocks/sec"` - interpreted as `</blocks>` closing tag
-   - RIGHT: `"Rate: 10 blk/s"` or `"Rate: 10 blocks per sec"`
+   - WRONG: `"Rate: 10 blk/s"` - still interpreted as `</blk>` closing tag
+   - RIGHT: `"Rate: 10 blocks per sec"` or `"Rate: 10 blocks (per sec)"`
 
 3. **Common patterns to avoid**:
    - `<value>`, `<number>`, `<name>` → use `[value]`, `[number]`, `[name]`
-   - `blocks/sec`, `items/min` → use `blk/s`, `items per min`
-   - Any `<word>` pattern in strings sent to chat
+   - `blocks/sec`, `blk/s`, `items/min` → use `blocks per sec`, `items per min`
+   - `on/off`, `fog/sky` → use `[on|off]`, `fog and sky`
+   - `->` arrows → use `to` (the `>` character can break VTML parsing)
+   - Any `word/anything` pattern in strings sent to chat (the `/` after letters looks like a closing tag)
+
+4. **For multi-line output, send each line as a separate message**:
+   - WRONG: `string.Join("\n", lines)` or `string.Join("<br>", lines)` - can break VTML parsing
+   - RIGHT: `foreach (var line in lines) { player.SendMessage(..., line, ...); }` - each line is a separate message
 
 ### Command Argument Parsers
 
