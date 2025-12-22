@@ -327,10 +327,6 @@ namespace SpreadingDevastation
         {
             if (serverNetworkChannel == null) return;
 
-            // Early exit if nothing to sync
-            bool hasChunks = devastatedChunks != null && devastatedChunks.Count > 0;
-            if (!fogConfigDirty && !hasChunks) return;
-
             var players = sapi.World.AllOnlinePlayers;
             if (players == null || players.Length == 0) return;
 
@@ -356,6 +352,8 @@ namespace SpreadingDevastation
                 fogConfigDirty = false;
             }
 
+            bool hasChunks = devastatedChunks != null && devastatedChunks.Count > 0;
+
             for (int i = 0; i < players.Length; i++)
             {
                 var player = players[i] as IServerPlayer;
@@ -367,35 +365,32 @@ namespace SpreadingDevastation
                     serverNetworkChannel.SendPacket(fogPacket, player);
                 }
 
-                // Send chunk data if there are any devastated chunks
-                if (!hasChunks) continue;
-
                 var playerPos = player.Entity.Pos;
                 int playerChunkX = (int)playerPos.X / CHUNK_SIZE;
                 int playerChunkZ = (int)playerPos.Z / CHUNK_SIZE;
 
                 var packet = new DevastatedChunkSyncPacket();
 
-                foreach (var kvp in devastatedChunks)
+                if (hasChunks)
                 {
-                    var chunk = kvp.Value;
-                    // Only sync chunks within range of player
-                    int dx = chunk.ChunkX - playerChunkX;
-                    int dz = chunk.ChunkZ - playerChunkZ;
-
-                    if (dx >= -SYNC_RADIUS_CHUNKS && dx <= SYNC_RADIUS_CHUNKS &&
-                        dz >= -SYNC_RADIUS_CHUNKS && dz <= SYNC_RADIUS_CHUNKS)
+                    foreach (var kvp in devastatedChunks)
                     {
-                        packet.ChunkXs.Add(chunk.ChunkX);
-                        packet.ChunkZs.Add(chunk.ChunkZ);
+                        var chunk = kvp.Value;
+                        // Only sync chunks within range of player
+                        int dx = chunk.ChunkX - playerChunkX;
+                        int dz = chunk.ChunkZ - playerChunkZ;
+
+                        if (dx >= -SYNC_RADIUS_CHUNKS && dx <= SYNC_RADIUS_CHUNKS &&
+                            dz >= -SYNC_RADIUS_CHUNKS && dz <= SYNC_RADIUS_CHUNKS)
+                        {
+                            packet.ChunkXs.Add(chunk.ChunkX);
+                            packet.ChunkZs.Add(chunk.ChunkZ);
+                        }
                     }
                 }
 
-                // Only send if there are nearby chunks
-                if (packet.ChunkXs.Count > 0)
-                {
-                    serverNetworkChannel.SendPacket(packet, player);
-                }
+                // Always send chunk packet so client can clear chunks when area is cleansed
+                serverNetworkChannel.SendPacket(packet, player);
             }
         }
 
