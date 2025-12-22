@@ -569,11 +569,11 @@ namespace SpreadingDevastation
                     }
                     if (int.TryParse(value, out int maxParticles))
                     {
-                        config.MaxParticlesPerSecond = Math.Clamp(maxParticles, 1, 1000);
+                        config.MaxParticlesPerSecond = Math.Clamp(maxParticles, 1, 1000000);
                         SaveConfig();
                         return TextCommandResult.Success($"Max particles per second set to {config.MaxParticlesPerSecond}");
                     }
-                    return TextCommandResult.Error("Invalid number. Usage: /dv particle limit [count] (1-1000)");
+                    return TextCommandResult.Error("Invalid number. Usage: /dv particle limit [count] (1-1000000)");
 
                 case "proximity":
                     if (string.IsNullOrWhiteSpace(value))

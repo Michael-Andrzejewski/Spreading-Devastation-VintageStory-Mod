@@ -1911,8 +1911,8 @@ namespace SpreadingDevastation
         }
 
         /// <summary>
-        /// Checks if a particle can be spawned based on rate limiting.
-        /// Resets the counter each real-time second. When at the limit, only allows particles near players.
+        /// Checks if a particle can be spawned based on rate limiting and player proximity.
+        /// Nearby particles (within proximity) always spawn. Far particles only spawn if under the limit.
         /// </summary>
         private bool CanSpawnParticle(BlockPos pos)
         {
@@ -1929,14 +1929,9 @@ namespace SpreadingDevastation
                     particlesSpawnedThisSecond = 0;
                 }
 
-                // If under the limit, allow the particle
-                if (particlesSpawnedThisSecond < config.MaxParticlesPerSecond)
-                {
-                    return true;
-                }
-
-                // At limit - only allow if near a player
+                // Check if near any player
                 int proximityBlocks = config.ParticlePlayerProximityChunks * CHUNK_SIZE;
+                bool isNearPlayer = false;
 
                 foreach (IServerPlayer player in sapi.World.AllOnlinePlayers.Cast<IServerPlayer>())
                 {
@@ -1949,11 +1944,19 @@ namespace SpreadingDevastation
 
                     if (distSq <= proximityBlocks * proximityBlocks)
                     {
-                        return true;
+                        isNearPlayer = true;
+                        break;
                     }
                 }
 
-                return false;
+                // Nearby particles always spawn
+                if (isNearPlayer)
+                {
+                    return true;
+                }
+
+                // Far particles only spawn if under the limit
+                return particlesSpawnedThisSecond < config.MaxParticlesPerSecond;
             }
             catch
             {
