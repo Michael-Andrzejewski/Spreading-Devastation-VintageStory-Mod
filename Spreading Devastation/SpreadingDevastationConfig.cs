@@ -291,5 +291,43 @@ namespace SpreadingDevastation
         /// Volume of block conversion sounds (0.0-1.0, default: 0.5).
         /// </summary>
         public float ConversionSoundVolume { get; set; } = 0.5f;
+
+        // === Particle Effect Settings ===
+
+        /// <summary>
+        /// Whether to show smoke particles when blocks are converted to devastated forms (default: true).
+        /// </summary>
+        public bool DevastationParticlesEnabled { get; set; } = true;
+
+        /// <summary>
+        /// Whether to show blue particles when blocks are healed/cleaned (default: true).
+        /// </summary>
+        public bool HealingParticlesEnabled { get; set; } = true;
+
+        /// <summary>
+        /// Whether to show smoke particles at protection boundaries where devastation meets rift ward protection (default: true).
+        /// </summary>
+        public bool ProtectionEdgeParticlesEnabled { get; set; } = true;
+
+        /// <summary>
+        /// Number of particles to spawn per devastated block conversion (default: 5).
+        /// </summary>
+        public int DevastationParticleCount { get; set; } = 5;
+
+        /// <summary>
+        /// Number of particles to spawn per healed block (default: 8).
+        /// </summary>
+        public int HealingParticleCount { get; set; } = 8;
+
+        /// <summary>
+        /// Maximum number of protection edge blocks to emit particles from per tick (default: 10).
+        /// Limits CPU usage for edge particle effects.
+        /// </summary>
+        public int MaxEdgeParticlesPerTick { get; set; } = 10;
+
+        /// <summary>
+        /// Interval in seconds between protection edge particle emissions (default: 0.5).
+        /// </summary>
+        public double EdgeParticleIntervalSeconds { get; set; } = 0.5;
     }
 }

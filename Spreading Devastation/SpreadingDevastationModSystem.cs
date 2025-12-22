@@ -78,6 +78,16 @@ namespace SpreadingDevastation
         private string[] insanityExcludePatterns = null; // Cached parsed patterns from config
         private const string INSANITY_ATTRIBUTE = "devastationInsane"; // WatchedAttribute key for insane state
 
+        // Particle effect tracking
+        private HashSet<BlockPos> protectionEdgeBlocks = new HashSet<BlockPos>(); // Blocks at protection boundaries
+        private double lastEdgeParticleTime = 0; // Track last time we emitted edge particles
+
+        // Static particle properties for performance (reused instead of allocating new objects)
+        private static SimpleParticleProperties devastationSmokeParticles;
+        private static SimpleParticleProperties healingParticles;
+        private static SimpleParticleProperties protectionEdgeSmokeParticles;
+        private static bool particlesInitialized = false;
+
         public override void Start(ICoreAPI api)
         {
             base.Start(api);
@@ -217,6 +227,9 @@ namespace SpreadingDevastation
 
             // Load config
             LoadConfig();
+
+            // Initialize particle properties for visual effects
+            InitializeParticleProperties();
 
             // Get the server network channel for syncing devastated chunks to clients
             serverNetworkChannel = api.Network.GetChannel(NETWORK_CHANNEL_NAME);
@@ -772,6 +785,9 @@ namespace SpreadingDevastation
                     // Play conversion sound for the original block type
                     PlayBlockConversionSound(block, targetPos);
 
+                    // Spawn smoke particles for devastation effect
+                    SpawnDevastationParticles(targetPos);
+
                     // Track this block for regeneration
                     regrowingBlocks.Add(new RegrowingBlocks
                     {
@@ -857,6 +873,9 @@ namespace SpreadingDevastation
                             sapi.World.BlockAccessor.SetBlock(newBlock.Id, targetPos);
                         }
                     }
+
+                    // Spawn healing particles
+                    SpawnHealingParticles(targetPos);
 
                     // Note: We don't remove from regrowingBlocks here to avoid O(n) overhead
                     // Healed blocks will simply be skipped when regeneration runs
@@ -1662,6 +1681,212 @@ namespace SpreadingDevastation
             return ColorUtil.ToRgba(255, 80, 160, 255); // blue
         }
 
+        #region Particle Effects
+
+        /// <summary>
+        /// Initializes static particle properties for reuse. Call once during startup.
+        /// </summary>
+        private void InitializeParticleProperties()
+        {
+            if (particlesInitialized) return;
+
+            // Devastation smoke: dark gray/purple wispy smoke rising from converted blocks
+            devastationSmokeParticles = new SimpleParticleProperties
+            {
+                MinQuantity = 3,
+                AddQuantity = 5,
+                Color = ColorUtil.ToRgba(180, 60, 40, 50), // Dark purple-gray smoke
+                MinPos = new Vec3d(),
+                AddPos = new Vec3d(0.8, 0.3, 0.8),
+                MinVelocity = new Vec3f(-0.1f, 0.15f, -0.1f),
+                AddVelocity = new Vec3f(0.2f, 0.2f, 0.2f),
+                LifeLength = 1.2f,
+                GravityEffect = -0.02f, // Slight upward drift
+                MinSize = 0.15f,
+                MaxSize = 0.4f,
+                ShouldDieInLiquid = true,
+                ParticleModel = EnumParticleModel.Quad,
+                OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, -180)
+            };
+
+            // Healing particles: bright blue sparkles
+            healingParticles = new SimpleParticleProperties
+            {
+                MinQuantity = 4,
+                AddQuantity = 6,
+                Color = ColorUtil.ToRgba(255, 100, 180, 255), // Bright blue
+                MinPos = new Vec3d(),
+                AddPos = new Vec3d(0.8, 0.5, 0.8),
+                MinVelocity = new Vec3f(-0.15f, 0.1f, -0.15f),
+                AddVelocity = new Vec3f(0.3f, 0.25f, 0.3f),
+                LifeLength = 0.8f,
+                GravityEffect = -0.05f, // Float upward
+                MinSize = 0.08f,
+                MaxSize = 0.18f,
+                ShouldDieInLiquid = false,
+                ParticleModel = EnumParticleModel.Quad,
+                OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, -255)
+            };
+
+            // Protection edge smoke: darker, more ominous smoke at boundaries
+            protectionEdgeSmokeParticles = new SimpleParticleProperties
+            {
+                MinQuantity = 2,
+                AddQuantity = 3,
+                Color = ColorUtil.ToRgba(150, 40, 30, 40), // Very dark smoke
+                MinPos = new Vec3d(),
+                AddPos = new Vec3d(0.6, 0.2, 0.6),
+                MinVelocity = new Vec3f(-0.05f, 0.08f, -0.05f),
+                AddVelocity = new Vec3f(0.1f, 0.1f, 0.1f),
+                LifeLength = 1.5f,
+                GravityEffect = -0.015f, // Slow upward drift
+                MinSize = 0.2f,
+                MaxSize = 0.5f,
+                ShouldDieInLiquid = true,
+                ParticleModel = EnumParticleModel.Quad,
+                OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, -150)
+            };
+
+            particlesInitialized = true;
+        }
+
+        /// <summary>
+        /// Spawns smoke particles at a block position when it is converted to devastated form.
+        /// </summary>
+        private void SpawnDevastationParticles(BlockPos pos)
+        {
+            if (sapi == null || config == null || !config.DevastationParticlesEnabled) return;
+            if (!particlesInitialized) InitializeParticleProperties();
+
+            // Set position for this spawn (center of block)
+            devastationSmokeParticles.MinPos.Set(pos.X + 0.1, pos.Y + 0.1, pos.Z + 0.1);
+            devastationSmokeParticles.MinQuantity = Math.Max(1, config.DevastationParticleCount - 2);
+            devastationSmokeParticles.AddQuantity = 4;
+
+            sapi.World.SpawnParticles(devastationSmokeParticles);
+        }
+
+        /// <summary>
+        /// Spawns blue healing particles at a block position when it is cleansed/healed.
+        /// </summary>
+        private void SpawnHealingParticles(BlockPos pos)
+        {
+            if (sapi == null || config == null || !config.HealingParticlesEnabled) return;
+            if (!particlesInitialized) InitializeParticleProperties();
+
+            // Set position for this spawn (center of block)
+            healingParticles.MinPos.Set(pos.X + 0.1, pos.Y + 0.1, pos.Z + 0.1);
+            healingParticles.MinQuantity = Math.Max(1, config.HealingParticleCount - 4);
+            healingParticles.AddQuantity = 6;
+
+            sapi.World.SpawnParticles(healingParticles);
+        }
+
+        /// <summary>
+        /// Spawns smoke particles at protection boundary blocks (devastated blocks next to protected area).
+        /// </summary>
+        private void SpawnProtectionEdgeParticles(BlockPos pos)
+        {
+            if (sapi == null || config == null || !config.ProtectionEdgeParticlesEnabled) return;
+            if (!particlesInitialized) InitializeParticleProperties();
+
+            // Set position for this spawn (center of block)
+            protectionEdgeSmokeParticles.MinPos.Set(pos.X + 0.2, pos.Y + 0.1, pos.Z + 0.2);
+
+            sapi.World.SpawnParticles(protectionEdgeSmokeParticles);
+        }
+
+        /// <summary>
+        /// Marks a block as being at a protection boundary (devastated but adjacent to protected area).
+        /// </summary>
+        private void MarkProtectionEdgeBlock(BlockPos pos)
+        {
+            if (config == null || !config.ProtectionEdgeParticlesEnabled) return;
+
+            // Use a copy since BlockPos can be reused
+            protectionEdgeBlocks.Add(pos.Copy());
+
+            // Limit the set size for memory efficiency
+            if (protectionEdgeBlocks.Count > 500)
+            {
+                // Remove oldest entries (arbitrary selection since HashSet has no order)
+                var toRemove = protectionEdgeBlocks.Take(100).ToList();
+                foreach (var block in toRemove)
+                {
+                    protectionEdgeBlocks.Remove(block);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Removes a block from protection edge tracking (called when block is healed or no longer at edge).
+        /// </summary>
+        private void UnmarkProtectionEdgeBlock(BlockPos pos)
+        {
+            protectionEdgeBlocks.Remove(pos);
+        }
+
+        /// <summary>
+        /// Emits smoke particles from protection edge blocks periodically.
+        /// Called from the main tick loop.
+        /// </summary>
+        private void ProcessProtectionEdgeParticles(double currentTime)
+        {
+            if (sapi == null || config == null || !config.ProtectionEdgeParticlesEnabled) return;
+            if (protectionEdgeBlocks.Count == 0) return;
+
+            // Check interval
+            double intervalHours = config.EdgeParticleIntervalSeconds / 3600.0;
+            if (currentTime - lastEdgeParticleTime < intervalHours) return;
+            lastEdgeParticleTime = currentTime;
+
+            // Spawn particles on a subset of edge blocks
+            int count = 0;
+            var blocksToRemove = new List<BlockPos>();
+
+            foreach (var pos in protectionEdgeBlocks)
+            {
+                if (count >= config.MaxEdgeParticlesPerTick) break;
+
+                // Verify the block is still valid (still devastated and still at edge)
+                Block block = sapi.World.BlockAccessor.GetBlock(pos);
+                if (block == null || block.Id == 0 || !IsAlreadyDevastated(block))
+                {
+                    blocksToRemove.Add(pos);
+                    continue;
+                }
+
+                // Check if still at protection edge (has protected neighbor)
+                bool stillAtEdge = false;
+                foreach (var offset in CardinalOffsets)
+                {
+                    BlockPos neighborPos = new BlockPos(pos.X + offset.X, pos.Y + offset.Y, pos.Z + offset.Z);
+                    if (IsBlockProtectedByRiftWard(neighborPos))
+                    {
+                        stillAtEdge = true;
+                        break;
+                    }
+                }
+
+                if (!stillAtEdge)
+                {
+                    blocksToRemove.Add(pos);
+                    continue;
+                }
+
+                SpawnProtectionEdgeParticles(pos);
+                count++;
+            }
+
+            // Clean up invalid entries
+            foreach (var pos in blocksToRemove)
+            {
+                protectionEdgeBlocks.Remove(pos);
+            }
+        }
+
+        #endregion
+
         #region Chunk-Based Devastation
 
         /// <summary>
@@ -1695,6 +1920,9 @@ namespace SpreadingDevastation
 
                 // Check for chunk spreading to nearby chunks
                 TrySpreadToNearbyChunks(currentTime);
+
+                // Process protection edge particles (smoke at devastation boundaries)
+                ProcessProtectionEdgeParticles(currentTime);
 
                 foreach (var chunk in devastatedChunks.Values) // Dictionary values are safe to iterate while modifying chunk properties
                 {
@@ -2607,6 +2835,8 @@ namespace SpreadingDevastation
                     // Check if protected by rift ward
                     if (IsBlockProtectedByRiftWard(targetPos))
                     {
+                        // Mark the frontier block as being at a protection edge
+                        MarkProtectionEdgeBlock(frontierPos);
                         continue; // Protected by rift ward
                     }
 
@@ -2620,6 +2850,9 @@ namespace SpreadingDevastation
 
                             // Play conversion sound for the original block type
                             PlayBlockConversionSound(block, targetPos);
+
+                            // Spawn smoke particles for devastation effect
+                            SpawnDevastationParticles(targetPos);
 
                             // Track for regeneration
                             regrowingBlocks.Add(new RegrowingBlocks
@@ -2845,6 +3078,9 @@ namespace SpreadingDevastation
                             // Play conversion sound for the original block type
                             PlayBlockConversionSound(block, pos);
 
+                            // Spawn smoke particles for devastation effect
+                            SpawnDevastationParticles(pos);
+
                             regrowingBlocks.Add(new RegrowingBlocks
                             {
                                 Pos = pos.Copy(),
@@ -2939,6 +3175,9 @@ namespace SpreadingDevastation
 
                     // Play conversion sound for the original block type
                     PlayBlockConversionSound(adjacentBlock, adjacentPos);
+
+                    // Spawn smoke particles for devastation effect
+                    SpawnDevastationParticles(adjacentPos);
 
                     regrowingBlocks.Add(new RegrowingBlocks
                     {
@@ -3052,6 +3291,9 @@ namespace SpreadingDevastation
 
                         // Play conversion sound for the original block type
                         PlayBlockConversionSound(targetBlock, targetPos);
+
+                        // Spawn smoke particles for devastation effect
+                        SpawnDevastationParticles(targetPos);
 
                         regrowingBlocks.Add(new RegrowingBlocks
                         {
@@ -3193,6 +3435,9 @@ namespace SpreadingDevastation
 
                                 // Play conversion sound for the original block type
                                 PlayBlockConversionSound(startBlock, startPos);
+
+                                // Spawn smoke particles for devastation effect
+                                SpawnDevastationParticles(startPos);
 
                                 regrowingBlocks.Add(new RegrowingBlocks
                                 {
@@ -3958,6 +4203,9 @@ namespace SpreadingDevastation
                         }
                     }
 
+                    // Spawn healing particles
+                    SpawnHealingParticles(targetPos);
+
                     healedCount++;
                     ward.RadialCleanFailures = 0; // Reset failures on success
                 }
@@ -4016,6 +4264,9 @@ namespace SpreadingDevastation
                             sapi.World.BlockAccessor.SetBlock(newBlock.Id, targetPos);
                         }
                     }
+
+                    // Spawn healing particles
+                    SpawnHealingParticles(targetPos);
 
                     // Note: We don't remove from regrowingBlocks here to avoid O(n) overhead
                     // The regrowingBlocks list is for tracking purposes; healed blocks will simply
@@ -4140,6 +4391,9 @@ namespace SpreadingDevastation
                             sapi.World.BlockAccessor.SetBlock(newBlock.Id, targetPos);
                         }
                     }
+
+                    // Spawn healing particles
+                    SpawnHealingParticles(targetPos);
 
                     healedCount++;
                 }
