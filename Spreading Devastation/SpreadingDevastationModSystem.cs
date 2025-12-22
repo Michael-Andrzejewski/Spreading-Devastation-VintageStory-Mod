@@ -1755,15 +1755,23 @@ namespace SpreadingDevastation
         /// </summary>
         private void SpawnDevastationParticles(BlockPos pos)
         {
-            if (sapi == null || config == null || !config.DevastationParticlesEnabled) return;
-            if (!particlesInitialized) InitializeParticleProperties();
+            try
+            {
+                if (sapi == null || config == null || !config.DevastationParticlesEnabled) return;
+                if (!particlesInitialized) InitializeParticleProperties();
+                if (devastationSmokeParticles == null) return;
 
-            // Set position for this spawn (center of block)
-            devastationSmokeParticles.MinPos.Set(pos.X + 0.1, pos.Y + 0.1, pos.Z + 0.1);
-            devastationSmokeParticles.MinQuantity = Math.Max(1, config.DevastationParticleCount - 2);
-            devastationSmokeParticles.AddQuantity = 4;
+                // Set position for this spawn (center of block)
+                devastationSmokeParticles.MinPos.Set(pos.X + 0.1, pos.Y + 0.1, pos.Z + 0.1);
+                devastationSmokeParticles.MinQuantity = Math.Max(1, config.DevastationParticleCount - 2);
+                devastationSmokeParticles.AddQuantity = 4;
 
-            sapi.World.SpawnParticles(devastationSmokeParticles);
+                sapi.World.SpawnParticles(devastationSmokeParticles);
+            }
+            catch
+            {
+                // Particle spawning is non-critical - don't let it break devastation spreading
+            }
         }
 
         /// <summary>
@@ -1771,15 +1779,23 @@ namespace SpreadingDevastation
         /// </summary>
         private void SpawnHealingParticles(BlockPos pos)
         {
-            if (sapi == null || config == null || !config.HealingParticlesEnabled) return;
-            if (!particlesInitialized) InitializeParticleProperties();
+            try
+            {
+                if (sapi == null || config == null || !config.HealingParticlesEnabled) return;
+                if (!particlesInitialized) InitializeParticleProperties();
+                if (healingParticles == null) return;
 
-            // Set position for this spawn (center of block)
-            healingParticles.MinPos.Set(pos.X + 0.1, pos.Y + 0.1, pos.Z + 0.1);
-            healingParticles.MinQuantity = Math.Max(1, config.HealingParticleCount - 4);
-            healingParticles.AddQuantity = 6;
+                // Set position for this spawn (center of block)
+                healingParticles.MinPos.Set(pos.X + 0.1, pos.Y + 0.1, pos.Z + 0.1);
+                healingParticles.MinQuantity = Math.Max(1, config.HealingParticleCount - 4);
+                healingParticles.AddQuantity = 6;
 
-            sapi.World.SpawnParticles(healingParticles);
+                sapi.World.SpawnParticles(healingParticles);
+            }
+            catch
+            {
+                // Particle spawning is non-critical - don't let it break healing
+            }
         }
 
         /// <summary>
@@ -1787,13 +1803,21 @@ namespace SpreadingDevastation
         /// </summary>
         private void SpawnProtectionEdgeParticles(BlockPos pos)
         {
-            if (sapi == null || config == null || !config.ProtectionEdgeParticlesEnabled) return;
-            if (!particlesInitialized) InitializeParticleProperties();
+            try
+            {
+                if (sapi == null || config == null || !config.ProtectionEdgeParticlesEnabled) return;
+                if (!particlesInitialized) InitializeParticleProperties();
+                if (protectionEdgeSmokeParticles == null) return;
 
-            // Set position for this spawn (center of block)
-            protectionEdgeSmokeParticles.MinPos.Set(pos.X + 0.2, pos.Y + 0.1, pos.Z + 0.2);
+                // Set position for this spawn (center of block)
+                protectionEdgeSmokeParticles.MinPos.Set(pos.X + 0.2, pos.Y + 0.1, pos.Z + 0.2);
 
-            sapi.World.SpawnParticles(protectionEdgeSmokeParticles);
+                sapi.World.SpawnParticles(protectionEdgeSmokeParticles);
+            }
+            catch
+            {
+                // Particle spawning is non-critical
+            }
         }
 
         /// <summary>
@@ -1801,20 +1825,28 @@ namespace SpreadingDevastation
         /// </summary>
         private void MarkProtectionEdgeBlock(BlockPos pos)
         {
-            if (config == null || !config.ProtectionEdgeParticlesEnabled) return;
-
-            // Use a copy since BlockPos can be reused
-            protectionEdgeBlocks.Add(pos.Copy());
-
-            // Limit the set size for memory efficiency
-            if (protectionEdgeBlocks.Count > 500)
+            try
             {
-                // Remove oldest entries (arbitrary selection since HashSet has no order)
-                var toRemove = protectionEdgeBlocks.Take(100).ToList();
-                foreach (var block in toRemove)
+                if (config == null || !config.ProtectionEdgeParticlesEnabled) return;
+                if (protectionEdgeBlocks == null) return;
+
+                // Use a copy since BlockPos can be reused
+                protectionEdgeBlocks.Add(pos.Copy());
+
+                // Limit the set size for memory efficiency
+                if (protectionEdgeBlocks.Count > 500)
                 {
-                    protectionEdgeBlocks.Remove(block);
+                    // Remove oldest entries (arbitrary selection since HashSet has no order)
+                    var toRemove = protectionEdgeBlocks.Take(100).ToList();
+                    foreach (var block in toRemove)
+                    {
+                        protectionEdgeBlocks.Remove(block);
+                    }
                 }
+            }
+            catch
+            {
+                // Non-critical operation
             }
         }
 
@@ -1823,7 +1855,14 @@ namespace SpreadingDevastation
         /// </summary>
         private void UnmarkProtectionEdgeBlock(BlockPos pos)
         {
-            protectionEdgeBlocks.Remove(pos);
+            try
+            {
+                protectionEdgeBlocks?.Remove(pos);
+            }
+            catch
+            {
+                // Non-critical operation
+            }
         }
 
         /// <summary>
@@ -1832,56 +1871,63 @@ namespace SpreadingDevastation
         /// </summary>
         private void ProcessProtectionEdgeParticles(double currentTime)
         {
-            if (sapi == null || config == null || !config.ProtectionEdgeParticlesEnabled) return;
-            if (protectionEdgeBlocks.Count == 0) return;
-
-            // Check interval
-            double intervalHours = config.EdgeParticleIntervalSeconds / 3600.0;
-            if (currentTime - lastEdgeParticleTime < intervalHours) return;
-            lastEdgeParticleTime = currentTime;
-
-            // Spawn particles on a subset of edge blocks
-            int count = 0;
-            var blocksToRemove = new List<BlockPos>();
-
-            foreach (var pos in protectionEdgeBlocks)
+            try
             {
-                if (count >= config.MaxEdgeParticlesPerTick) break;
+                if (sapi == null || config == null || !config.ProtectionEdgeParticlesEnabled) return;
+                if (protectionEdgeBlocks == null || protectionEdgeBlocks.Count == 0) return;
 
-                // Verify the block is still valid (still devastated and still at edge)
-                Block block = sapi.World.BlockAccessor.GetBlock(pos);
-                if (block == null || block.Id == 0 || !IsAlreadyDevastated(block))
-                {
-                    blocksToRemove.Add(pos);
-                    continue;
-                }
+                // Check interval
+                double intervalHours = config.EdgeParticleIntervalSeconds / 3600.0;
+                if (currentTime - lastEdgeParticleTime < intervalHours) return;
+                lastEdgeParticleTime = currentTime;
 
-                // Check if still at protection edge (has protected neighbor)
-                bool stillAtEdge = false;
-                foreach (var offset in CardinalOffsets)
+                // Spawn particles on a subset of edge blocks
+                int count = 0;
+                var blocksToRemove = new List<BlockPos>();
+
+                foreach (var pos in protectionEdgeBlocks)
                 {
-                    BlockPos neighborPos = new BlockPos(pos.X + offset.X, pos.Y + offset.Y, pos.Z + offset.Z);
-                    if (IsBlockProtectedByRiftWard(neighborPos))
+                    if (count >= config.MaxEdgeParticlesPerTick) break;
+
+                    // Verify the block is still valid (still devastated and still at edge)
+                    Block block = sapi.World.BlockAccessor.GetBlock(pos);
+                    if (block == null || block.Id == 0 || !IsAlreadyDevastated(block))
                     {
-                        stillAtEdge = true;
-                        break;
+                        blocksToRemove.Add(pos);
+                        continue;
                     }
+
+                    // Check if still at protection edge (has protected neighbor)
+                    bool stillAtEdge = false;
+                    foreach (var offset in CardinalOffsets)
+                    {
+                        BlockPos neighborPos = new BlockPos(pos.X + offset.X, pos.Y + offset.Y, pos.Z + offset.Z);
+                        if (IsBlockProtectedByRiftWard(neighborPos))
+                        {
+                            stillAtEdge = true;
+                            break;
+                        }
+                    }
+
+                    if (!stillAtEdge)
+                    {
+                        blocksToRemove.Add(pos);
+                        continue;
+                    }
+
+                    SpawnProtectionEdgeParticles(pos);
+                    count++;
                 }
 
-                if (!stillAtEdge)
+                // Clean up invalid entries
+                foreach (var pos in blocksToRemove)
                 {
-                    blocksToRemove.Add(pos);
-                    continue;
+                    protectionEdgeBlocks.Remove(pos);
                 }
-
-                SpawnProtectionEdgeParticles(pos);
-                count++;
             }
-
-            // Clean up invalid entries
-            foreach (var pos in blocksToRemove)
+            catch
             {
-                protectionEdgeBlocks.Remove(pos);
+                // Particle processing is non-critical
             }
         }
 
