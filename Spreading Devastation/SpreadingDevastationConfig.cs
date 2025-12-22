@@ -329,5 +329,23 @@ namespace SpreadingDevastation
         /// Interval in seconds between protection edge particle emissions (default: 0.5).
         /// </summary>
         public double EdgeParticleIntervalSeconds { get; set; } = 0.5;
+
+        /// <summary>
+        /// Whether particles only spawn on blocks exposed to air above (default: true).
+        /// This significantly improves performance by not spawning particles underground.
+        /// </summary>
+        public bool ParticlesRequireAirAbove { get; set; } = true;
+
+        /// <summary>
+        /// Maximum number of particles to spawn per second across all conversions (default: 50).
+        /// When this limit is reached, only conversions near players will spawn particles.
+        /// </summary>
+        public int MaxParticlesPerSecond { get; set; } = 50;
+
+        /// <summary>
+        /// Distance in chunks within which particles will always spawn when particle limit is reached (default: 3).
+        /// Blocks outside this distance from any player won't emit particles when at the particle limit.
+        /// </summary>
+        public int ParticlePlayerProximityChunks { get; set; } = 3;
     }
 }

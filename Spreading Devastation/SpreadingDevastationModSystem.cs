@@ -81,6 +81,8 @@ namespace SpreadingDevastation
         // Particle effect tracking
         private HashSet<BlockPos> protectionEdgeBlocks = new HashSet<BlockPos>(); // Blocks at protection boundaries
         private double lastEdgeParticleTime = 0; // Track last time we emitted edge particles
+        private int particlesSpawnedThisSecond = 0; // Track particles spawned for rate limiting
+        private long lastParticleResetTicks = 0; // Track when we last reset the particle counter (real time ticks)
 
         // Static particle properties for performance (reused instead of allocating new objects)
         private static SimpleParticleProperties devastationSmokeParticles;
@@ -1761,12 +1763,19 @@ namespace SpreadingDevastation
                 if (!particlesInitialized) InitializeParticleProperties();
                 if (devastationSmokeParticles == null) return;
 
+                // Check if block has air above (performance optimization)
+                if (config.ParticlesRequireAirAbove && !HasAirAbove(pos)) return;
+
+                // Check particle rate limit
+                if (!CanSpawnParticle(pos)) return;
+
                 // Set position for this spawn (center of block)
                 devastationSmokeParticles.MinPos.Set(pos.X + 0.1, pos.Y + 0.1, pos.Z + 0.1);
                 devastationSmokeParticles.MinQuantity = Math.Max(1, config.DevastationParticleCount - 2);
                 devastationSmokeParticles.AddQuantity = 4;
 
                 sapi.World.SpawnParticles(devastationSmokeParticles);
+                particlesSpawnedThisSecond++;
             }
             catch
             {
@@ -1785,12 +1794,19 @@ namespace SpreadingDevastation
                 if (!particlesInitialized) InitializeParticleProperties();
                 if (healingParticles == null) return;
 
+                // Check if block has air above (performance optimization)
+                if (config.ParticlesRequireAirAbove && !HasAirAbove(pos)) return;
+
+                // Check particle rate limit
+                if (!CanSpawnParticle(pos)) return;
+
                 // Set position for this spawn (center of block)
                 healingParticles.MinPos.Set(pos.X + 0.1, pos.Y + 0.1, pos.Z + 0.1);
                 healingParticles.MinQuantity = Math.Max(1, config.HealingParticleCount - 4);
                 healingParticles.AddQuantity = 6;
 
                 sapi.World.SpawnParticles(healingParticles);
+                particlesSpawnedThisSecond++;
             }
             catch
             {
@@ -1817,6 +1833,79 @@ namespace SpreadingDevastation
             catch
             {
                 // Particle spawning is non-critical
+            }
+        }
+
+        /// <summary>
+        /// Checks if the block position has air (or replaceable block) directly above it.
+        /// Used to prevent particles from spawning on underground blocks.
+        /// </summary>
+        private bool HasAirAbove(BlockPos pos)
+        {
+            try
+            {
+                if (sapi == null) return false;
+
+                BlockPos abovePos = pos.UpCopy();
+                Block blockAbove = sapi.World.BlockAccessor.GetBlock(abovePos);
+
+                // Check if block above is air or a replaceable block (plants, snow, etc.)
+                return blockAbove == null || blockAbove.Id == 0 || blockAbove.Replaceable >= 6000;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Checks if a particle can be spawned based on rate limiting.
+        /// Resets the counter each real-time second. When at the limit, only allows particles near players.
+        /// </summary>
+        private bool CanSpawnParticle(BlockPos pos)
+        {
+            try
+            {
+                if (sapi == null || config == null) return false;
+
+                // Reset counter every real-time second
+                long currentTicks = DateTime.UtcNow.Ticks;
+                long ticksPerSecond = TimeSpan.TicksPerSecond;
+                if (currentTicks - lastParticleResetTicks >= ticksPerSecond)
+                {
+                    lastParticleResetTicks = currentTicks;
+                    particlesSpawnedThisSecond = 0;
+                }
+
+                // If under the limit, allow the particle
+                if (particlesSpawnedThisSecond < config.MaxParticlesPerSecond)
+                {
+                    return true;
+                }
+
+                // At limit - only allow if near a player
+                int proximityBlocks = config.ParticlePlayerProximityChunks * CHUNK_SIZE;
+
+                foreach (IServerPlayer player in sapi.World.AllOnlinePlayers.Cast<IServerPlayer>())
+                {
+                    if (player.Entity == null) continue;
+
+                    double dx = player.Entity.Pos.X - pos.X;
+                    double dy = player.Entity.Pos.Y - pos.Y;
+                    double dz = player.Entity.Pos.Z - pos.Z;
+                    double distSq = dx * dx + dy * dy + dz * dz;
+
+                    if (distSq <= proximityBlocks * proximityBlocks)
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+            catch
+            {
+                return true; // On error, allow particle to not break functionality
             }
         }
 
