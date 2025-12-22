@@ -367,33 +367,35 @@ namespace SpreadingDevastation
                     serverNetworkChannel.SendPacket(fogPacket, player);
                 }
 
-                // Build chunk sync packet with nearby devastated chunks
+                // Send chunk data if there are any devastated chunks
+                if (!hasChunks) continue;
+
+                var playerPos = player.Entity.Pos;
+                int playerChunkX = (int)playerPos.X / CHUNK_SIZE;
+                int playerChunkZ = (int)playerPos.Z / CHUNK_SIZE;
+
                 var packet = new DevastatedChunkSyncPacket();
 
-                if (hasChunks)
+                foreach (var kvp in devastatedChunks)
                 {
-                    var playerPos = player.Entity.Pos;
-                    int playerChunkX = (int)playerPos.X / CHUNK_SIZE;
-                    int playerChunkZ = (int)playerPos.Z / CHUNK_SIZE;
+                    var chunk = kvp.Value;
+                    // Only sync chunks within range of player
+                    int dx = chunk.ChunkX - playerChunkX;
+                    int dz = chunk.ChunkZ - playerChunkZ;
 
-                    foreach (var kvp in devastatedChunks)
+                    if (dx >= -SYNC_RADIUS_CHUNKS && dx <= SYNC_RADIUS_CHUNKS &&
+                        dz >= -SYNC_RADIUS_CHUNKS && dz <= SYNC_RADIUS_CHUNKS)
                     {
-                        var chunk = kvp.Value;
-                        // Only sync chunks within range of player
-                        int dx = chunk.ChunkX - playerChunkX;
-                        int dz = chunk.ChunkZ - playerChunkZ;
-
-                        if (dx >= -SYNC_RADIUS_CHUNKS && dx <= SYNC_RADIUS_CHUNKS &&
-                            dz >= -SYNC_RADIUS_CHUNKS && dz <= SYNC_RADIUS_CHUNKS)
-                        {
-                            packet.ChunkXs.Add(chunk.ChunkX);
-                            packet.ChunkZs.Add(chunk.ChunkZ);
-                        }
+                        packet.ChunkXs.Add(chunk.ChunkX);
+                        packet.ChunkZs.Add(chunk.ChunkZ);
                     }
                 }
 
-                // Always send the packet so client can clear its cache when chunks are removed
-                serverNetworkChannel.SendPacket(packet, player);
+                // Only send if there are nearby chunks
+                if (packet.ChunkXs.Count > 0)
+                {
+                    serverNetworkChannel.SendPacket(packet, player);
+                }
             }
         }
 
