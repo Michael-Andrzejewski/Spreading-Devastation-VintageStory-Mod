@@ -127,6 +127,12 @@ namespace SpreadingDevastation
                     .WithDescription("Run automated tests on mod features")
                     .WithArgs(api.ChatCommands.Parsers.OptionalWord("testname"))
                     .HandleWith(HandleTestSuiteCommand)
+                .EndSubCommand()
+                .BeginSubCommand("particle")
+                    .WithDescription("Configure devastation particle effects")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("setting"),
+                              api.ChatCommands.Parsers.OptionalAll("value"))
+                    .HandleWith(HandleParticleCommand)
                 .EndSubCommand();
         }
 
@@ -487,6 +493,182 @@ namespace SpreadingDevastation
                 lines.Add($"  {ward.Pos} - {status}, healed {ward.BlocksHealed} blocks{progressInfo}");
             }
             return SendChatLines(args, lines, "Rift ward list sent to chat");
+        }
+
+        private TextCommandResult HandleParticleCommand(TextCommandCallingArgs args)
+        {
+            string setting = (args.Parsers[0].GetValue() as string ?? "").ToLowerInvariant();
+            string value = args.Parsers[1].GetValue() as string ?? "";
+
+            switch (setting)
+            {
+                case "size":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Particle size multiplier: {config.ParticleSizeMultiplier:F2}x. Use '/dv particle size [multiplier]' (e.g., 1.5 for 50% larger)");
+                    }
+                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float sizeMultiplier))
+                    {
+                        config.ParticleSizeMultiplier = Math.Clamp(sizeMultiplier, 0.1f, 10f);
+                        SaveConfig();
+                        return TextCommandResult.Success($"Particle size multiplier set to {config.ParticleSizeMultiplier:F2}x");
+                    }
+                    return TextCommandResult.Error("Invalid number. Usage: /dv particle size [multiplier] (0.1-10.0)");
+
+                case "density":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Particle density multiplier: {config.ParticleDensityMultiplier:F2}x. Use '/dv particle density [multiplier]' (e.g., 2.0 for double particles)");
+                    }
+                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float densityMultiplier))
+                    {
+                        config.ParticleDensityMultiplier = Math.Clamp(densityMultiplier, 0.1f, 10f);
+                        SaveConfig();
+                        return TextCommandResult.Success($"Particle density multiplier set to {config.ParticleDensityMultiplier:F2}x");
+                    }
+                    return TextCommandResult.Error("Invalid number. Usage: /dv particle density [multiplier] (0.1-10.0)");
+
+                case "lifetime":
+                case "life":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Particle lifetime multiplier: {config.ParticleLifetimeMultiplier:F2}x. Use '/dv particle lifetime [multiplier]' (e.g., 2.0 for particles that last twice as long)");
+                    }
+                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float lifetimeMultiplier))
+                    {
+                        config.ParticleLifetimeMultiplier = Math.Clamp(lifetimeMultiplier, 0.1f, 10f);
+                        SaveConfig();
+                        return TextCommandResult.Success($"Particle lifetime multiplier set to {config.ParticleLifetimeMultiplier:F2}x");
+                    }
+                    return TextCommandResult.Error("Invalid number. Usage: /dv particle lifetime [multiplier] (0.1-10.0)");
+
+                case "enabled":
+                case "on":
+                case "off":
+                    if (setting == "on" || (setting == "enabled" && value.ToLowerInvariant() == "on"))
+                    {
+                        config.DevastationParticlesEnabled = true;
+                        config.HealingParticlesEnabled = true;
+                        SaveConfig();
+                        return TextCommandResult.Success("All particles ENABLED");
+                    }
+                    else if (setting == "off" || (setting == "enabled" && value.ToLowerInvariant() == "off"))
+                    {
+                        config.DevastationParticlesEnabled = false;
+                        config.HealingParticlesEnabled = false;
+                        SaveConfig();
+                        return TextCommandResult.Success("All particles DISABLED");
+                    }
+                    return TextCommandResult.Error("Usage: /dv particle [on|off]");
+
+                case "limit":
+                case "max":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Max particles per second: {config.MaxParticlesPerSecond}. Use '/dv particle limit [count]' to set.");
+                    }
+                    if (int.TryParse(value, out int maxParticles))
+                    {
+                        config.MaxParticlesPerSecond = Math.Clamp(maxParticles, 1, 1000);
+                        SaveConfig();
+                        return TextCommandResult.Success($"Max particles per second set to {config.MaxParticlesPerSecond}");
+                    }
+                    return TextCommandResult.Error("Invalid number. Usage: /dv particle limit [count] (1-1000)");
+
+                case "proximity":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Particle proximity: {config.ParticlePlayerProximityChunks} chunks. Use '/dv particle proximity [chunks]' to set.");
+                    }
+                    if (int.TryParse(value, out int proximityChunks))
+                    {
+                        config.ParticlePlayerProximityChunks = Math.Clamp(proximityChunks, 1, 16);
+                        SaveConfig();
+                        return TextCommandResult.Success($"Particle proximity set to {config.ParticlePlayerProximityChunks} chunks");
+                    }
+                    return TextCommandResult.Error("Invalid number. Usage: /dv particle proximity [chunks] (1-16)");
+
+                case "airabove":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        string airStatus = config.ParticlesRequireAirAbove ? "ON" : "OFF";
+                        return TextCommandResult.Success($"Require air above: {airStatus}. Use '/dv particle airabove [on|off]' to toggle.");
+                    }
+                    if (value.Equals("on", StringComparison.OrdinalIgnoreCase) || value == "1" || value.Equals("true", StringComparison.OrdinalIgnoreCase))
+                    {
+                        config.ParticlesRequireAirAbove = true;
+                        SaveConfig();
+                        return TextCommandResult.Success("Particles now require air above (underground particles disabled)");
+                    }
+                    else if (value.Equals("off", StringComparison.OrdinalIgnoreCase) || value == "0" || value.Equals("false", StringComparison.OrdinalIgnoreCase))
+                    {
+                        config.ParticlesRequireAirAbove = false;
+                        SaveConfig();
+                        return TextCommandResult.Success("Particles no longer require air above (underground particles enabled)");
+                    }
+                    return TextCommandResult.Error("Usage: /dv particle airabove [on|off]");
+
+                case "opacity":
+                case "alpha":
+                case "transparency":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        float transparencyPercent = (1.0f - config.ParticleOpacity) * 100f;
+                        return TextCommandResult.Success($"Particle opacity: {config.ParticleOpacity:F2} ({transparencyPercent:F0}% transparent at start). Use '/dv particle opacity [0.0-1.0]' to set.");
+                    }
+                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float opacity))
+                    {
+                        config.ParticleOpacity = Math.Clamp(opacity, 0.0f, 1.0f);
+                        SaveConfig();
+                        float newTransparencyPercent = (1.0f - config.ParticleOpacity) * 100f;
+                        return TextCommandResult.Success($"Particle opacity set to {config.ParticleOpacity:F2} ({newTransparencyPercent:F0}% transparent at start)");
+                    }
+                    return TextCommandResult.Error("Invalid number. Usage: /dv particle opacity [0.0-1.0] (0.0 = invisible, 1.0 = fully opaque)");
+
+                case "reset":
+                case "defaults":
+                    config.ParticleSizeMultiplier = 1.0f;
+                    config.ParticleDensityMultiplier = 1.0f;
+                    config.ParticleLifetimeMultiplier = 1.0f;
+                    config.ParticleOpacity = 1.0f;
+                    config.DevastationParticlesEnabled = true;
+                    config.HealingParticlesEnabled = true;
+                    config.MaxParticlesPerSecond = 50;
+                    config.ParticlePlayerProximityChunks = 3;
+                    config.ParticlesRequireAirAbove = true;
+                    SaveConfig();
+                    return TextCommandResult.Success("Particle settings reset to defaults");
+
+                case "":
+                case "info":
+                case "status":
+                default:
+                    float infoTransparencyPercent = (1.0f - config.ParticleOpacity) * 100f;
+                    return SendChatLines(args, new[]
+                    {
+                        "=== Particle Settings ===",
+                        $"Devastation particles: {(config.DevastationParticlesEnabled ? "ON" : "OFF")}",
+                        $"Healing particles: {(config.HealingParticlesEnabled ? "ON" : "OFF")}",
+                        $"Size multiplier: {config.ParticleSizeMultiplier:F2}x",
+                        $"Density multiplier: {config.ParticleDensityMultiplier:F2}x",
+                        $"Lifetime multiplier: {config.ParticleLifetimeMultiplier:F2}x",
+                        $"Opacity: {config.ParticleOpacity:F2} ({infoTransparencyPercent:F0}% transparent)",
+                        $"Max per second: {config.MaxParticlesPerSecond}",
+                        $"Proximity (when at limit): {config.ParticlePlayerProximityChunks} chunks",
+                        $"Require air above: {(config.ParticlesRequireAirAbove ? "ON" : "OFF")}",
+                        "",
+                        "Commands:",
+                        "  /dv particle [on|off] - Enable or disable all particles",
+                        "  /dv particle size [multiplier] - Set particle size (0.1-10.0)",
+                        "  /dv particle density [multiplier] - Set particle count (0.1-10.0)",
+                        "  /dv particle lifetime [multiplier] - Set particle duration (0.1-10.0)",
+                        "  /dv particle opacity [0.0-1.0] - Set starting opacity (fades to 0)",
+                        "  /dv particle limit [count] - Set max particles per second",
+                        "  /dv particle proximity [chunks] - Distance for priority spawning",
+                        "  /dv particle airabove [on|off] - Toggle air-above requirement",
+                        "  /dv particle reset - Reset all to defaults"
+                    }, "Particle settings sent to chat");
+            }
         }
 
         private TextCommandResult HandleFogCommand(TextCommandCallingArgs args)

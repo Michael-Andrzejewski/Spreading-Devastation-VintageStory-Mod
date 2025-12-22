@@ -347,5 +347,27 @@ namespace SpreadingDevastation
         /// Blocks outside this distance from any player won't emit particles when at the particle limit.
         /// </summary>
         public int ParticlePlayerProximityChunks { get; set; } = 3;
+
+        /// <summary>
+        /// Multiplier for particle size (default: 1.0). Higher values = larger particles.
+        /// </summary>
+        public float ParticleSizeMultiplier { get; set; } = 1.0f;
+
+        /// <summary>
+        /// Multiplier for particle density/quantity (default: 1.0). Higher values = more particles per conversion.
+        /// </summary>
+        public float ParticleDensityMultiplier { get; set; } = 1.0f;
+
+        /// <summary>
+        /// Multiplier for particle lifetime (default: 1.0). Higher values = particles last longer and fade more slowly.
+        /// </summary>
+        public float ParticleLifetimeMultiplier { get; set; } = 1.0f;
+
+        /// <summary>
+        /// Starting opacity for particles (0.0-1.0, default: 1.0).
+        /// 1.0 = fully opaque at start, 0.5 = 50% transparent at start.
+        /// Particles fade linearly from this opacity to fully transparent over their lifetime.
+        /// </summary>
+        public float ParticleOpacity { get; set; } = 1.0f;
     }
 }

@@ -1699,16 +1699,16 @@ namespace SpreadingDevastation
                 AddQuantity = 5,
                 Color = ColorUtil.ToRgba(180, 60, 40, 50), // Dark purple-gray smoke
                 MinPos = new Vec3d(),
-                AddPos = new Vec3d(0.8, 0.3, 0.8),
-                MinVelocity = new Vec3f(-0.1f, 0.15f, -0.1f),
-                AddVelocity = new Vec3f(0.2f, 0.2f, 0.2f),
-                LifeLength = 1.2f,
-                GravityEffect = -0.02f, // Slight upward drift
-                MinSize = 0.15f,
-                MaxSize = 0.4f,
+                AddPos = new Vec3d(0.8, 0.8, 0.8),
+                MinVelocity = new Vec3f(-0.1f, 0.3f, -0.1f),
+                AddVelocity = new Vec3f(0.2f, 0.4f, 0.2f),
+                LifeLength = 2.0f,
+                GravityEffect = -0.03f, // Upward drift
+                MinSize = 0.4f,
+                MaxSize = 1.0f,
                 ShouldDieInLiquid = true,
                 ParticleModel = EnumParticleModel.Quad,
-                OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, -180)
+                OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, 180f)
             };
 
             // Healing particles: bright blue sparkles
@@ -1718,16 +1718,16 @@ namespace SpreadingDevastation
                 AddQuantity = 6,
                 Color = ColorUtil.ToRgba(255, 100, 180, 255), // Bright blue
                 MinPos = new Vec3d(),
-                AddPos = new Vec3d(0.8, 0.5, 0.8),
-                MinVelocity = new Vec3f(-0.15f, 0.1f, -0.15f),
-                AddVelocity = new Vec3f(0.3f, 0.25f, 0.3f),
-                LifeLength = 0.8f,
-                GravityEffect = -0.05f, // Float upward
-                MinSize = 0.08f,
-                MaxSize = 0.18f,
+                AddPos = new Vec3d(0.8, 1.0, 0.8),
+                MinVelocity = new Vec3f(-0.15f, 0.2f, -0.15f),
+                AddVelocity = new Vec3f(0.3f, 0.5f, 0.3f),
+                LifeLength = 1.2f,
+                GravityEffect = -0.08f, // Float upward
+                MinSize = 0.2f,
+                MaxSize = 0.5f,
                 ShouldDieInLiquid = false,
                 ParticleModel = EnumParticleModel.Quad,
-                OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, -255)
+                OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, 255f)
             };
 
             // Protection edge smoke: darker, more ominous smoke at boundaries
@@ -1737,16 +1737,16 @@ namespace SpreadingDevastation
                 AddQuantity = 3,
                 Color = ColorUtil.ToRgba(150, 40, 30, 40), // Very dark smoke
                 MinPos = new Vec3d(),
-                AddPos = new Vec3d(0.6, 0.2, 0.6),
-                MinVelocity = new Vec3f(-0.05f, 0.08f, -0.05f),
-                AddVelocity = new Vec3f(0.1f, 0.1f, 0.1f),
-                LifeLength = 1.5f,
-                GravityEffect = -0.015f, // Slow upward drift
-                MinSize = 0.2f,
-                MaxSize = 0.5f,
+                AddPos = new Vec3d(0.6, 0.6, 0.6),
+                MinVelocity = new Vec3f(-0.05f, 0.15f, -0.05f),
+                AddVelocity = new Vec3f(0.1f, 0.2f, 0.1f),
+                LifeLength = 2.5f,
+                GravityEffect = -0.02f, // Slow upward drift
+                MinSize = 0.5f,
+                MaxSize = 1.2f,
                 ShouldDieInLiquid = true,
                 ParticleModel = EnumParticleModel.Quad,
-                OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, -150)
+                OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, 150f)
             };
 
             particlesInitialized = true;
@@ -1771,8 +1771,25 @@ namespace SpreadingDevastation
 
                 // Set position for this spawn (center of block)
                 devastationSmokeParticles.MinPos.Set(pos.X + 0.1, pos.Y + 0.1, pos.Z + 0.1);
-                devastationSmokeParticles.MinQuantity = Math.Max(1, config.DevastationParticleCount - 2);
-                devastationSmokeParticles.AddQuantity = 4;
+
+                // Apply density multiplier
+                int baseQuantity = Math.Max(1, config.DevastationParticleCount - 2);
+                devastationSmokeParticles.MinQuantity = (int)(baseQuantity * config.ParticleDensityMultiplier);
+                devastationSmokeParticles.AddQuantity = (int)(4 * config.ParticleDensityMultiplier);
+
+                // Apply size multiplier
+                devastationSmokeParticles.MinSize = 0.4f * config.ParticleSizeMultiplier;
+                devastationSmokeParticles.MaxSize = 1.0f * config.ParticleSizeMultiplier;
+
+                // Apply lifetime multiplier and opacity setting
+                float lifetime = 2.0f * config.ParticleLifetimeMultiplier;
+                devastationSmokeParticles.LifeLength = lifetime;
+
+                // Apply starting opacity (base alpha 180 * opacity setting)
+                // Particles fade linearly from starting opacity to fully transparent over their lifetime
+                float startAlpha = 180f * config.ParticleOpacity;
+                devastationSmokeParticles.Color = ColorUtil.ToRgba((int)startAlpha, 60, 40, 50);
+                devastationSmokeParticles.OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, startAlpha);
 
                 sapi.World.SpawnParticles(devastationSmokeParticles);
                 particlesSpawnedThisSecond++;
@@ -1802,8 +1819,25 @@ namespace SpreadingDevastation
 
                 // Set position for this spawn (center of block)
                 healingParticles.MinPos.Set(pos.X + 0.1, pos.Y + 0.1, pos.Z + 0.1);
-                healingParticles.MinQuantity = Math.Max(1, config.HealingParticleCount - 4);
-                healingParticles.AddQuantity = 6;
+
+                // Apply density multiplier
+                int baseQuantity = Math.Max(1, config.HealingParticleCount - 4);
+                healingParticles.MinQuantity = (int)(baseQuantity * config.ParticleDensityMultiplier);
+                healingParticles.AddQuantity = (int)(6 * config.ParticleDensityMultiplier);
+
+                // Apply size multiplier
+                healingParticles.MinSize = 0.2f * config.ParticleSizeMultiplier;
+                healingParticles.MaxSize = 0.5f * config.ParticleSizeMultiplier;
+
+                // Apply lifetime multiplier and opacity setting
+                float lifetime = 1.2f * config.ParticleLifetimeMultiplier;
+                healingParticles.LifeLength = lifetime;
+
+                // Apply starting opacity (base alpha 255 * opacity setting)
+                // Particles fade linearly from starting opacity to fully transparent over their lifetime
+                float startAlpha = 255f * config.ParticleOpacity;
+                healingParticles.Color = ColorUtil.ToRgba((int)startAlpha, 100, 180, 255);
+                healingParticles.OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, startAlpha);
 
                 sapi.World.SpawnParticles(healingParticles);
                 particlesSpawnedThisSecond++;
@@ -1827,6 +1861,24 @@ namespace SpreadingDevastation
 
                 // Set position for this spawn (center of block)
                 protectionEdgeSmokeParticles.MinPos.Set(pos.X + 0.2, pos.Y + 0.1, pos.Z + 0.2);
+
+                // Apply density multiplier
+                protectionEdgeSmokeParticles.MinQuantity = (int)(2 * config.ParticleDensityMultiplier);
+                protectionEdgeSmokeParticles.AddQuantity = (int)(3 * config.ParticleDensityMultiplier);
+
+                // Apply size multiplier
+                protectionEdgeSmokeParticles.MinSize = 0.5f * config.ParticleSizeMultiplier;
+                protectionEdgeSmokeParticles.MaxSize = 1.2f * config.ParticleSizeMultiplier;
+
+                // Apply lifetime multiplier and opacity setting
+                float lifetime = 2.5f * config.ParticleLifetimeMultiplier;
+                protectionEdgeSmokeParticles.LifeLength = lifetime;
+
+                // Apply starting opacity (base alpha 150 * opacity setting)
+                // Particles fade linearly from starting opacity to fully transparent over their lifetime
+                float startAlpha = 150f * config.ParticleOpacity;
+                protectionEdgeSmokeParticles.Color = ColorUtil.ToRgba((int)startAlpha, 40, 30, 40);
+                protectionEdgeSmokeParticles.OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, startAlpha);
 
                 sapi.World.SpawnParticles(protectionEdgeSmokeParticles);
             }
