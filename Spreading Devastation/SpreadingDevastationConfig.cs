@@ -279,5 +279,17 @@ namespace SpreadingDevastation
         /// These entities will never go insane (they're typically already hostile).
         /// </summary>
         public string AnimalInsanityExcludeCodes { get; set; } = "drifter,locust,bell,bowtorn,eidolon,shiver";
+
+        // === Block Conversion Sound Settings ===
+
+        /// <summary>
+        /// Whether to play sounds when blocks are converted by devastation (default: true).
+        /// </summary>
+        public bool EnableConversionSounds { get; set; } = true;
+
+        /// <summary>
+        /// Volume of block conversion sounds (0.0-1.0, default: 0.5).
+        /// </summary>
+        public float ConversionSoundVolume { get; set; } = 0.5f;
     }
 }

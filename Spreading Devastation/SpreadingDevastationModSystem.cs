@@ -774,6 +774,9 @@ namespace SpreadingDevastation
                     Block newBlock = sapi.World.GetBlock(new AssetLocation("game", devastatedBlock));
                     sapi.World.BlockAccessor.SetBlock(newBlock.Id, targetPos);
 
+                    // Play conversion sound for the original block type
+                    PlayBlockConversionSound(block, targetPos);
+
                     // Track this block for regeneration
                     regrowingBlocks.Add(new RegrowingBlocks
                     {
@@ -1515,6 +1518,87 @@ namespace SpreadingDevastation
             }
 
             return devastatedBlock != "";
+        }
+
+        /// <summary>
+        /// Determines the appropriate conversion sound type for a block based on its path.
+        /// Returns the sound file name without path or extension.
+        /// </summary>
+        private string GetBlockConversionSoundType(Block block)
+        {
+            if (block == null) return "soil"; // Default fallback
+
+            string path = block.Code.Path;
+
+            // Soil-like blocks
+            if (path.StartsWith("soil-") || path.StartsWith("forestfloor") ||
+                path.StartsWith("peat-") || path.StartsWith("rawclay-") || path == "muddygravel")
+            {
+                return "soil";
+            }
+            // Stone/rock blocks
+            else if (path.StartsWith("rock-"))
+            {
+                return "stone";
+            }
+            // Gravel blocks
+            else if (path.StartsWith("gravel-"))
+            {
+                return "gravel";
+            }
+            // Sand blocks
+            else if (path.StartsWith("sand-"))
+            {
+                return "sand";
+            }
+            // Wood/log blocks
+            else if (path.StartsWith("log-") || path.StartsWith("logsection-") ||
+                     path.StartsWith("fruittree-branch") || path.StartsWith("fruittree-stem") ||
+                     path.StartsWith("fruittree-trunk"))
+            {
+                return "wood";
+            }
+            // Leaves/foliage blocks
+            else if (path.StartsWith("leavesbranchy-") || path.StartsWith("leaves-") ||
+                     path.StartsWith("fruittree-foliage"))
+            {
+                return "leaves";
+            }
+            // Plant blocks (grass, flowers, ferns, mushrooms, crops)
+            else if (path.StartsWith("tallgrass-") || path.StartsWith("flower-") ||
+                     path.StartsWith("fern-") || path.StartsWith("crop-") ||
+                     path.StartsWith("mushroom-") || path.StartsWith("tallplant-") ||
+                     path.StartsWith("waterlily"))
+            {
+                return "plant";
+            }
+            // Berry bushes and similar
+            else if (path.StartsWith("smallberrybush-") || path.StartsWith("largeberrybush-") ||
+                     path.StartsWith("bigberrybush-") || path.StartsWith("wildberrybush-"))
+            {
+                return "leaves"; // Berry bushes sound like leaves
+            }
+
+            // Default to soil sound
+            return "soil";
+        }
+
+        /// <summary>
+        /// Plays the appropriate block conversion sound at the specified position.
+        /// Only plays sounds on the server; clients will hear it via network sync.
+        /// </summary>
+        private void PlayBlockConversionSound(Block originalBlock, BlockPos pos)
+        {
+            if (sapi == null || originalBlock == null || pos == null) return;
+            if (config != null && !config.EnableConversionSounds) return;
+
+            string soundType = GetBlockConversionSoundType(originalBlock);
+            AssetLocation soundLoc = new AssetLocation("spreadingdevastation", $"sounds/block/convert-{soundType}");
+
+            // Play sound at block position with slight pitch randomization
+            // Range of 32 blocks, volume controlled by config
+            float volume = config?.ConversionSoundVolume ?? 0.5f;
+            sapi.World.PlaySoundAt(soundLoc, pos.X + 0.5, pos.Y + 0.5, pos.Z + 0.5, null, true, 32f, volume);
         }
 
         /// <summary>
@@ -2539,6 +2623,9 @@ namespace SpreadingDevastation
                         {
                             sapi.World.BlockAccessor.SetBlock(newBlock.Id, targetPos);
 
+                            // Play conversion sound for the original block type
+                            PlayBlockConversionSound(block, targetPos);
+
                             // Track for regeneration
                             regrowingBlocks.Add(new RegrowingBlocks
                             {
@@ -2759,6 +2846,10 @@ namespace SpreadingDevastation
                         if (newBlock != null)
                         {
                             sapi.World.BlockAccessor.SetBlock(newBlock.Id, pos);
+
+                            // Play conversion sound for the original block type
+                            PlayBlockConversionSound(block, pos);
+
                             regrowingBlocks.Add(new RegrowingBlocks
                             {
                                 Pos = pos.Copy(),
@@ -2850,6 +2941,9 @@ namespace SpreadingDevastation
                 if (newBlock != null)
                 {
                     sapi.World.BlockAccessor.SetBlock(newBlock.Id, adjacentPos);
+
+                    // Play conversion sound for the original block type
+                    PlayBlockConversionSound(adjacentBlock, adjacentPos);
 
                     regrowingBlocks.Add(new RegrowingBlocks
                     {
@@ -2960,6 +3054,9 @@ namespace SpreadingDevastation
                     if (newBlock != null)
                     {
                         sapi.World.BlockAccessor.SetBlock(newBlock.Id, targetPos);
+
+                        // Play conversion sound for the original block type
+                        PlayBlockConversionSound(targetBlock, targetPos);
 
                         regrowingBlocks.Add(new RegrowingBlocks
                         {
@@ -3098,6 +3195,10 @@ namespace SpreadingDevastation
                             if (newBlock != null)
                             {
                                 sapi.World.BlockAccessor.SetBlock(newBlock.Id, startPos);
+
+                                // Play conversion sound for the original block type
+                                PlayBlockConversionSound(startBlock, startPos);
+
                                 regrowingBlocks.Add(new RegrowingBlocks
                                 {
                                     Pos = startPos.Copy(),
@@ -3123,6 +3224,10 @@ namespace SpreadingDevastation
                                         if (devBlock != null)
                                         {
                                             sapi.World.BlockAccessor.SetBlock(devBlock.Id, nearbyPos);
+
+                                            // Play conversion sound for the original block type
+                                            PlayBlockConversionSound(nearbyBlock, nearbyPos);
+
                                             regrowingBlocks.Add(new RegrowingBlocks
                                             {
                                                 Pos = nearbyPos.Copy(),

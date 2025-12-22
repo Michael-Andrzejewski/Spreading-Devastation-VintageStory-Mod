@@ -12,7 +12,8 @@
       "WebFetch(domain:gitlab.com)",
       "Bash(git checkout:*)",
       "Bash(wc:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(mkdir:*)"
     ]
   }
 }

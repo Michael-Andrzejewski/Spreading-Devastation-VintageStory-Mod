@@ -38,8 +38,11 @@
     <ItemGroup>
       <PackageFiles Include="$(TargetPath)" />
       <PackageFiles Include="modinfo.json" />
+      <AssetFiles Include="assets\**\*" />
     </ItemGroup>
     <Copy SourceFiles="@(PackageFiles)" DestinationFolder="$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\mod\" />
+    <!-- Copy assets folder preserving directory structure -->
+    <Copy SourceFiles="@(AssetFiles)" DestinationFiles="@(AssetFiles->'$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\mod\%(Identity)')" />
     <ZipDirectory SourceDirectory="$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\mod\" DestinationFile="$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\SpreadingDevastation.zip" Overwrite="true" />
     <!-- Auto-deploy to Vintagestory Mods folder -->
     <Copy SourceFiles="$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\SpreadingDevastation.zip" DestinationFolder="$(APPDATA)\VintagestoryData\Mods\" />
