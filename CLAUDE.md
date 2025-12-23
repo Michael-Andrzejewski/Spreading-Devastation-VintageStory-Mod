@@ -2,6 +2,17 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Quick Reference - Key Files
+
+| File | Purpose |
+|------|---------|
+| `SpreadingDevastationModSystem.cs` | Core logic: spreading, metastasis, chunks, rift wards, particles |
+| `SpreadingDevastationModSystem.Commands.cs` | All `/dv` command handlers |
+| `SpreadingDevastationModSystem.Tests.cs` | In-game test suite (`/dv testsuite`) |
+| `SpreadingDevastationConfig.cs` | Configuration class with all settings |
+| `DataClasses.cs` | ProtoBuf data structures (DevastationSource, DevastatedChunk, etc.) |
+| `DevastationFogRenderer.cs` | Client-side fog/atmosphere rendering |
+
 ## Build Commands
 
 ```bash
@@ -54,7 +65,7 @@ The mod config and cache may retain settings from newer versions, causing issues
 
 ## Architecture
 
-This is a **Vintage Story mod** (single-file C# mod) that makes temporal rifts spread landscape devastation. The entire mod is contained in one file: `Spreading Devastation/SpreadingDevastationModSystem.cs`.
+This is a **Vintage Story mod** that makes temporal rifts spread landscape devastation. The mod uses partial classes split across multiple files (see Quick Reference above), with core logic in `SpreadingDevastationModSystem.cs`.
 
 ### Core Components
 
@@ -144,3 +155,11 @@ When commands need multiple space-separated values, use `OptionalAll` instead of
 Use `OptionalAll` when the command accepts:
 - Multiple numeric values (e.g., `/dv fog color 0.5 0.3 0.2`)
 - Subcommands with their own arguments (e.g., `/dv chunk spawn interval 0.5 1.0`)
+
+## Common Gotchas
+
+1. **ProtoBuf requires `[ProtoMember]` attributes** - Any new field in DataClasses.cs needs a unique ProtoMember index or it won't serialize
+2. **Client vs Server code** - `sapi` is server-only, `capi` is client-only. Check for null before using. Network sync required for client-side effects.
+3. **Block codes include domain** - Use `new AssetLocation("game", blockPath)` not just the path string
+4. **Particle spawning is server-side** - Particles are spawned via `sapi.World.SpawnParticles()` and automatically synced to clients
+5. **Config changes need `SaveConfig()` call** - And `BroadcastFogConfig()` if fog settings changed

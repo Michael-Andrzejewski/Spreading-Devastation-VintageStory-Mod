@@ -13,7 +13,9 @@
       "Bash(git checkout:*)",
       "Bash(wc:*)",
       "Bash(ls:*)",
-      "Bash(mkdir:*)"
+      "Bash(mkdir:*)",
+      "WebFetch(domain:www.anthropic.com)",
+      "WebFetch(domain:www.claude.com)"
     ]
   }
 }

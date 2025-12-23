@@ -2116,12 +2116,16 @@ namespace SpreadingDevastation
 
         /// <summary>
         /// Spawns devastation-style particles at chunk border blocks.
+        /// Uses the same location priority system as other particle methods.
         /// </summary>
         private void SpawnChunkBorderParticles(BlockPos pos)
         {
             try
             {
                 if (sapi == null || config == null) return;
+
+                // Check particle rate limit (uses near/far priority system)
+                if (!CanSpawnParticle(pos)) return;
 
                 // Use the same particle properties as devastation particles
                 var particles = CreateDevastationParticles(pos);
