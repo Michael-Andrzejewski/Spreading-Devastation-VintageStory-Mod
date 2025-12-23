@@ -305,9 +305,10 @@ namespace SpreadingDevastation
         public bool HealingParticlesEnabled { get; set; } = true;
 
         /// <summary>
-        /// Whether to show smoke particles at protection boundaries where devastation meets rift ward protection (default: true).
+        /// Whether to show devastation particles at chunk borders where devastated chunks meet protected chunks (default: true).
+        /// Creates a visible barrier effect at the edge of protected areas.
         /// </summary>
-        public bool ProtectionEdgeParticlesEnabled { get; set; } = true;
+        public bool ChunkBorderParticlesEnabled { get; set; } = true;
 
         /// <summary>
         /// Number of particles to spawn per devastated block conversion (default: 5).
@@ -320,15 +321,15 @@ namespace SpreadingDevastation
         public int HealingParticleCount { get; set; } = 8;
 
         /// <summary>
-        /// Maximum number of protection edge blocks to emit particles from per tick (default: 10).
-        /// Limits CPU usage for edge particle effects.
+        /// Maximum number of chunk border blocks to emit particles from per tick (default: 10).
+        /// Limits CPU usage for chunk border particle effects.
         /// </summary>
-        public int MaxEdgeParticlesPerTick { get; set; } = 10;
+        public int MaxChunkBorderParticlesPerTick { get; set; } = 10;
 
         /// <summary>
-        /// Interval in seconds between protection edge particle emissions (default: 0.5).
+        /// Interval in seconds between chunk border particle emissions (default: 0.5).
         /// </summary>
-        public double EdgeParticleIntervalSeconds { get; set; } = 0.5;
+        public double ChunkBorderParticleIntervalSeconds { get; set; } = 0.5;
 
         /// <summary>
         /// Whether particles only spawn on blocks exposed to air above (default: true).

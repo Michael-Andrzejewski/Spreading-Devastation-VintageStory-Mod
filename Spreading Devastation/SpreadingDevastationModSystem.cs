@@ -79,8 +79,7 @@ namespace SpreadingDevastation
         private const string INSANITY_ATTRIBUTE = "devastationInsane"; // WatchedAttribute key for insane state
 
         // Particle effect tracking
-        private HashSet<BlockPos> protectionEdgeBlocks = new HashSet<BlockPos>(); // Blocks at protection boundaries
-        private double lastEdgeParticleTime = 0; // Track last time we emitted edge particles
+        private double lastChunkBorderParticleTime = 0; // Track last time we emitted chunk border particles
         private int nearParticlesSpawnedThisSecond = 0; // Track NEAR particles spawned (high priority)
         private int farParticlesSpawnedThisSecond = 0; // Track FAR particles spawned (low priority)
         private long lastParticleResetTicks = 0; // Track when we last reset the particle counter (real time ticks)
@@ -1752,34 +1751,6 @@ namespace SpreadingDevastation
             };
         }
 
-        /// <summary>
-        /// Creates a fresh protection edge particle properties object with the given position.
-        /// </summary>
-        private SimpleParticleProperties CreateProtectionEdgeParticles(BlockPos pos)
-        {
-            float lifetime = 2.5f * config.ParticleLifetimeMultiplier;
-            float startAlpha = 150f * config.ParticleOpacity;
-
-            return new SimpleParticleProperties
-            {
-                MinQuantity = (int)(2 * config.ParticleDensityMultiplier),
-                AddQuantity = (int)(3 * config.ParticleDensityMultiplier),
-                Color = ColorUtil.ToRgba((int)startAlpha, 40, 30, 40),
-                MinPos = new Vec3d(pos.X + 0.2, pos.Y + 0.1, pos.Z + 0.2),
-                AddPos = new Vec3d(0.6, 0.6, 0.6),
-                MinVelocity = new Vec3f(-0.05f, 0.15f, -0.05f),
-                AddVelocity = new Vec3f(0.1f, 0.2f, 0.1f),
-                LifeLength = lifetime,
-                GravityEffect = -0.02f,
-                MinSize = 0.5f * config.ParticleSizeMultiplier,
-                MaxSize = 1.2f * config.ParticleSizeMultiplier,
-                ShouldDieInLiquid = true,
-                ParticleModel = EnumParticleModel.Quad,
-                OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, startAlpha)
-            };
-        }
-
-        /// <summary>
         // Debug: log a sample of particle spawns to verify positions
         private int debugParticleSpawnCount = 0;
 
@@ -1868,25 +1839,6 @@ namespace SpreadingDevastation
             catch (Exception ex)
             {
                 sapi?.Logger.Error($"[HealingSpawn] Error: {ex.Message}");
-            }
-        }
-
-        /// <summary>
-        /// Spawns smoke particles at protection boundary blocks (devastated blocks next to protected area).
-        /// </summary>
-        private void SpawnProtectionEdgeParticles(BlockPos pos)
-        {
-            try
-            {
-                if (sapi == null || config == null || !config.ProtectionEdgeParticlesEnabled) return;
-
-                // Create fresh particle properties with position baked in
-                var particles = CreateProtectionEdgeParticles(pos);
-                sapi.World.SpawnParticles(particles);
-            }
-            catch
-            {
-                // Particle spawning is non-critical
             }
         }
 
@@ -2034,113 +1986,150 @@ namespace SpreadingDevastation
         }
 
         /// <summary>
-        /// Marks a block as being at a protection boundary (devastated but adjacent to protected area).
-        /// </summary>
-        private void MarkProtectionEdgeBlock(BlockPos pos)
-        {
-            try
-            {
-                if (config == null || !config.ProtectionEdgeParticlesEnabled) return;
-                if (protectionEdgeBlocks == null) return;
-
-                // Use a copy since BlockPos can be reused
-                protectionEdgeBlocks.Add(pos.Copy());
-
-                // Limit the set size for memory efficiency
-                if (protectionEdgeBlocks.Count > 500)
-                {
-                    // Remove oldest entries (arbitrary selection since HashSet has no order)
-                    var toRemove = protectionEdgeBlocks.Take(100).ToList();
-                    foreach (var block in toRemove)
-                    {
-                        protectionEdgeBlocks.Remove(block);
-                    }
-                }
-            }
-            catch
-            {
-                // Non-critical operation
-            }
-        }
-
-        /// <summary>
-        /// Removes a block from protection edge tracking (called when block is healed or no longer at edge).
-        /// </summary>
-        private void UnmarkProtectionEdgeBlock(BlockPos pos)
-        {
-            try
-            {
-                protectionEdgeBlocks?.Remove(pos);
-            }
-            catch
-            {
-                // Non-critical operation
-            }
-        }
-
-        /// <summary>
-        /// Emits smoke particles from protection edge blocks periodically.
+        /// Emits devastation particles from chunk border blocks where devastated chunks meet protected chunks.
         /// Called from the main tick loop.
         /// </summary>
-        private void ProcessProtectionEdgeParticles(double currentTime)
+        private void ProcessChunkBorderParticles(double currentTime)
         {
             try
             {
-                if (sapi == null || config == null || !config.ProtectionEdgeParticlesEnabled) return;
-                if (protectionEdgeBlocks == null || protectionEdgeBlocks.Count == 0) return;
+                if (sapi == null || config == null || !config.ChunkBorderParticlesEnabled) return;
+                if (devastatedChunks == null || devastatedChunks.Count == 0) return;
+                if (protectedChunkKeys == null || protectedChunkKeys.Count == 0) return;
 
                 // Check interval
-                double intervalHours = config.EdgeParticleIntervalSeconds / 3600.0;
-                if (currentTime - lastEdgeParticleTime < intervalHours) return;
-                lastEdgeParticleTime = currentTime;
+                double intervalHours = config.ChunkBorderParticleIntervalSeconds / 3600.0;
+                if (currentTime - lastChunkBorderParticleTime < intervalHours) return;
+                lastChunkBorderParticleTime = currentTime;
 
-                // Spawn particles on a subset of edge blocks
-                int count = 0;
-                var blocksToRemove = new List<BlockPos>();
+                int particleCount = 0;
+                var random = sapi.World.Rand;
 
-                foreach (var pos in protectionEdgeBlocks)
+                // Iterate through devastated chunks looking for those bordering protected chunks
+                foreach (var chunk in devastatedChunks.Values)
                 {
-                    if (count >= config.MaxEdgeParticlesPerTick) break;
+                    if (particleCount >= config.MaxChunkBorderParticlesPerTick) break;
 
-                    // Verify the block is still valid (still devastated and still at edge)
-                    Block block = sapi.World.BlockAccessor.GetBlock(pos);
-                    if (block == null || block.Id == 0 || !IsAlreadyDevastated(block))
-                    {
-                        blocksToRemove.Add(pos);
-                        continue;
-                    }
+                    // Skip chunks that are themselves protected
+                    if (IsChunkProtectedByRiftWard(chunk.ChunkX, chunk.ChunkZ)) continue;
 
-                    // Check if still at protection edge (has protected neighbor)
-                    bool stillAtEdge = false;
-                    foreach (var offset in CardinalOffsets)
+                    // Check each cardinal direction for protected neighbors
+                    int[] dxArr = { -1, 1, 0, 0 };
+                    int[] dzArr = { 0, 0, -1, 1 };
+
+                    for (int dir = 0; dir < 4; dir++)
                     {
-                        BlockPos neighborPos = new BlockPos(pos.X + offset.X, pos.Y + offset.Y, pos.Z + offset.Z);
-                        if (IsBlockProtectedByRiftWard(neighborPos))
+                        if (particleCount >= config.MaxChunkBorderParticlesPerTick) break;
+
+                        int neighborChunkX = chunk.ChunkX + dxArr[dir];
+                        int neighborChunkZ = chunk.ChunkZ + dzArr[dir];
+
+                        // Check if the neighboring chunk is protected
+                        if (!IsChunkProtectedByRiftWard(neighborChunkX, neighborChunkZ)) continue;
+
+                        // This chunk borders a protected chunk in this direction
+                        // Find the edge blocks on this side and spawn particles
+
+                        // Calculate world coordinates for the edge
+                        int worldBaseX = chunk.ChunkX * CHUNK_SIZE;
+                        int worldBaseZ = chunk.ChunkZ * CHUNK_SIZE;
+
+                        // Determine the edge position based on direction
+                        // dir 0: -X (west edge, x=0 in chunk)
+                        // dir 1: +X (east edge, x=31 in chunk)
+                        // dir 2: -Z (north edge, z=0 in chunk)
+                        // dir 3: +Z (south edge, z=31 in chunk)
+
+                        int edgeX, edgeZ;
+                        bool isXEdge = (dir == 0 || dir == 1);
+
+                        if (isXEdge)
                         {
-                            stillAtEdge = true;
-                            break;
+                            // X edge - pick random Z position along the edge
+                            edgeX = worldBaseX + (dir == 0 ? 0 : CHUNK_SIZE - 1);
+                            edgeZ = worldBaseZ + random.Next(CHUNK_SIZE);
                         }
+                        else
+                        {
+                            // Z edge - pick random X position along the edge
+                            edgeX = worldBaseX + random.Next(CHUNK_SIZE);
+                            edgeZ = worldBaseZ + (dir == 2 ? 0 : CHUNK_SIZE - 1);
+                        }
+
+                        // Find a suitable Y position (surface block with air above)
+                        int surfaceY = FindSurfaceY(edgeX, edgeZ);
+                        if (surfaceY < 0) continue;
+
+                        BlockPos edgePos = new BlockPos(edgeX, surfaceY, edgeZ);
+
+                        // Check if the block has air above
+                        if (!HasAirAbove(edgePos)) continue;
+
+                        // Spawn devastation-style particles at this edge block
+                        SpawnChunkBorderParticles(edgePos);
+                        particleCount++;
                     }
-
-                    if (!stillAtEdge)
-                    {
-                        blocksToRemove.Add(pos);
-                        continue;
-                    }
-
-                    SpawnProtectionEdgeParticles(pos);
-                    count++;
-                }
-
-                // Clean up invalid entries
-                foreach (var pos in blocksToRemove)
-                {
-                    protectionEdgeBlocks.Remove(pos);
                 }
             }
             catch
             {
                 // Particle processing is non-critical
+            }
+        }
+
+        /// <summary>
+        /// Finds the Y coordinate of the surface block at the given X,Z position.
+        /// Returns -1 if no suitable surface found.
+        /// </summary>
+        private int FindSurfaceY(int x, int z)
+        {
+            try
+            {
+                // Start from a reasonable height and scan downward
+                int startY = sapi.World.BlockAccessor.MapSizeY - 1;
+                int minY = 1;
+
+                for (int y = startY; y >= minY; y--)
+                {
+                    BlockPos pos = new BlockPos(x, y, z);
+                    Block block = sapi.World.BlockAccessor.GetBlock(pos);
+
+                    if (block != null && block.Id != 0 && !block.IsLiquid() && block.Replaceable < 6000)
+                    {
+                        // Found a solid block - check if there's air above
+                        BlockPos abovePos = pos.UpCopy();
+                        Block blockAbove = sapi.World.BlockAccessor.GetBlock(abovePos);
+                        if (blockAbove == null || blockAbove.Id == 0 || blockAbove.Replaceable >= 6000)
+                        {
+                            return y;
+                        }
+                    }
+                }
+
+                return -1;
+            }
+            catch
+            {
+                return -1;
+            }
+        }
+
+        /// <summary>
+        /// Spawns devastation-style particles at chunk border blocks.
+        /// </summary>
+        private void SpawnChunkBorderParticles(BlockPos pos)
+        {
+            try
+            {
+                if (sapi == null || config == null) return;
+
+                // Use the same particle properties as devastation particles
+                var particles = CreateDevastationParticles(pos);
+                sapi.World.SpawnParticles(particles);
+            }
+            catch
+            {
+                // Particle spawning is non-critical
             }
         }
 
@@ -2180,8 +2169,8 @@ namespace SpreadingDevastation
                 // Check for chunk spreading to nearby chunks
                 TrySpreadToNearbyChunks(currentTime);
 
-                // Process protection edge particles (smoke at devastation boundaries)
-                ProcessProtectionEdgeParticles(currentTime);
+                // Process chunk border particles (devastation effects at protected chunk boundaries)
+                ProcessChunkBorderParticles(currentTime);
 
                 foreach (var chunk in devastatedChunks.Values) // Dictionary values are safe to iterate while modifying chunk properties
                 {
@@ -3094,8 +3083,6 @@ namespace SpreadingDevastation
                     // Check if protected by rift ward
                     if (IsBlockProtectedByRiftWard(targetPos))
                     {
-                        // Mark the frontier block as being at a protection edge
-                        MarkProtectionEdgeBlock(frontierPos);
                         continue; // Protected by rift ward
                     }
 
