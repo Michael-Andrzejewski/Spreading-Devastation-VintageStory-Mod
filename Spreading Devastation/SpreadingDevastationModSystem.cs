@@ -81,13 +81,13 @@ namespace SpreadingDevastation
         // Particle effect tracking
         private HashSet<BlockPos> protectionEdgeBlocks = new HashSet<BlockPos>(); // Blocks at protection boundaries
         private double lastEdgeParticleTime = 0; // Track last time we emitted edge particles
-        private int particlesSpawnedThisSecond = 0; // Track particles spawned for rate limiting
+        private int nearParticlesSpawnedThisSecond = 0; // Track NEAR particles spawned (high priority)
+        private int farParticlesSpawnedThisSecond = 0; // Track FAR particles spawned (low priority)
         private long lastParticleResetTicks = 0; // Track when we last reset the particle counter (real time ticks)
+        private long farParticleBlackoutUntilTicks = 0; // When far particles should resume (triggered by near particle limit)
 
-        // Static particle properties for performance (reused instead of allocating new objects)
-        private static SimpleParticleProperties devastationSmokeParticles;
-        private static SimpleParticleProperties healingParticles;
-        private static SimpleParticleProperties protectionEdgeSmokeParticles;
+        // Note: Particle properties are now created fresh each spawn to ensure correct positioning
+        // (static reuse caused position race conditions with rapid spawning)
         private static bool particlesInitialized = false;
 
         public override void Start(ICoreAPI api)
@@ -1687,72 +1687,102 @@ namespace SpreadingDevastation
 
         /// <summary>
         /// Initializes static particle properties for reuse. Call once during startup.
+        /// Note: We no longer use these directly - they serve as templates only.
         /// </summary>
         private void InitializeParticleProperties()
         {
             if (particlesInitialized) return;
-
-            // Devastation smoke: dark gray/purple wispy smoke rising from converted blocks
-            devastationSmokeParticles = new SimpleParticleProperties
-            {
-                MinQuantity = 3,
-                AddQuantity = 5,
-                Color = ColorUtil.ToRgba(180, 60, 40, 50), // Dark purple-gray smoke
-                MinPos = new Vec3d(),
-                AddPos = new Vec3d(0.8, 0.8, 0.8),
-                MinVelocity = new Vec3f(-0.1f, 0.3f, -0.1f),
-                AddVelocity = new Vec3f(0.2f, 0.4f, 0.2f),
-                LifeLength = 2.0f,
-                GravityEffect = -0.03f, // Upward drift
-                MinSize = 0.4f,
-                MaxSize = 1.0f,
-                ShouldDieInLiquid = true,
-                ParticleModel = EnumParticleModel.Quad,
-                OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, 180f)
-            };
-
-            // Healing particles: bright blue sparkles
-            healingParticles = new SimpleParticleProperties
-            {
-                MinQuantity = 4,
-                AddQuantity = 6,
-                Color = ColorUtil.ToRgba(255, 100, 180, 255), // Bright blue
-                MinPos = new Vec3d(),
-                AddPos = new Vec3d(0.8, 1.0, 0.8),
-                MinVelocity = new Vec3f(-0.15f, 0.2f, -0.15f),
-                AddVelocity = new Vec3f(0.3f, 0.5f, 0.3f),
-                LifeLength = 1.2f,
-                GravityEffect = -0.08f, // Float upward
-                MinSize = 0.2f,
-                MaxSize = 0.5f,
-                ShouldDieInLiquid = false,
-                ParticleModel = EnumParticleModel.Quad,
-                OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, 255f)
-            };
-
-            // Protection edge smoke: darker, more ominous smoke at boundaries
-            protectionEdgeSmokeParticles = new SimpleParticleProperties
-            {
-                MinQuantity = 2,
-                AddQuantity = 3,
-                Color = ColorUtil.ToRgba(150, 40, 30, 40), // Very dark smoke
-                MinPos = new Vec3d(),
-                AddPos = new Vec3d(0.6, 0.6, 0.6),
-                MinVelocity = new Vec3f(-0.05f, 0.15f, -0.05f),
-                AddVelocity = new Vec3f(0.1f, 0.2f, 0.1f),
-                LifeLength = 2.5f,
-                GravityEffect = -0.02f, // Slow upward drift
-                MinSize = 0.5f,
-                MaxSize = 1.2f,
-                ShouldDieInLiquid = true,
-                ParticleModel = EnumParticleModel.Quad,
-                OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, 150f)
-            };
-
             particlesInitialized = true;
         }
 
         /// <summary>
+        /// Creates a fresh devastation particle properties object with the given position.
+        /// Creating new objects each time ensures position is correct when particles are processed.
+        /// </summary>
+        private SimpleParticleProperties CreateDevastationParticles(BlockPos pos)
+        {
+            int baseQuantity = Math.Max(1, config.DevastationParticleCount - 2);
+            float lifetime = 2.0f * config.ParticleLifetimeMultiplier;
+            float startAlpha = 180f * config.ParticleOpacity;
+
+            return new SimpleParticleProperties
+            {
+                MinQuantity = (int)(baseQuantity * config.ParticleDensityMultiplier),
+                AddQuantity = (int)(4 * config.ParticleDensityMultiplier),
+                Color = ColorUtil.ToRgba((int)startAlpha, 60, 40, 50),
+                MinPos = new Vec3d(pos.X + 0.1, pos.Y + 0.1, pos.Z + 0.1),
+                AddPos = new Vec3d(0.8, 0.8, 0.8),
+                MinVelocity = new Vec3f(-0.1f, 0.3f, -0.1f),
+                AddVelocity = new Vec3f(0.2f, 0.4f, 0.2f),
+                LifeLength = lifetime,
+                GravityEffect = -0.03f,
+                MinSize = 0.4f * config.ParticleSizeMultiplier,
+                MaxSize = 1.0f * config.ParticleSizeMultiplier,
+                ShouldDieInLiquid = true,
+                ParticleModel = EnumParticleModel.Quad,
+                OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, startAlpha)
+            };
+        }
+
+        /// <summary>
+        /// Creates a fresh healing particle properties object with the given position.
+        /// </summary>
+        private SimpleParticleProperties CreateHealingParticles(BlockPos pos)
+        {
+            int baseQuantity = Math.Max(1, config.HealingParticleCount - 4);
+            float lifetime = 1.2f * config.ParticleLifetimeMultiplier;
+            float startAlpha = 255f * config.ParticleOpacity;
+
+            return new SimpleParticleProperties
+            {
+                MinQuantity = (int)(baseQuantity * config.ParticleDensityMultiplier),
+                AddQuantity = (int)(6 * config.ParticleDensityMultiplier),
+                Color = ColorUtil.ToRgba((int)startAlpha, 100, 180, 255),  // Bright blue
+                MinPos = new Vec3d(pos.X + 0.1, pos.Y + 0.1, pos.Z + 0.1),
+                AddPos = new Vec3d(0.8, 1.0, 0.8),
+                MinVelocity = new Vec3f(-0.15f, 0.2f, -0.15f),
+                AddVelocity = new Vec3f(0.3f, 0.5f, 0.3f),
+                LifeLength = lifetime,
+                GravityEffect = -0.08f,
+                MinSize = 0.2f * config.ParticleSizeMultiplier,
+                MaxSize = 0.5f * config.ParticleSizeMultiplier,
+                ShouldDieInLiquid = false,
+                ParticleModel = EnumParticleModel.Quad,
+                OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, startAlpha)
+            };
+        }
+
+        /// <summary>
+        /// Creates a fresh protection edge particle properties object with the given position.
+        /// </summary>
+        private SimpleParticleProperties CreateProtectionEdgeParticles(BlockPos pos)
+        {
+            float lifetime = 2.5f * config.ParticleLifetimeMultiplier;
+            float startAlpha = 150f * config.ParticleOpacity;
+
+            return new SimpleParticleProperties
+            {
+                MinQuantity = (int)(2 * config.ParticleDensityMultiplier),
+                AddQuantity = (int)(3 * config.ParticleDensityMultiplier),
+                Color = ColorUtil.ToRgba((int)startAlpha, 40, 30, 40),
+                MinPos = new Vec3d(pos.X + 0.2, pos.Y + 0.1, pos.Z + 0.2),
+                AddPos = new Vec3d(0.6, 0.6, 0.6),
+                MinVelocity = new Vec3f(-0.05f, 0.15f, -0.05f),
+                AddVelocity = new Vec3f(0.1f, 0.2f, 0.1f),
+                LifeLength = lifetime,
+                GravityEffect = -0.02f,
+                MinSize = 0.5f * config.ParticleSizeMultiplier,
+                MaxSize = 1.2f * config.ParticleSizeMultiplier,
+                ShouldDieInLiquid = true,
+                ParticleModel = EnumParticleModel.Quad,
+                OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, startAlpha)
+            };
+        }
+
+        /// <summary>
+        // Debug: log a sample of particle spawns to verify positions
+        private int debugParticleSpawnCount = 0;
+
         /// Spawns smoke particles at a block position when it is converted to devastated form.
         /// </summary>
         private void SpawnDevastationParticles(BlockPos pos)
@@ -1760,8 +1790,6 @@ namespace SpreadingDevastation
             try
             {
                 if (sapi == null || config == null || !config.DevastationParticlesEnabled) return;
-                if (!particlesInitialized) InitializeParticleProperties();
-                if (devastationSmokeParticles == null) return;
 
                 // Check if block has air above (performance optimization)
                 if (config.ParticlesRequireAirAbove && !HasAirAbove(pos)) return;
@@ -1769,36 +1797,36 @@ namespace SpreadingDevastation
                 // Check particle rate limit
                 if (!CanSpawnParticle(pos)) return;
 
-                // Set position for this spawn (center of block)
-                devastationSmokeParticles.MinPos.Set(pos.X + 0.1, pos.Y + 0.1, pos.Z + 0.1);
+                // Create fresh particle properties with position baked in
+                var particles = CreateDevastationParticles(pos);
 
-                // Apply density multiplier
-                int baseQuantity = Math.Max(1, config.DevastationParticleCount - 2);
-                devastationSmokeParticles.MinQuantity = (int)(baseQuantity * config.ParticleDensityMultiplier);
-                devastationSmokeParticles.AddQuantity = (int)(4 * config.ParticleDensityMultiplier);
+                // Debug: log every 100th particle spawn with full position info
+                debugParticleSpawnCount++;
+                if (debugParticleSpawnCount % 100 == 0)
+                {
+                    var player = sapi.World.AllOnlinePlayers.FirstOrDefault();
+                    if (player?.Entity != null)
+                    {
+                        double dist = Math.Sqrt(
+                            Math.Pow(player.Entity.Pos.X - pos.X, 2) +
+                            Math.Pow(player.Entity.Pos.Y - pos.Y, 2) +
+                            Math.Pow(player.Entity.Pos.Z - pos.Z, 2));
+                        sapi.Logger.Debug($"[ParticleSpawn] Devastation at ({pos.X}, {pos.Y}, {pos.Z}), Player at ({player.Entity.Pos.X:F1}, {player.Entity.Pos.Y:F1}, {player.Entity.Pos.Z:F1}), Dist: {dist:F1}");
+                    }
+                }
 
-                // Apply size multiplier
-                devastationSmokeParticles.MinSize = 0.4f * config.ParticleSizeMultiplier;
-                devastationSmokeParticles.MaxSize = 1.0f * config.ParticleSizeMultiplier;
-
-                // Apply lifetime multiplier and opacity setting
-                float lifetime = 2.0f * config.ParticleLifetimeMultiplier;
-                devastationSmokeParticles.LifeLength = lifetime;
-
-                // Apply starting opacity (base alpha 180 * opacity setting)
-                // Particles fade linearly from starting opacity to fully transparent over their lifetime
-                float startAlpha = 180f * config.ParticleOpacity;
-                devastationSmokeParticles.Color = ColorUtil.ToRgba((int)startAlpha, 60, 40, 50);
-                devastationSmokeParticles.OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, startAlpha);
-
-                sapi.World.SpawnParticles(devastationSmokeParticles);
-                particlesSpawnedThisSecond++;
+                // Spawn particles directly (let VS handle broadcasting to clients)
+                sapi.World.SpawnParticles(particles);
+                // Note: Counter is now incremented in CanSpawnParticle for FAR particles only
             }
             catch
             {
                 // Particle spawning is non-critical - don't let it break devastation spreading
             }
         }
+
+        // Debug: count healing particle spawns
+        private int debugHealingSpawnCount = 0;
 
         /// <summary>
         /// Spawns blue healing particles at a block position when it is cleansed/healed.
@@ -1808,8 +1836,6 @@ namespace SpreadingDevastation
             try
             {
                 if (sapi == null || config == null || !config.HealingParticlesEnabled) return;
-                if (!particlesInitialized) InitializeParticleProperties();
-                if (healingParticles == null) return;
 
                 // Check if block has air above (performance optimization)
                 if (config.ParticlesRequireAirAbove && !HasAirAbove(pos)) return;
@@ -1817,34 +1843,31 @@ namespace SpreadingDevastation
                 // Check particle rate limit
                 if (!CanSpawnParticle(pos)) return;
 
-                // Set position for this spawn (center of block)
-                healingParticles.MinPos.Set(pos.X + 0.1, pos.Y + 0.1, pos.Z + 0.1);
+                // Create fresh particle properties with position baked in
+                var particles = CreateHealingParticles(pos);
 
-                // Apply density multiplier
-                int baseQuantity = Math.Max(1, config.HealingParticleCount - 4);
-                healingParticles.MinQuantity = (int)(baseQuantity * config.ParticleDensityMultiplier);
-                healingParticles.AddQuantity = (int)(6 * config.ParticleDensityMultiplier);
+                // Debug: log every 10th healing particle spawn with full position info
+                debugHealingSpawnCount++;
+                if (debugHealingSpawnCount % 10 == 0)
+                {
+                    var firstPlayer = sapi.World.AllOnlinePlayers.FirstOrDefault();
+                    if (firstPlayer?.Entity != null)
+                    {
+                        double dist = Math.Sqrt(
+                            Math.Pow(firstPlayer.Entity.Pos.X - pos.X, 2) +
+                            Math.Pow(firstPlayer.Entity.Pos.Y - pos.Y, 2) +
+                            Math.Pow(firstPlayer.Entity.Pos.Z - pos.Z, 2));
+                        sapi.Logger.Debug($"[HealingSpawn] Healing at ({pos.X}, {pos.Y}, {pos.Z}), Player at ({firstPlayer.Entity.Pos.X:F1}, {firstPlayer.Entity.Pos.Y:F1}, {firstPlayer.Entity.Pos.Z:F1}), Dist: {dist:F1}");
+                    }
+                }
 
-                // Apply size multiplier
-                healingParticles.MinSize = 0.2f * config.ParticleSizeMultiplier;
-                healingParticles.MaxSize = 0.5f * config.ParticleSizeMultiplier;
-
-                // Apply lifetime multiplier and opacity setting
-                float lifetime = 1.2f * config.ParticleLifetimeMultiplier;
-                healingParticles.LifeLength = lifetime;
-
-                // Apply starting opacity (base alpha 255 * opacity setting)
-                // Particles fade linearly from starting opacity to fully transparent over their lifetime
-                float startAlpha = 255f * config.ParticleOpacity;
-                healingParticles.Color = ColorUtil.ToRgba((int)startAlpha, 100, 180, 255);
-                healingParticles.OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, startAlpha);
-
-                sapi.World.SpawnParticles(healingParticles);
-                particlesSpawnedThisSecond++;
+                // Spawn particles directly (not player-targeted, let VS handle broadcasting)
+                sapi.World.SpawnParticles(particles);
+                // Note: Counter is now incremented in CanSpawnParticle for FAR particles only
             }
-            catch
+            catch (Exception ex)
             {
-                // Particle spawning is non-critical - don't let it break healing
+                sapi?.Logger.Error($"[HealingSpawn] Error: {ex.Message}");
             }
         }
 
@@ -1856,31 +1879,10 @@ namespace SpreadingDevastation
             try
             {
                 if (sapi == null || config == null || !config.ProtectionEdgeParticlesEnabled) return;
-                if (!particlesInitialized) InitializeParticleProperties();
-                if (protectionEdgeSmokeParticles == null) return;
 
-                // Set position for this spawn (center of block)
-                protectionEdgeSmokeParticles.MinPos.Set(pos.X + 0.2, pos.Y + 0.1, pos.Z + 0.2);
-
-                // Apply density multiplier
-                protectionEdgeSmokeParticles.MinQuantity = (int)(2 * config.ParticleDensityMultiplier);
-                protectionEdgeSmokeParticles.AddQuantity = (int)(3 * config.ParticleDensityMultiplier);
-
-                // Apply size multiplier
-                protectionEdgeSmokeParticles.MinSize = 0.5f * config.ParticleSizeMultiplier;
-                protectionEdgeSmokeParticles.MaxSize = 1.2f * config.ParticleSizeMultiplier;
-
-                // Apply lifetime multiplier and opacity setting
-                float lifetime = 2.5f * config.ParticleLifetimeMultiplier;
-                protectionEdgeSmokeParticles.LifeLength = lifetime;
-
-                // Apply starting opacity (base alpha 150 * opacity setting)
-                // Particles fade linearly from starting opacity to fully transparent over their lifetime
-                float startAlpha = 150f * config.ParticleOpacity;
-                protectionEdgeSmokeParticles.Color = ColorUtil.ToRgba((int)startAlpha, 40, 30, 40);
-                protectionEdgeSmokeParticles.OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, startAlpha);
-
-                sapi.World.SpawnParticles(protectionEdgeSmokeParticles);
+                // Create fresh particle properties with position baked in
+                var particles = CreateProtectionEdgeParticles(pos);
+                sapi.World.SpawnParticles(particles);
             }
             catch
             {
@@ -1912,26 +1914,38 @@ namespace SpreadingDevastation
 
         /// <summary>
         /// Checks if a particle can be spawned based on rate limiting and player proximity.
-        /// Nearby particles (within proximity) always spawn. Far particles only spawn if under the limit.
+        /// NEAR particles have priority and use the limit first.
+        /// FAR particles only spawn if there's budget remaining AND not in blackout period.
+        /// If a NEAR particle is denied due to the limit, FAR particles are blocked for 2x particle lifetime.
         /// </summary>
+        // Debug: track particle decisions for logging
+        private int debugNearAllowed = 0;
+        private int debugNearBlocked = 0;
+        private int debugFarAllowed = 0;
+        private int debugFarBlocked = 0;
+        private int debugFarBlackout = 0;
+        private double lastParticleDebugLogTime = 0;
+
         private bool CanSpawnParticle(BlockPos pos)
         {
             try
             {
                 if (sapi == null || config == null) return false;
 
-                // Reset counter every real-time second
+                // Reset particle counters every real-time second
                 long currentTicks = DateTime.UtcNow.Ticks;
                 long ticksPerSecond = TimeSpan.TicksPerSecond;
                 if (currentTicks - lastParticleResetTicks >= ticksPerSecond)
                 {
                     lastParticleResetTicks = currentTicks;
-                    particlesSpawnedThisSecond = 0;
+                    nearParticlesSpawnedThisSecond = 0;
+                    farParticlesSpawnedThisSecond = 0;
                 }
 
                 // Check if near any player
                 int proximityBlocks = config.ParticlePlayerProximityChunks * CHUNK_SIZE;
                 bool isNearPlayer = false;
+                double closestDistSq = double.MaxValue;
 
                 foreach (IServerPlayer player in sapi.World.AllOnlinePlayers.Cast<IServerPlayer>())
                 {
@@ -1942,6 +1956,8 @@ namespace SpreadingDevastation
                     double dz = player.Entity.Pos.Z - pos.Z;
                     double distSq = dx * dx + dy * dy + dz * dz;
 
+                    if (distSq < closestDistSq) closestDistSq = distSq;
+
                     if (distSq <= proximityBlocks * proximityBlocks)
                     {
                         isNearPlayer = true;
@@ -1949,17 +1965,70 @@ namespace SpreadingDevastation
                     }
                 }
 
-                // Nearby particles always spawn
+                // NEAR particles: Get priority access to the particle budget
                 if (isNearPlayer)
                 {
-                    return true;
+                    if (nearParticlesSpawnedThisSecond < config.MaxParticlesPerSecond)
+                    {
+                        nearParticlesSpawnedThisSecond++;
+                        debugNearAllowed++;
+                        return true;
+                    }
+                    else
+                    {
+                        // Near particle was denied! Trigger far particle blackout for 2x particle lifetime
+                        // Particle lifetime is 2.0 seconds * ParticleLifetimeMultiplier (from CreateDevastationParticles)
+                        float particleLifetimeSeconds = 2.0f * config.ParticleLifetimeMultiplier;
+                        long blackoutDurationTicks = (long)(2.0 * particleLifetimeSeconds * TimeSpan.TicksPerSecond);
+                        farParticleBlackoutUntilTicks = currentTicks + blackoutDurationTicks;
+
+                        debugNearBlocked++;
+                        sapi.Logger.Debug($"[Particles] Near particle blocked at ({pos.X}, {pos.Y}, {pos.Z}) - triggering {2.0 * particleLifetimeSeconds:F1}s far blackout");
+                        return false;
+                    }
                 }
 
-                // Far particles only spawn if under the limit
-                return particlesSpawnedThisSecond < config.MaxParticlesPerSecond;
+                // FAR particles: Check blackout period first
+                if (currentTicks < farParticleBlackoutUntilTicks)
+                {
+                    debugFarBlackout++;
+                    return false;
+                }
+
+                // FAR particles: Can only use budget not consumed by near particles
+                // This ensures near particles always have priority
+                int remainingBudget = config.MaxParticlesPerSecond - nearParticlesSpawnedThisSecond;
+                bool allowed = farParticlesSpawnedThisSecond < remainingBudget;
+
+                if (allowed)
+                {
+                    farParticlesSpawnedThisSecond++;
+                    debugFarAllowed++;
+                }
+                else
+                {
+                    debugFarBlocked++;
+                }
+
+                // Debug log every 5 seconds
+                double currentTime = sapi.World.Calendar.TotalHours;
+                if (currentTime - lastParticleDebugLogTime > 5.0 / 3600.0)
+                {
+                    lastParticleDebugLogTime = currentTime;
+                    bool inBlackout = currentTicks < farParticleBlackoutUntilTicks;
+                    sapi.Logger.Debug($"[Particles] Near:{debugNearAllowed} NearBlk:{debugNearBlocked} FarOK:{debugFarAllowed} FarBlk:{debugFarBlocked} FarBO:{debugFarBlackout} | Limit:{config.MaxParticlesPerSecond} Prox:{proximityBlocks} Blackout:{inBlackout}");
+                    debugNearAllowed = 0;
+                    debugNearBlocked = 0;
+                    debugFarAllowed = 0;
+                    debugFarBlocked = 0;
+                    debugFarBlackout = 0;
+                }
+
+                return allowed;
             }
-            catch
+            catch (Exception ex)
             {
+                sapi?.Logger.Error($"[Particles] CanSpawnParticle error: {ex.Message}");
                 return true; // On error, allow particle to not break functionality
             }
         }
