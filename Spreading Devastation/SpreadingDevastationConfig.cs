@@ -370,5 +370,57 @@ namespace SpreadingDevastation
         /// Particles fade linearly from this opacity to fully transparent over their lifetime.
         /// </summary>
         public float ParticleOpacity { get; set; } = 1.0f;
+
+        // === Fog Wall Settings ===
+        // These control the semi-transparent fog walls rendered at devastated chunk boundaries
+
+        /// <summary>
+        /// Whether to render fog walls at devastated chunk boundaries (default: true).
+        /// Fog walls are visible from outside devastated areas as a warning.
+        /// </summary>
+        public bool FogWallsEnabled { get; set; } = true;
+
+        /// <summary>
+        /// Height of the fog walls in blocks (default: 128).
+        /// </summary>
+        public float FogWallHeight { get; set; } = 128f;
+
+        /// <summary>
+        /// Base opacity of the fog walls (0.0-1.0, default: 0.15).
+        /// Higher values make walls more visible but less transparent.
+        /// </summary>
+        public float FogWallOpacity { get; set; } = 0.15f;
+
+        /// <summary>
+        /// Maximum distance at which fog walls are rendered (default: 1000 blocks).
+        /// Walls beyond this distance are not drawn.
+        /// </summary>
+        public float FogWallMaxDistance { get; set; } = 1000f;
+
+        /// <summary>
+        /// Distance at which fog walls start to fade out (default: 200 blocks).
+        /// Walls fade from full opacity at this distance to invisible at MaxDistance.
+        /// </summary>
+        public float FogWallFadeDistance { get; set; } = 200f;
+
+        /// <summary>
+        /// Red component of fog wall color (0.0-1.0, default: 0.55).
+        /// </summary>
+        public float FogWallColorR { get; set; } = 0.55f;
+
+        /// <summary>
+        /// Green component of fog wall color (0.0-1.0, default: 0.25).
+        /// </summary>
+        public float FogWallColorG { get; set; } = 0.25f;
+
+        /// <summary>
+        /// Blue component of fog wall color (0.0-1.0, default: 0.15).
+        /// </summary>
+        public float FogWallColorB { get; set; } = 0.15f;
+
+        /// <summary>
+        /// Z-offset for fog walls to prevent z-fighting with terrain (default: 0.5).
+        /// </summary>
+        public float FogWallZOffset { get; set; } = 0.5f;
     }
 }

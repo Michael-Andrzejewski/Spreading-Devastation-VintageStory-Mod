@@ -59,6 +59,7 @@ namespace SpreadingDevastation
         private const string NETWORK_CHANNEL_NAME = "spreadingdevastation";
         private IServerNetworkChannel serverNetworkChannel;
         private bool fogConfigDirty = true; // Flag to track if fog config needs to be sent
+        private bool fogWallConfigDirty = true; // Flag to track if fog wall config needs to be sent
 
         // Temporal stability system hook for gear visual (server and client)
         private SystemTemporalStability temporalStabilitySystemServer;
@@ -69,7 +70,9 @@ namespace SpreadingDevastation
         private IClientNetworkChannel clientNetworkChannel;
         private HashSet<long> clientDevastatedChunks = new HashSet<long>(); // Chunk keys received from server
         private DevastationFogRenderer fogRenderer;
+        private DevastationFogWallRenderer fogWallRenderer;
         private FogConfigPacket clientFogConfig = new FogConfigPacket(); // Fog config received from server
+        private FogWallConfigPacket clientFogWallConfig = new FogWallConfigPacket(); // Fog wall config received from server
 
         // Animal insanity tracking
         private double lastInsanityCheckTime = 0; // Track last time we checked for animals to drive insane
@@ -97,7 +100,8 @@ namespace SpreadingDevastation
             api.Network
                 .RegisterChannel(NETWORK_CHANNEL_NAME)
                 .RegisterMessageType(typeof(DevastatedChunkSyncPacket))
-                .RegisterMessageType(typeof(FogConfigPacket));
+                .RegisterMessageType(typeof(FogConfigPacket))
+                .RegisterMessageType(typeof(FogWallConfigPacket));
         }
 
         public override void StartClientSide(ICoreClientAPI api)
@@ -107,11 +111,16 @@ namespace SpreadingDevastation
             // Get the network channel and set up message handlers
             clientNetworkChannel = api.Network.GetChannel(NETWORK_CHANNEL_NAME)
                 .SetMessageHandler<DevastatedChunkSyncPacket>(OnDevastatedChunkSync)
-                .SetMessageHandler<FogConfigPacket>(OnFogConfigSync);
+                .SetMessageHandler<FogConfigPacket>(OnFogConfigSync)
+                .SetMessageHandler<FogWallConfigPacket>(OnFogWallConfigSync);
 
-            // Create and register the fog renderer
+            // Create and register the fog renderer (atmospheric effect when inside devastated chunks)
             fogRenderer = new DevastationFogRenderer(api, this);
             api.Event.RegisterRenderer(fogRenderer, EnumRenderStage.Before, "devastationfog");
+
+            // Create and register the fog wall renderer (visible walls at chunk boundaries)
+            fogWallRenderer = new DevastationFogWallRenderer(api, this);
+            api.Event.RegisterRenderer(fogWallRenderer, EnumRenderStage.OIT, "devastationfogwalls");
 
             // Hook into the client-side temporal stability system after player enters world
             // This makes the gear spin counter-clockwise in devastated chunks
@@ -142,11 +151,29 @@ namespace SpreadingDevastation
         }
 
         /// <summary>
+        /// Called when the client receives fog wall configuration from the server.
+        /// </summary>
+        private void OnFogWallConfigSync(FogWallConfigPacket packet)
+        {
+            clientFogWallConfig = packet;
+            fogWallRenderer?.UpdateConfig(packet);
+        }
+
+        /// <summary>
         /// Gets the current fog config for the client.
         /// </summary>
         public FogConfigPacket GetFogConfig()
         {
             return clientFogConfig;
+        }
+
+        /// <summary>
+        /// Gets the set of devastated chunk keys for client-side rendering.
+        /// Used by the fog wall renderer to know where to draw walls.
+        /// </summary>
+        public HashSet<long> GetClientDevastatedChunkKeys()
+        {
+            return clientDevastatedChunks;
         }
 
         /// <summary>
@@ -366,6 +393,25 @@ namespace SpreadingDevastation
                 fogConfigDirty = false;
             }
 
+            // Only create fog wall config packet when it has changed
+            FogWallConfigPacket fogWallPacket = null;
+            if (fogWallConfigDirty)
+            {
+                fogWallPacket = new FogWallConfigPacket
+                {
+                    Enabled = config.FogWallsEnabled,
+                    Height = config.FogWallHeight,
+                    Opacity = config.FogWallOpacity,
+                    ColorR = config.FogWallColorR,
+                    ColorG = config.FogWallColorG,
+                    ColorB = config.FogWallColorB,
+                    MaxDistance = config.FogWallMaxDistance,
+                    FadeDistance = config.FogWallFadeDistance,
+                    ZOffset = config.FogWallZOffset
+                };
+                fogWallConfigDirty = false;
+            }
+
             bool hasChunks = devastatedChunks != null && devastatedChunks.Count > 0;
 
             for (int i = 0; i < players.Length; i++)
@@ -377,6 +423,12 @@ namespace SpreadingDevastation
                 if (fogPacket != null)
                 {
                     serverNetworkChannel.SendPacket(fogPacket, player);
+                }
+
+                // Send fog wall config only when it changed
+                if (fogWallPacket != null)
+                {
+                    serverNetworkChannel.SendPacket(fogWallPacket, player);
                 }
 
                 var playerPos = player.Entity.Pos;
@@ -414,6 +466,14 @@ namespace SpreadingDevastation
         private void BroadcastFogConfig()
         {
             fogConfigDirty = true;
+        }
+
+        /// <summary>
+        /// Marks the fog wall configuration as changed, so it will be sent to clients on next sync.
+        /// </summary>
+        private void BroadcastFogWallConfig()
+        {
+            fogWallConfigDirty = true;
         }
 
         private void LoadConfig()
