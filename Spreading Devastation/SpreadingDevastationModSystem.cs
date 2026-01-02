@@ -4,7 +4,6 @@ using System.Diagnostics;
 using System.Linq;
 using System.Globalization;
 using System.Reflection;
-using System.Security.Cryptography;
 using ProtoBuf;
 using Vintagestory.API.Common;
 using Vintagestory.API.Common.Entities;
@@ -54,6 +53,13 @@ namespace SpreadingDevastation
         private HashSet<long> protectedChunkKeys = new HashSet<long>(); // Cache of chunk keys protected by rift wards
         private bool initialRiftWardScanCompleted = false; // Whether initial world scan for rift wards has completed
         private double lastFullRiftWardScanTime = 0; // Track last full world scan for rift wards
+
+        // Cached reflection info for rift ward (avoids repeated GetProperty/GetField calls)
+        private static PropertyInfo riftWardOnProperty = null;
+        private static PropertyInfo riftWardHasFuelProperty = null;
+        private static FieldInfo riftWardFuelDaysField = null;
+        private static Type riftWardBlockEntityType = null;
+        private static bool riftWardReflectionInitialized = false;
 
         // Network channel for client-server sync
         private const string NETWORK_CHANNEL_NAME = "spreadingdevastation";
@@ -888,31 +894,40 @@ namespace SpreadingDevastation
         private void CleanupSaturatedSources()
         {
             if (devastationSources == null || devastationSources.Count == 0) return;
-            
+
             // Only cleanup if we're using more than half of the source cap
             // This ensures we have room for new metastasis
             if (devastationSources.Count < config.MaxSources / 2) return;
-            
-            // Find saturated, non-protected sources that can be removed
-            var saturatedSources = devastationSources
-                .Where(s => s.IsSaturated && !s.IsProtected && !s.IsHealing)
-                .ToList();
-            
-            if (saturatedSources.Count == 0) return;
-            
+
+            // Find saturated, non-protected sources that can be removed (single pass)
+            List<DevastationSource> saturatedSources = null;
+            for (int i = 0; i < devastationSources.Count; i++)
+            {
+                var s = devastationSources[i];
+                if (s.IsSaturated && !s.IsProtected && !s.IsHealing)
+                {
+                    if (saturatedSources == null) saturatedSources = new List<DevastationSource>();
+                    saturatedSources.Add(s);
+                }
+            }
+
+            if (saturatedSources == null || saturatedSources.Count == 0) return;
+
             // Remove up to 1/4 of saturated sources each cleanup cycle
             int toRemove = Math.Max(1, saturatedSources.Count / 4);
-            
-            // Prioritize removing sources with highest generation level (furthest from origin)
-            var sourcesToRemove = saturatedSources
-                .OrderByDescending(s => s.GenerationLevel)
-                .ThenByDescending(s => s.BlocksDevastatedTotal)
-                .Take(toRemove)
-                .ToList();
-            
-            foreach (var source in sourcesToRemove)
+
+            // Sort in place: prioritize sources with highest generation level
+            saturatedSources.Sort((a, b) =>
             {
-                devastationSources.Remove(source);
+                int cmp = b.GenerationLevel.CompareTo(a.GenerationLevel);
+                if (cmp != 0) return cmp;
+                return b.BlocksDevastatedTotal.CompareTo(a.BlocksDevastatedTotal);
+            });
+
+            // Remove top N
+            for (int i = 0; i < toRemove && i < saturatedSources.Count; i++)
+            {
+                devastationSources.Remove(saturatedSources[i]);
             }
         }
 
@@ -934,9 +949,9 @@ namespace SpreadingDevastation
                 double distance = GenerateWeightedDistance(source.CurrentRadius);
                 
                 // Convert distance to actual offset with random direction
-                double angle = RandomNumberGenerator.GetInt32(360) * Math.PI / 180.0;
-                double angleY = (RandomNumberGenerator.GetInt32(180) - 90) * Math.PI / 180.0;
-                
+                double angle = sapi.World.Rand.Next(360) * Math.PI / 180.0;
+                double angleY = (sapi.World.Rand.Next(180) - 90) * Math.PI / 180.0;
+
                 int offsetX = (int)(distance * Math.Cos(angle) * Math.Cos(angleY));
                 int offsetY = (int)(distance * Math.Sin(angleY));
                 int offsetZ = (int)(distance * Math.Sin(angle) * Math.Cos(angleY));
@@ -1005,7 +1020,7 @@ namespace SpreadingDevastation
             // Formula: distance = maxDistance * (1 - sqrt(random))
             // This gives exponential bias toward center
             
-            double random = RandomNumberGenerator.GetInt32(10000) / 10000.0; // 0.0 to 1.0
+            double random = sapi.World.Rand.Next(10000) / 10000.0; // 0.0 to 1.0
             double weighted = 1.0 - Math.Sqrt(random); // Bias toward 0
             return maxDistance * weighted;
         }
@@ -1022,10 +1037,10 @@ namespace SpreadingDevastation
             {
                 // Generate distance-weighted random offset (same as devastation)
                 double distance = GenerateWeightedDistance(source.CurrentRadius);
-                
-                double angle = RandomNumberGenerator.GetInt32(360) * Math.PI / 180.0;
-                double angleY = (RandomNumberGenerator.GetInt32(180) - 90) * Math.PI / 180.0;
-                
+
+                double angle = sapi.World.Rand.Next(360) * Math.PI / 180.0;
+                double angleY = (sapi.World.Rand.Next(180) - 90) * Math.PI / 180.0;
+
                 int offsetX = (int)(distance * Math.Cos(angle) * Math.Cos(angleY));
                 int offsetY = (int)(distance * Math.Sin(angleY));
                 int offsetZ = (int)(distance * Math.Sin(angle) * Math.Cos(angleY));
@@ -1178,30 +1193,35 @@ namespace SpreadingDevastation
             return (double)devastatedCount / totalConvertibleCount;
         }
 
+        // Reusable BlockPos for air adjacency checks (avoids allocations)
+        private BlockPos tmpAirCheckPos = new BlockPos(0, 0, 0, 0);
+
         /// <summary>
         /// Checks if a position is adjacent to at least one air block.
+        /// Uses reusable BlockPos to avoid allocations.
         /// </summary>
         private bool IsAdjacentToAir(BlockPos pos)
         {
-            BlockPos[] neighbors = new BlockPos[]
-            {
-                new BlockPos(pos.X + 1, pos.Y, pos.Z),
-                new BlockPos(pos.X - 1, pos.Y, pos.Z),
-                new BlockPos(pos.X, pos.Y + 1, pos.Z),
-                new BlockPos(pos.X, pos.Y - 1, pos.Z),
-                new BlockPos(pos.X, pos.Y, pos.Z + 1),
-                new BlockPos(pos.X, pos.Y, pos.Z - 1)
-            };
-            
-            foreach (var neighbor in neighbors)
-            {
-                Block block = sapi.World.BlockAccessor.GetBlock(neighbor);
-                if (block != null && block.Id == 0) // Air block
-                {
-                    return true;
-                }
-            }
-            
+            // Check all 6 cardinal directions using reusable BlockPos
+            // +X
+            tmpAirCheckPos.Set(pos.X + 1, pos.Y, pos.Z);
+            if (sapi.World.BlockAccessor.GetBlock(tmpAirCheckPos)?.Id == 0) return true;
+            // -X
+            tmpAirCheckPos.Set(pos.X - 1, pos.Y, pos.Z);
+            if (sapi.World.BlockAccessor.GetBlock(tmpAirCheckPos)?.Id == 0) return true;
+            // +Y
+            tmpAirCheckPos.Set(pos.X, pos.Y + 1, pos.Z);
+            if (sapi.World.BlockAccessor.GetBlock(tmpAirCheckPos)?.Id == 0) return true;
+            // -Y
+            tmpAirCheckPos.Set(pos.X, pos.Y - 1, pos.Z);
+            if (sapi.World.BlockAccessor.GetBlock(tmpAirCheckPos)?.Id == 0) return true;
+            // +Z
+            tmpAirCheckPos.Set(pos.X, pos.Y, pos.Z + 1);
+            if (sapi.World.BlockAccessor.GetBlock(tmpAirCheckPos)?.Id == 0) return true;
+            // -Z
+            tmpAirCheckPos.Set(pos.X, pos.Y, pos.Z - 1);
+            if (sapi.World.BlockAccessor.GetBlock(tmpAirCheckPos)?.Id == 0) return true;
+
             return false;
         }
 
@@ -1315,7 +1335,7 @@ namespace SpreadingDevastation
             double maxMultiplier = 1.0 + variation;
             
             // Generate random multiplier between min and max
-            double multiplier = minMultiplier + (RandomNumberGenerator.GetInt32(1001) / 1000.0) * (maxMultiplier - minMultiplier);
+            double multiplier = minMultiplier + (sapi.World.Rand.Next(1001) / 1000.0) * (maxMultiplier - minMultiplier);
             
             int childRange = (int)Math.Round(parentRange * multiplier);
             return Math.Clamp(childRange, 3, 128); // Ensure reasonable bounds
@@ -1340,10 +1360,10 @@ namespace SpreadingDevastation
             for (int i = 0; i < probeCount; i++)
             {
                 // Generate random angle
-                double angle = RandomNumberGenerator.GetInt32(360) * Math.PI / 180.0;
-                
+                double angle = sapi.World.Rand.Next(360) * Math.PI / 180.0;
+
                 // Generate distance between searchMinRadius and searchMaxRadius
-                double distance = searchMinRadius + (RandomNumberGenerator.GetInt32(1000) / 1000.0) * (searchMaxRadius - searchMinRadius);
+                double distance = searchMinRadius + (sapi.World.Rand.Next(1000) / 1000.0) * (searchMaxRadius - searchMinRadius);
                 
                 int offsetX = (int)(distance * Math.Cos(angle));
                 int offsetZ = (int)(distance * Math.Sin(angle));
@@ -1381,15 +1401,27 @@ namespace SpreadingDevastation
             }
             
             if (candidates.Count == 0) return null;
-            
+
             // Pick the best candidate (most non-devastated blocks nearby)
             // Also ensure it's not too close to existing sources
-            var validCandidates = candidates
-                .Where(c => !IsTooCloseToExistingSources(c, source.Range * 0.5))
-                .OrderByDescending(c => CountNonDevastatedNearby(c, 4))
-                .ToList();
-            
-            return validCandidates.Count > 0 ? validCandidates[0] : null;
+            BlockPos bestCandidate = null;
+            int bestScore = -1;
+            double minDistanceSq = source.Range * 0.5 * source.Range * 0.5;
+
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                var c = candidates[i];
+                if (IsTooCloseToExistingSources(c, source.Range * 0.5)) continue;
+
+                int score = CountNonDevastatedNearby(c, 4);
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    bestCandidate = c;
+                }
+            }
+
+            return bestCandidate;
         }
 
         /// <summary>
@@ -1466,22 +1498,39 @@ namespace SpreadingDevastation
         private void RemoveOldestSources(int count)
         {
             if (count <= 0 || devastationSources.Count == 0) return;
-            
-            // Sort sources by priority for removal:
-            // 1. Saturated sources (remove first - they're done)
-            // 2. Higher generation level (newer metastasis children first - keep roots alive longer)
-            // 3. Higher blocks devastated (more complete)
-            var sourcesToRemove = devastationSources
-                .Where(s => !s.IsHealing && !s.IsProtected) // Don't remove healing or protected sources
-                .OrderByDescending(s => s.IsSaturated ? 1 : 0) // Saturated first
-                .ThenByDescending(s => s.GenerationLevel) // Newest generation first (remove children before parents)
-                .ThenByDescending(s => s.BlocksDevastatedTotal) // Most complete first
-                .Take(count)
-                .ToList();
-            
-            foreach (var source in sourcesToRemove)
+
+            // Build list of removable sources (single pass)
+            List<DevastationSource> removable = null;
+            for (int i = 0; i < devastationSources.Count; i++)
             {
-                devastationSources.Remove(source);
+                var s = devastationSources[i];
+                if (!s.IsHealing && !s.IsProtected)
+                {
+                    if (removable == null) removable = new List<DevastationSource>();
+                    removable.Add(s);
+                }
+            }
+
+            if (removable == null || removable.Count == 0) return;
+
+            // Sort in place by priority for removal
+            removable.Sort((a, b) =>
+            {
+                // Saturated first
+                int cmpSat = (b.IsSaturated ? 1 : 0).CompareTo(a.IsSaturated ? 1 : 0);
+                if (cmpSat != 0) return cmpSat;
+                // Higher generation first
+                int cmpGen = b.GenerationLevel.CompareTo(a.GenerationLevel);
+                if (cmpGen != 0) return cmpGen;
+                // More blocks devastated first
+                return b.BlocksDevastatedTotal.CompareTo(a.BlocksDevastatedTotal);
+            });
+
+            // Remove top N
+            int toRemove = Math.Min(count, removable.Count);
+            for (int i = 0; i < toRemove; i++)
+            {
+                devastationSources.Remove(removable[i]);
             }
         }
         
@@ -1511,8 +1560,8 @@ namespace SpreadingDevastation
                 for (int i = 0; i < probeCount; i++)
                 {
                     // Generate random position at this distance
-                    double angle = RandomNumberGenerator.GetInt32(360) * Math.PI / 180.0;
-                    double angleY = (RandomNumberGenerator.GetInt32(60) - 30) * Math.PI / 180.0; // Flatter angle for long-range
+                    double angle = sapi.World.Rand.Next(360) * Math.PI / 180.0;
+                    double angleY = (sapi.World.Rand.Next(60) - 30) * Math.PI / 180.0; // Flatter angle for long-range
                     
                     int offsetX = (int)(cappedDist * Math.Cos(angle) * Math.Cos(angleY));
                     int offsetY = (int)(cappedDist * Math.Sin(angleY));
@@ -1546,8 +1595,14 @@ namespace SpreadingDevastation
                 }
             }
             
-            // Select best candidates, spaced apart
-            candidates = candidates.OrderByDescending(c => CountNonDevastatedNearby(c, 6)).ToList();
+            // Select best candidates, spaced apart - sort in place to avoid allocation
+            // Cache scores to avoid calling CountNonDevastatedNearby multiple times per comparison
+            var scores = new Dictionary<BlockPos, int>(candidates.Count);
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                scores[candidates[i]] = CountNonDevastatedNearby(candidates[i], 6);
+            }
+            candidates.Sort((a, b) => scores[b].CompareTo(scores[a]));
             
             foreach (var candidate in candidates)
             {
@@ -1884,61 +1939,80 @@ namespace SpreadingDevastation
             particlesInitialized = true;
         }
 
+        // Pooled particle properties to avoid allocations (position updated before each spawn)
+        private SimpleParticleProperties pooledDevastationParticles = null;
+        private SimpleParticleProperties pooledHealingParticles = null;
+
         /// <summary>
-        /// Creates a fresh devastation particle properties object with the given position.
-        /// Creating new objects each time ensures position is correct when particles are processed.
+        /// Gets or creates a devastation particle properties object, updating position.
+        /// Uses pooled object to avoid allocations - position is updated before spawn.
         /// </summary>
         private SimpleParticleProperties CreateDevastationParticles(BlockPos pos)
         {
-            int baseQuantity = Math.Max(1, config.DevastationParticleCount - 2);
-            float lifetime = 2.0f * config.ParticleLifetimeMultiplier;
-            float startAlpha = 180f * config.ParticleOpacity;
-
-            return new SimpleParticleProperties
+            if (pooledDevastationParticles == null)
             {
-                MinQuantity = (int)(baseQuantity * config.ParticleDensityMultiplier),
-                AddQuantity = (int)(4 * config.ParticleDensityMultiplier),
-                Color = ColorUtil.ToRgba((int)startAlpha, 60, 40, 50),
-                MinPos = new Vec3d(pos.X + 0.1, pos.Y + 0.1, pos.Z + 0.1),
-                AddPos = new Vec3d(0.8, 0.8, 0.8),
-                MinVelocity = new Vec3f(-0.1f, 0.3f, -0.1f),
-                AddVelocity = new Vec3f(0.2f, 0.4f, 0.2f),
-                LifeLength = lifetime,
-                GravityEffect = -0.03f,
-                MinSize = 0.4f * config.ParticleSizeMultiplier,
-                MaxSize = 1.0f * config.ParticleSizeMultiplier,
-                ShouldDieInLiquid = true,
-                ParticleModel = EnumParticleModel.Quad,
-                OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, startAlpha)
-            };
+                int baseQuantity = Math.Max(1, config.DevastationParticleCount - 2);
+                float lifetime = 2.0f * config.ParticleLifetimeMultiplier;
+                float startAlpha = 180f * config.ParticleOpacity;
+
+                pooledDevastationParticles = new SimpleParticleProperties
+                {
+                    MinQuantity = (int)(baseQuantity * config.ParticleDensityMultiplier),
+                    AddQuantity = (int)(4 * config.ParticleDensityMultiplier),
+                    Color = ColorUtil.ToRgba((int)startAlpha, 60, 40, 50),
+                    MinPos = new Vec3d(0, 0, 0),
+                    AddPos = new Vec3d(0.8, 0.8, 0.8),
+                    MinVelocity = new Vec3f(-0.1f, 0.3f, -0.1f),
+                    AddVelocity = new Vec3f(0.2f, 0.4f, 0.2f),
+                    LifeLength = lifetime,
+                    GravityEffect = -0.03f,
+                    MinSize = 0.4f * config.ParticleSizeMultiplier,
+                    MaxSize = 1.0f * config.ParticleSizeMultiplier,
+                    ShouldDieInLiquid = true,
+                    ParticleModel = EnumParticleModel.Quad,
+                    OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, startAlpha)
+                };
+            }
+
+            // Update position for this spawn
+            pooledDevastationParticles.MinPos.Set(pos.X + 0.1, pos.Y + 0.1, pos.Z + 0.1);
+            return pooledDevastationParticles;
         }
 
         /// <summary>
-        /// Creates a fresh healing particle properties object with the given position.
+        /// Gets or creates a healing particle properties object, updating position.
+        /// Uses pooled object to avoid allocations.
         /// </summary>
         private SimpleParticleProperties CreateHealingParticles(BlockPos pos)
         {
-            int baseQuantity = Math.Max(1, config.HealingParticleCount - 4);
-            float lifetime = 1.2f * config.ParticleLifetimeMultiplier;
-            float startAlpha = 255f * config.ParticleOpacity;
-
-            return new SimpleParticleProperties
+            if (pooledHealingParticles == null)
             {
-                MinQuantity = (int)(baseQuantity * config.ParticleDensityMultiplier),
-                AddQuantity = (int)(6 * config.ParticleDensityMultiplier),
-                Color = ColorUtil.ToRgba((int)startAlpha, 100, 180, 255),  // Bright blue
-                MinPos = new Vec3d(pos.X + 0.1, pos.Y + 0.1, pos.Z + 0.1),
-                AddPos = new Vec3d(0.8, 1.0, 0.8),
-                MinVelocity = new Vec3f(-0.15f, 0.2f, -0.15f),
-                AddVelocity = new Vec3f(0.3f, 0.5f, 0.3f),
-                LifeLength = lifetime,
-                GravityEffect = -0.08f,
-                MinSize = 0.2f * config.ParticleSizeMultiplier,
-                MaxSize = 0.5f * config.ParticleSizeMultiplier,
-                ShouldDieInLiquid = false,
-                ParticleModel = EnumParticleModel.Quad,
-                OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, startAlpha)
-            };
+                int baseQuantity = Math.Max(1, config.HealingParticleCount - 4);
+                float lifetime = 1.2f * config.ParticleLifetimeMultiplier;
+                float startAlpha = 255f * config.ParticleOpacity;
+
+                pooledHealingParticles = new SimpleParticleProperties
+                {
+                    MinQuantity = (int)(baseQuantity * config.ParticleDensityMultiplier),
+                    AddQuantity = (int)(6 * config.ParticleDensityMultiplier),
+                    Color = ColorUtil.ToRgba((int)startAlpha, 100, 180, 255),  // Bright blue
+                    MinPos = new Vec3d(0, 0, 0),
+                    AddPos = new Vec3d(0.8, 1.0, 0.8),
+                    MinVelocity = new Vec3f(-0.15f, 0.2f, -0.15f),
+                    AddVelocity = new Vec3f(0.3f, 0.5f, 0.3f),
+                    LifeLength = lifetime,
+                    GravityEffect = -0.08f,
+                    MinSize = 0.2f * config.ParticleSizeMultiplier,
+                    MaxSize = 0.5f * config.ParticleSizeMultiplier,
+                    ShouldDieInLiquid = false,
+                    ParticleModel = EnumParticleModel.Quad,
+                    OpacityEvolve = new EvolvingNatFloat(EnumTransformFunction.LINEARREDUCE, startAlpha)
+                };
+            }
+
+            // Update position for this spawn
+            pooledHealingParticles.MinPos.Set(pos.X + 0.1, pos.Y + 0.1, pos.Z + 0.1);
+            return pooledHealingParticles;
         }
 
         // Debug: log a sample of particle spawns to verify positions
@@ -2089,9 +2163,11 @@ namespace SpreadingDevastation
                 bool isNearPlayer = false;
                 double closestDistSq = double.MaxValue;
 
-                foreach (IServerPlayer player in sapi.World.AllOnlinePlayers.Cast<IServerPlayer>())
+                var allPlayers = sapi.World.AllOnlinePlayers;
+                for (int i = 0; i < allPlayers.Length; i++)
                 {
-                    if (player.Entity == null) continue;
+                    IServerPlayer player = allPlayers[i] as IServerPlayer;
+                    if (player?.Entity == null) continue;
 
                     double dx = player.Entity.Pos.X - pos.X;
                     double dy = player.Entity.Pos.Y - pos.Y;
@@ -2509,9 +2585,11 @@ namespace SpreadingDevastation
         /// </summary>
         private void DrainPlayerTemporalStability(float dt)
         {
-            foreach (IServerPlayer player in sapi.World.AllOnlinePlayers.Cast<IServerPlayer>())
+            var allPlayers = sapi.World.AllOnlinePlayers;
+            for (int i = 0; i < allPlayers.Length; i++)
             {
-                if (player.Entity == null) continue;
+                IServerPlayer player = allPlayers[i] as IServerPlayer;
+                if (player?.Entity == null) continue;
 
                 // Check if player is in a devastated chunk
                 int chunkX = (int)player.Entity.Pos.X / CHUNK_SIZE;
@@ -2570,9 +2648,11 @@ namespace SpreadingDevastation
             }
 
             // Process animals near each player
-            foreach (IServerPlayer player in sapi.World.AllOnlinePlayers.Cast<IServerPlayer>())
+            var allPlayers = sapi.World.AllOnlinePlayers;
+            for (int i = 0; i < allPlayers.Length; i++)
             {
-                if (player.Entity == null) continue;
+                IServerPlayer player = allPlayers[i] as IServerPlayer;
+                if (player?.Entity == null) continue;
 
                 var playerPos = player.Entity.ServerPos.XYZ;
                 int searchRadius = config.AnimalInsanitySearchRadius;
@@ -2709,9 +2789,11 @@ namespace SpreadingDevastation
             double nearestDistSq = double.MaxValue;
             EntityPlayer nearestPlayer = null;
 
-            foreach (IServerPlayer player in sapi.World.AllOnlinePlayers.Cast<IServerPlayer>())
+            var allPlayers = sapi.World.AllOnlinePlayers;
+            for (int i = 0; i < allPlayers.Length; i++)
             {
-                if (player.Entity == null) continue;
+                IServerPlayer player = allPlayers[i] as IServerPlayer;
+                if (player?.Entity == null) continue;
 
                 double dx = player.Entity.ServerPos.X - entity.ServerPos.X;
                 double dy = player.Entity.ServerPos.Y - entity.ServerPos.Y;
@@ -3239,9 +3321,11 @@ namespace SpreadingDevastation
             int chunkCenterX = chunk.ChunkX * CHUNK_SIZE + CHUNK_SIZE / 2;
             int chunkCenterZ = chunk.ChunkZ * CHUNK_SIZE + CHUNK_SIZE / 2;
 
-            foreach (IServerPlayer player in sapi.World.AllOnlinePlayers.Cast<IServerPlayer>())
+            var allPlayers = sapi.World.AllOnlinePlayers;
+            for (int i = 0; i < allPlayers.Length; i++)
             {
-                if (player.Entity == null) continue;
+                IServerPlayer player = allPlayers[i] as IServerPlayer;
+                if (player?.Entity == null) continue;
                 double distX = player.Entity.Pos.X - chunkCenterX;
                 double distZ = player.Entity.Pos.Z - chunkCenterZ;
                 double distSq = distX * distX + distZ * distZ;
@@ -4327,7 +4411,16 @@ namespace SpreadingDevastation
             {
                 // Track this rift ward position (it might not be active yet until fueled)
                 long posKey = GetPositionKey(blockSel.Position);
-                if (!activeRiftWards.Any(rw => GetPositionKey(rw.Pos) == posKey))
+                bool alreadyTracked = false;
+                for (int i = 0; i < activeRiftWards.Count; i++)
+                {
+                    if (GetPositionKey(activeRiftWards[i].Pos) == posKey)
+                    {
+                        alreadyTracked = true;
+                        break;
+                    }
+                }
+                if (!alreadyTracked)
                 {
                     activeRiftWards.Add(new RiftWard
                     {
@@ -4563,7 +4656,7 @@ namespace SpreadingDevastation
 
         /// <summary>
         /// Checks if a rift ward at the given position is active (has fuel AND is turned on).
-        /// Uses reflection to access the BlockEntityRiftWard properties since it's in the game DLL.
+        /// Uses cached reflection to access the BlockEntityRiftWard properties since it's in the game DLL.
         /// The ward has an "On" property (bool) that indicates if it's running, separate from fuel.
         /// Players can toggle the ward on/off by right-clicking even when it has fuel.
         /// </summary>
@@ -4577,39 +4670,51 @@ namespace SpreadingDevastation
                 var blockEntity = sapi.World.BlockAccessor.GetBlockEntity(pos);
                 if (blockEntity == null) return false;
 
-                // Check if it's a rift ward block entity by type name
-                var typeName = blockEntity.GetType().Name;
-                if (!typeName.Contains("RiftWard")) return false;
+                var entityType = blockEntity.GetType();
+
+                // Initialize reflection cache on first use with a rift ward type
+                if (!riftWardReflectionInitialized || (riftWardBlockEntityType != null && riftWardBlockEntityType != entityType && entityType.Name.Contains("RiftWard")))
+                {
+                    if (entityType.Name.Contains("RiftWard"))
+                    {
+                        riftWardBlockEntityType = entityType;
+                        riftWardOnProperty = entityType.GetProperty("On");
+                        riftWardHasFuelProperty = entityType.GetProperty("HasFuel");
+                        riftWardFuelDaysField = entityType.GetField("fuelDays",
+                            BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public);
+                        riftWardReflectionInitialized = true;
+                    }
+                }
+
+                // Check if it's a rift ward block entity
+                if (riftWardBlockEntityType == null || entityType != riftWardBlockEntityType)
+                {
+                    // Not the cached type - check by name
+                    if (!entityType.Name.Contains("RiftWard")) return false;
+                }
 
                 // Check the "On" property - this is the primary toggle state
-                // The ward must be explicitly turned on to be active
-                var onProperty = blockEntity.GetType().GetProperty("On");
-                if (onProperty != null)
+                if (riftWardOnProperty != null)
                 {
-                    var isOn = onProperty.GetValue(blockEntity);
+                    var isOn = riftWardOnProperty.GetValue(blockEntity);
                     if (isOn is bool onValue)
                     {
-                        // If On property exists, it's the authoritative state
-                        // Ward must be On AND have fuel to be active
                         if (!onValue) return false; // Ward is turned off
 
                         // Ward is on, also verify it has fuel
-                        var hasFuelProperty = blockEntity.GetType().GetProperty("HasFuel");
-                        if (hasFuelProperty != null)
+                        if (riftWardHasFuelProperty != null)
                         {
-                            var hasFuel = hasFuelProperty.GetValue(blockEntity);
+                            var hasFuel = riftWardHasFuelProperty.GetValue(blockEntity);
                             if (hasFuel is bool fuelValue)
                             {
-                                return fuelValue; // Return true only if On AND HasFuel
+                                return fuelValue;
                             }
                         }
 
                         // If HasFuel property doesn't exist, check fuelDays directly
-                        var fuelDaysField = blockEntity.GetType().GetField("fuelDays",
-                            BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public);
-                        if (fuelDaysField != null)
+                        if (riftWardFuelDaysField != null)
                         {
-                            var fuelDays = fuelDaysField.GetValue(blockEntity);
+                            var fuelDays = riftWardFuelDaysField.GetValue(blockEntity);
                             if (fuelDays is double daysValue) return daysValue > 0;
                             if (fuelDays is float floatDays) return floatDays > 0;
                         }
@@ -4619,12 +4724,10 @@ namespace SpreadingDevastation
                     }
                 }
 
-                // Fallback for older versions or different implementations:
-                // If "On" property doesn't exist, fall back to fuel check only
-                var fallbackHasFuelProperty = blockEntity.GetType().GetProperty("HasFuel");
-                if (fallbackHasFuelProperty != null)
+                // Fallback: If "On" property doesn't exist, fall back to fuel check only
+                if (riftWardHasFuelProperty != null)
                 {
-                    var hasFuel = fallbackHasFuelProperty.GetValue(blockEntity);
+                    var hasFuel = riftWardHasFuelProperty.GetValue(blockEntity);
                     if (hasFuel is bool fuelValue)
                     {
                         return fuelValue;
@@ -4632,11 +4735,9 @@ namespace SpreadingDevastation
                 }
 
                 // Final fallback: check fuelDays field directly
-                var fallbackFuelDaysField = blockEntity.GetType().GetField("fuelDays",
-                    BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public);
-                if (fallbackFuelDaysField != null)
+                if (riftWardFuelDaysField != null)
                 {
-                    var fuelDays = fallbackFuelDaysField.GetValue(blockEntity);
+                    var fuelDays = riftWardFuelDaysField.GetValue(blockEntity);
                     if (fuelDays is double daysValue) return daysValue > 0;
                     if (fuelDays is float floatDays) return floatDays > 0;
                 }
