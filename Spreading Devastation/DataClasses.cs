@@ -304,6 +304,12 @@ namespace SpreadingDevastation
         public float FlatFogDensityWeight = 0.8f;
         [ProtoMember(13)]
         public float FlatFogYOffset = -50f;
+        [ProtoMember(14)]
+        public float EdgeIntensity = 0.4f;
+        [ProtoMember(15)]
+        public float InteriorIntensity = 1.2f;
+        [ProtoMember(16)]
+        public float DistanceFullIntensity = 48f;
     }
 
     #region Test Suite Data Structures

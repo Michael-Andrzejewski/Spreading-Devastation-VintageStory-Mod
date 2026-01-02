@@ -827,6 +827,39 @@ namespace SpreadingDevastation
                     }
                     return TextCommandResult.Error("Usage: /dv fog flat [density|weight|yoffset] [value]");
 
+                case "intensity":
+                case "distance":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Fog intensity: edge={config.FogEdgeIntensity:F2}, interior={config.FogInteriorIntensity:F2}, full at {config.FogDistanceFullIntensity:F0} blocks. Use '/dv fog intensity [edge|interior|distance] [value]'");
+                    }
+                    var intensityParts = value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    if (intensityParts.Length >= 2 &&
+                        float.TryParse(intensityParts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float intensityVal))
+                    {
+                        switch (intensityParts[0].ToLowerInvariant())
+                        {
+                            case "edge":
+                                config.FogEdgeIntensity = Math.Clamp(intensityVal, 0f, 2f);
+                                SaveConfig();
+                                BroadcastFogConfig();
+                                return TextCommandResult.Success($"Edge fog intensity set to {config.FogEdgeIntensity:F2}");
+                            case "interior":
+                                config.FogInteriorIntensity = Math.Clamp(intensityVal, 0f, 3f);
+                                SaveConfig();
+                                BroadcastFogConfig();
+                                return TextCommandResult.Success($"Interior fog intensity set to {config.FogInteriorIntensity:F2}");
+                            case "distance":
+                            case "dist":
+                            case "full":
+                                config.FogDistanceFullIntensity = Math.Max(1f, intensityVal);
+                                SaveConfig();
+                                BroadcastFogConfig();
+                                return TextCommandResult.Success($"Full intensity distance set to {config.FogDistanceFullIntensity:F0} blocks");
+                        }
+                    }
+                    return TextCommandResult.Error("Usage: /dv fog intensity [edge|interior|distance] [value]");
+
                 case "reset":
                 case "defaults":
                     // Reset all fog values to defaults
@@ -843,9 +876,12 @@ namespace SpreadingDevastation
                     config.FlatFogDensity = 0.015f;
                     config.FlatFogDensityWeight = 0.8f;
                     config.FlatFogYOffset = -50f;
+                    config.FogEdgeIntensity = 0.4f;
+                    config.FogInteriorIntensity = 1.2f;
+                    config.FogDistanceFullIntensity = 48f;
                     SaveConfig();
                     BroadcastFogConfig();
-                    return TextCommandResult.Success("Fog settings reset to defaults (rusty orange fog with horizon obscuring, enabled)");
+                    return TextCommandResult.Success("Fog settings reset to defaults (distance-based intensity with horizon obscuring)");
 
                 case "":
                 case "info":
@@ -865,6 +901,11 @@ namespace SpreadingDevastation
                         $"Flat fog weight: {config.FlatFogDensityWeight:F2}",
                         $"Flat fog Y offset: {config.FlatFogYOffset:F0}",
                         "",
+                        "=== Distance-Based Intensity ===",
+                        $"Edge chunk intensity: {config.FogEdgeIntensity:F2} (at boundary)",
+                        $"Interior chunk intensity: {config.FogInteriorIntensity:F2} (multiplier)",
+                        $"Full intensity distance: {config.FogDistanceFullIntensity:F0} blocks",
+                        "",
                         "Commands:",
                         "  /dv fog [on|off] - Enable or disable fog effect",
                         "  /dv fog color [r] [g] [b] - Set fog color (0.0-1.0)",
@@ -873,11 +914,12 @@ namespace SpreadingDevastation
                         "  /dv fog weight [color|density|min] [value] - Set effect weights",
                         "  /dv fog transition [seconds] - Set transition speed",
                         "  /dv fog flat [density|weight|yoffset] [value] - Configure horizon fog",
+                        "  /dv fog intensity [edge|interior|distance] [value] - Configure distance-based intensity",
                         "  /dv fog reset - Reset all fog settings to defaults"
                     }, "Fog settings sent to chat");
 
                 default:
-                    return TextCommandResult.Error($"Unknown fog setting: {setting}. Use: on, off, color, density, min, weight, transition, flat, reset, or info");
+                    return TextCommandResult.Error($"Unknown fog setting: {setting}. Use: on, off, color, density, min, weight, transition, flat, intensity, reset, or info");
             }
         }
 

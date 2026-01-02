@@ -28,12 +28,16 @@ namespace SpreadingDevastation
         private float fogColorWeight = 0.7f;
         private float fogDensityWeight = 0.5f;
         private float fogMinWeight = 0.6f;
-        private float transitionSpeed = 2.0f; // 1/0.5 seconds
+        private float transitionSpeed = 2.0f; // 1/0.5 seconds for smooth visual transitions
         private float flatFogDensity = 0.015f;
         private float flatFogDensityWeight = 0.8f;
         private float flatFogYOffset = -50f;
+        private float edgeIntensity = 0.4f;
+        private float interiorIntensity = 1.2f;
+        private float distanceFullIntensity = 48f;
 
         // Current effect weight (0 = no effect, 1 = full effect)
+        // This is now driven by distance-based intensity, but smoothed for visual transitions
         private float currentWeight = 0f;
 
         public double RenderOrder => 0.0; // Render early in the pipeline
@@ -85,6 +89,9 @@ namespace SpreadingDevastation
             flatFogDensity = config.FlatFogDensity;
             flatFogDensityWeight = config.FlatFogDensityWeight;
             flatFogYOffset = config.FlatFogYOffset;
+            edgeIntensity = config.EdgeIntensity;
+            interiorIntensity = config.InteriorIntensity;
+            distanceFullIntensity = config.DistanceFullIntensity;
 
             // Update the ambient modifier values
             devastationAmbient.FogColor.Value = new float[] { fogColorR, fogColorG, fogColorB, 1.0f };
@@ -102,23 +109,27 @@ namespace SpreadingDevastation
         {
             if (capi?.World?.Player?.Entity == null) return;
 
-            // Check if effect is enabled and player is in a devastated chunk
-            bool inDevastatedChunk = enabled && modSystem.IsPlayerInDevastatedChunk();
+            // Get distance-based fog intensity data
+            var fogData = modSystem.GetFogIntensityData();
+            bool inDevastatedArea = enabled && fogData.inDevastated;
 
-            // Calculate target weight
-            float targetWeight = inDevastatedChunk ? 1.0f : 0.0f;
+            // Calculate target weight based on distance-driven intensity
+            // fogData.intensity is already calculated based on edge/interior and distance
+            float targetWeight = inDevastatedArea ? fogData.intensity : 0.0f;
 
-            // Smoothly transition towards target weight
+            // Smoothly transition towards target weight for visual polish
+            // This prevents jarring changes when crossing chunk boundaries
+            float maxChange = deltaTime * transitionSpeed;
             if (currentWeight < targetWeight)
             {
-                currentWeight = Math.Min(currentWeight + deltaTime * transitionSpeed, targetWeight);
+                currentWeight = Math.Min(currentWeight + maxChange, targetWeight);
             }
             else if (currentWeight > targetWeight)
             {
-                currentWeight = Math.Max(currentWeight - deltaTime * transitionSpeed, targetWeight);
+                currentWeight = Math.Max(currentWeight - maxChange, targetWeight);
             }
 
-            // Update ambient modifier weights based on config
+            // Update ambient modifier weights based on config and current intensity
             devastationAmbient.FogColor.Weight = currentWeight * fogColorWeight;
             devastationAmbient.FogDensity.Weight = currentWeight * fogDensityWeight;
             devastationAmbient.FogMin.Weight = currentWeight * fogMinWeight;

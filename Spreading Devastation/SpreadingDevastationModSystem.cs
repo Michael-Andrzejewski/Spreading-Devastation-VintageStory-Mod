@@ -222,6 +222,146 @@ namespace SpreadingDevastation
             return (float)Math.Sqrt(nearestDistSq);
         }
 
+        /// <summary>
+        /// Calculates fog intensity data based on player position relative to devastated areas.
+        /// Returns (isInDevastatedArea, distanceToEdge, isInteriorChunk, intensityMultiplier).
+        /// </summary>
+        public (bool inDevastated, float distanceToEdge, bool isInterior, float intensity) GetFogIntensityData()
+        {
+            if (capi?.World?.Player?.Entity == null)
+                return (false, 0f, false, 0f);
+
+            var playerPos = capi.World.Player.Entity.Pos;
+            float playerX = (float)playerPos.X;
+            float playerZ = (float)playerPos.Z;
+            int playerChunkX = (int)playerX / CHUNK_SIZE;
+            int playerChunkZ = (int)playerZ / CHUNK_SIZE;
+            long playerChunkKey = DevastatedChunk.MakeChunkKey(playerChunkX, playerChunkZ);
+
+            // Check if player is in a devastated chunk
+            if (!clientDevastatedChunks.Contains(playerChunkKey))
+                return (false, 0f, false, 0f);
+
+            // Player is in devastated area - calculate distance to nearest non-devastated edge
+            float minDistToEdge = float.MaxValue;
+
+            // Check all 4 cardinal adjacent chunks
+            int[] dxOffsets = { -1, 1, 0, 0 };
+            int[] dzOffsets = { 0, 0, -1, 1 };
+            bool hasNonDevastatedNeighbor = false;
+
+            for (int i = 0; i < 4; i++)
+            {
+                int adjChunkX = playerChunkX + dxOffsets[i];
+                int adjChunkZ = playerChunkZ + dzOffsets[i];
+                long adjChunkKey = DevastatedChunk.MakeChunkKey(adjChunkX, adjChunkZ);
+
+                if (!clientDevastatedChunks.Contains(adjChunkKey))
+                {
+                    hasNonDevastatedNeighbor = true;
+
+                    // Calculate distance to the edge between current chunk and this non-devastated chunk
+                    float edgeDist = CalculateDistanceToChunkEdge(playerX, playerZ, playerChunkX, playerChunkZ, dxOffsets[i], dzOffsets[i]);
+                    if (edgeDist < minDistToEdge)
+                    {
+                        minDistToEdge = edgeDist;
+                    }
+                }
+            }
+
+            // If current chunk is an edge chunk, also search for edges through adjacent devastated chunks
+            if (hasNonDevastatedNeighbor)
+            {
+                // We're in an edge chunk - minDistToEdge is already set
+            }
+            else
+            {
+                // We're in an interior chunk - find distance to nearest non-devastated chunk
+                // Search in expanding rings
+                for (int ring = 2; ring <= 8 && minDistToEdge == float.MaxValue; ring++)
+                {
+                    for (int dx = -ring; dx <= ring; dx++)
+                    {
+                        for (int dz = -ring; dz <= ring; dz++)
+                        {
+                            // Only check edge of ring
+                            if (Math.Abs(dx) != ring && Math.Abs(dz) != ring) continue;
+
+                            int checkChunkX = playerChunkX + dx;
+                            int checkChunkZ = playerChunkZ + dz;
+                            long checkKey = DevastatedChunk.MakeChunkKey(checkChunkX, checkChunkZ);
+
+                            if (!clientDevastatedChunks.Contains(checkKey))
+                            {
+                                // Found a non-devastated chunk - calculate distance to it
+                                float nearestEdgeX = checkChunkX * CHUNK_SIZE;
+                                float nearestEdgeZ = checkChunkZ * CHUNK_SIZE;
+
+                                // Clamp to nearest edge of that chunk
+                                if (playerX > nearestEdgeX + CHUNK_SIZE) nearestEdgeX += CHUNK_SIZE;
+                                else if (playerX >= nearestEdgeX) nearestEdgeX = playerX;
+
+                                if (playerZ > nearestEdgeZ + CHUNK_SIZE) nearestEdgeZ += CHUNK_SIZE;
+                                else if (playerZ >= nearestEdgeZ) nearestEdgeZ = playerZ;
+
+                                float distX = playerX - nearestEdgeX;
+                                float distZ = playerZ - nearestEdgeZ;
+                                float dist = (float)Math.Sqrt(distX * distX + distZ * distZ);
+
+                                if (dist < minDistToEdge)
+                                {
+                                    minDistToEdge = dist;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // If we still haven't found an edge, default to max distance
+            if (minDistToEdge == float.MaxValue)
+            {
+                minDistToEdge = 256f; // Deep interior
+            }
+
+            // Calculate intensity based on distance and edge/interior status
+            float edgeIntensity = clientFogConfig.EdgeIntensity;
+            float interiorIntensity = clientFogConfig.InteriorIntensity;
+            float fullIntensityDist = clientFogConfig.DistanceFullIntensity;
+
+            // Lerp from edge intensity to full intensity based on distance
+            float t = Math.Clamp(minDistToEdge / fullIntensityDist, 0f, 1f);
+            float baseIntensity = edgeIntensity + t * (1f - edgeIntensity);
+
+            // Apply interior multiplier if in interior chunk
+            float finalIntensity = hasNonDevastatedNeighbor ? baseIntensity : baseIntensity * interiorIntensity;
+
+            return (true, minDistToEdge, !hasNonDevastatedNeighbor, finalIntensity);
+        }
+
+        /// <summary>
+        /// Calculates the distance from player position to a specific chunk edge.
+        /// </summary>
+        private float CalculateDistanceToChunkEdge(float playerX, float playerZ, int chunkX, int chunkZ, int edgeDx, int edgeDz)
+        {
+            float chunkMinX = chunkX * CHUNK_SIZE;
+            float chunkMinZ = chunkZ * CHUNK_SIZE;
+            float chunkMaxX = chunkMinX + CHUNK_SIZE;
+            float chunkMaxZ = chunkMinZ + CHUNK_SIZE;
+
+            // Calculate distance to the specific edge
+            if (edgeDx == -1) // West edge
+                return playerX - chunkMinX;
+            else if (edgeDx == 1) // East edge
+                return chunkMaxX - playerX;
+            else if (edgeDz == -1) // North edge
+                return playerZ - chunkMinZ;
+            else if (edgeDz == 1) // South edge
+                return chunkMaxZ - playerZ;
+
+            return 0f;
+        }
+
         public override void StartServerSide(ICoreServerAPI api)
         {
             sapi = api;
@@ -364,7 +504,10 @@ namespace SpreadingDevastation
                     TransitionSpeed = config.FogTransitionSpeed,
                     FlatFogDensity = config.FlatFogDensity,
                     FlatFogDensityWeight = config.FlatFogDensityWeight,
-                    FlatFogYOffset = config.FlatFogYOffset
+                    FlatFogYOffset = config.FlatFogYOffset,
+                    EdgeIntensity = config.FogEdgeIntensity,
+                    InteriorIntensity = config.FogInteriorIntensity,
+                    DistanceFullIntensity = config.FogDistanceFullIntensity
                 };
                 fogConfigDirty = false;
             }

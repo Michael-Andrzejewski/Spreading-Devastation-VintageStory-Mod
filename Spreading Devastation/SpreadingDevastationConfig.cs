@@ -261,6 +261,26 @@ namespace SpreadingDevastation
         /// </summary>
         public float FlatFogYOffset { get; set; } = -50f;
 
+        /// <summary>
+        /// Fog intensity multiplier for edge chunks (chunks with non-devastated neighbors).
+        /// Default: 0.4 (40% intensity at edges). Range 0.0-1.0.
+        /// </summary>
+        public float FogEdgeIntensity { get; set; } = 0.4f;
+
+        /// <summary>
+        /// Fog intensity multiplier for interior chunks (chunks fully surrounded by devastation).
+        /// Default: 1.2 (120% intensity in interior). Can exceed 1.0 for extra intensity.
+        /// </summary>
+        public float FogInteriorIntensity { get; set; } = 1.2f;
+
+        /// <summary>
+        /// Distance in blocks over which fog transitions from edge to full intensity.
+        /// At distance 0 from non-devastated area, fog is at edge intensity.
+        /// At this distance or beyond, fog is at full intensity.
+        /// Default: 48 blocks (1.5 chunks).
+        /// </summary>
+        public float FogDistanceFullIntensity { get; set; } = 48f;
+
         // === Animal Insanity Settings ===
 
         /// <summary>
