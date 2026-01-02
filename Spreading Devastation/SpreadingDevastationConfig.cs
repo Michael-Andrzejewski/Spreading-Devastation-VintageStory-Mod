@@ -213,9 +213,10 @@ namespace SpreadingDevastation
         public float FogColorB { get; set; } = 0.15f;
 
         /// <summary>
-        /// Fog density in devastated areas (default: 0.004). Higher = thicker fog.
+        /// Fog density in devastated areas (default: 0.025). Higher = thicker fog.
+        /// The official Devastation location uses 0.05.
         /// </summary>
-        public float FogDensity { get; set; } = 0.004f;
+        public float FogDensity { get; set; } = 0.025f;
 
         /// <summary>
         /// Minimum fog level in devastated areas (default: 0.15). Higher = more baseline fog.
@@ -241,6 +242,24 @@ namespace SpreadingDevastation
         /// How fast the fog effect transitions in/out in seconds (default: 0.5).
         /// </summary>
         public float FogTransitionSpeed { get; set; } = 0.5f;
+
+        /// <summary>
+        /// Flat fog density for horizon obscuring (default: 0.015).
+        /// This creates a horizontal fog layer that obscures distant terrain and the horizon.
+        /// Set to 0 to disable flat fog.
+        /// </summary>
+        public float FlatFogDensity { get; set; } = 0.015f;
+
+        /// <summary>
+        /// How strongly the flat fog density is applied (0.0-1.0, default: 0.8).
+        /// </summary>
+        public float FlatFogDensityWeight { get; set; } = 0.8f;
+
+        /// <summary>
+        /// Y offset for flat fog position relative to player (default: -50).
+        /// Negative values place the fog layer below the player.
+        /// </summary>
+        public float FlatFogYOffset { get; set; } = -50f;
 
         // === Animal Insanity Settings ===
 

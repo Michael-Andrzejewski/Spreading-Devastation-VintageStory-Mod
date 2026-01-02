@@ -793,6 +793,40 @@ namespace SpreadingDevastation
                     }
                     return TextCommandResult.Error("Invalid number for transition speed");
 
+                case "flat":
+                case "flatfog":
+                case "horizon":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Flat fog (horizon): density={config.FlatFogDensity:F4}, weight={config.FlatFogDensityWeight:F2}, Y offset={config.FlatFogYOffset:F0}. Use '/dv fog flat [density|weight|yoffset] [value]'");
+                    }
+                    var flatParts = value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    if (flatParts.Length >= 2 &&
+                        float.TryParse(flatParts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float flatVal))
+                    {
+                        switch (flatParts[0].ToLowerInvariant())
+                        {
+                            case "density":
+                                config.FlatFogDensity = Math.Max(0f, flatVal);
+                                SaveConfig();
+                                BroadcastFogConfig();
+                                return TextCommandResult.Success($"Flat fog density set to {config.FlatFogDensity:F4}");
+                            case "weight":
+                                config.FlatFogDensityWeight = Math.Clamp(flatVal, 0f, 1f);
+                                SaveConfig();
+                                BroadcastFogConfig();
+                                return TextCommandResult.Success($"Flat fog weight set to {config.FlatFogDensityWeight:F2}");
+                            case "yoffset":
+                            case "y":
+                            case "offset":
+                                config.FlatFogYOffset = flatVal;
+                                SaveConfig();
+                                BroadcastFogConfig();
+                                return TextCommandResult.Success($"Flat fog Y offset set to {config.FlatFogYOffset:F0}");
+                        }
+                    }
+                    return TextCommandResult.Error("Usage: /dv fog flat [density|weight|yoffset] [value]");
+
                 case "reset":
                 case "defaults":
                     // Reset all fog values to defaults
@@ -800,15 +834,18 @@ namespace SpreadingDevastation
                     config.FogColorR = 0.55f;
                     config.FogColorG = 0.25f;
                     config.FogColorB = 0.15f;
-                    config.FogDensity = 0.004f;
+                    config.FogDensity = 0.025f;
                     config.FogMin = 0.15f;
                     config.FogColorWeight = 0.7f;
                     config.FogDensityWeight = 0.5f;
                     config.FogMinWeight = 0.6f;
                     config.FogTransitionSpeed = 0.5f;
+                    config.FlatFogDensity = 0.015f;
+                    config.FlatFogDensityWeight = 0.8f;
+                    config.FlatFogYOffset = -50f;
                     SaveConfig();
                     BroadcastFogConfig();
-                    return TextCommandResult.Success("Fog settings reset to defaults (rusty orange fog, enabled)");
+                    return TextCommandResult.Success("Fog settings reset to defaults (rusty orange fog with horizon obscuring, enabled)");
 
                 case "":
                 case "info":
@@ -823,6 +860,11 @@ namespace SpreadingDevastation
                         $"Weights: color={config.FogColorWeight:F2}, density={config.FogDensityWeight:F2}, min={config.FogMinWeight:F2}",
                         $"Transition speed: {config.FogTransitionSpeed:F2}s",
                         "",
+                        "=== Flat Fog (Horizon Obscuring) ===",
+                        $"Flat fog density: {config.FlatFogDensity:F4}",
+                        $"Flat fog weight: {config.FlatFogDensityWeight:F2}",
+                        $"Flat fog Y offset: {config.FlatFogYOffset:F0}",
+                        "",
                         "Commands:",
                         "  /dv fog [on|off] - Enable or disable fog effect",
                         "  /dv fog color [r] [g] [b] - Set fog color (0.0-1.0)",
@@ -830,11 +872,12 @@ namespace SpreadingDevastation
                         "  /dv fog min [value] - Set minimum fog level",
                         "  /dv fog weight [color|density|min] [value] - Set effect weights",
                         "  /dv fog transition [seconds] - Set transition speed",
+                        "  /dv fog flat [density|weight|yoffset] [value] - Configure horizon fog",
                         "  /dv fog reset - Reset all fog settings to defaults"
                     }, "Fog settings sent to chat");
 
                 default:
-                    return TextCommandResult.Error($"Unknown fog setting: {setting}. Use: on, off, color, density, min, weight, transition, reset, or info");
+                    return TextCommandResult.Error($"Unknown fog setting: {setting}. Use: on, off, color, density, min, weight, transition, flat, reset, or info");
             }
         }
 

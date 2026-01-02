@@ -287,7 +287,7 @@ namespace SpreadingDevastation
         [ProtoMember(4)]
         public float ColorB = 0.15f;
         [ProtoMember(5)]
-        public float Density = 0.004f;
+        public float Density = 0.025f;
         [ProtoMember(6)]
         public float Min = 0.15f;
         [ProtoMember(7)]
@@ -298,6 +298,12 @@ namespace SpreadingDevastation
         public float MinWeight = 0.6f;
         [ProtoMember(10)]
         public float TransitionSpeed = 0.5f;
+        [ProtoMember(11)]
+        public float FlatFogDensity = 0.015f;
+        [ProtoMember(12)]
+        public float FlatFogDensityWeight = 0.8f;
+        [ProtoMember(13)]
+        public float FlatFogYOffset = -50f;
     }
 
     #region Test Suite Data Structures

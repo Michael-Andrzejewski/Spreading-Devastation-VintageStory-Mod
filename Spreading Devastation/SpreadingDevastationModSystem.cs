@@ -361,7 +361,10 @@ namespace SpreadingDevastation
                     ColorWeight = config.FogColorWeight,
                     DensityWeight = config.FogDensityWeight,
                     MinWeight = config.FogMinWeight,
-                    TransitionSpeed = config.FogTransitionSpeed
+                    TransitionSpeed = config.FogTransitionSpeed,
+                    FlatFogDensity = config.FlatFogDensity,
+                    FlatFogDensityWeight = config.FlatFogDensityWeight,
+                    FlatFogYOffset = config.FlatFogYOffset
                 };
                 fogConfigDirty = false;
             }

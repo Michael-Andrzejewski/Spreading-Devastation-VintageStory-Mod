@@ -23,12 +23,15 @@ namespace SpreadingDevastation
         private float fogColorR = 0.55f;
         private float fogColorG = 0.25f;
         private float fogColorB = 0.15f;
-        private float fogDensity = 0.004f;
+        private float fogDensity = 0.025f;
         private float fogMin = 0.15f;
         private float fogColorWeight = 0.7f;
         private float fogDensityWeight = 0.5f;
         private float fogMinWeight = 0.6f;
         private float transitionSpeed = 2.0f; // 1/0.5 seconds
+        private float flatFogDensity = 0.015f;
+        private float flatFogDensityWeight = 0.8f;
+        private float flatFogYOffset = -50f;
 
         // Current effect weight (0 = no effect, 1 = full effect)
         private float currentWeight = 0f;
@@ -79,11 +82,15 @@ namespace SpreadingDevastation
             fogDensityWeight = config.DensityWeight;
             fogMinWeight = config.MinWeight;
             transitionSpeed = config.TransitionSpeed > 0 ? 1f / config.TransitionSpeed : 2f;
+            flatFogDensity = config.FlatFogDensity;
+            flatFogDensityWeight = config.FlatFogDensityWeight;
+            flatFogYOffset = config.FlatFogYOffset;
 
             // Update the ambient modifier values
             devastationAmbient.FogColor.Value = new float[] { fogColorR, fogColorG, fogColorB, 1.0f };
             devastationAmbient.FogDensity.Value = fogDensity;
             devastationAmbient.FogMin.Value = fogMin;
+            devastationAmbient.FlatFogDensity.Value = flatFogDensity;
             devastationAmbient.AmbientColor.Value = new float[] {
                 Math.Min(1f, fogColorR + 0.15f),
                 Math.Min(1f, fogColorG + 0.25f),
@@ -116,6 +123,22 @@ namespace SpreadingDevastation
             devastationAmbient.FogDensity.Weight = currentWeight * fogDensityWeight;
             devastationAmbient.FogMin.Weight = currentWeight * fogMinWeight;
             devastationAmbient.AmbientColor.Weight = currentWeight * fogColorWeight * 0.5f; // Ambient is more subtle
+
+            // Update flat fog for horizon obscuring
+            if (flatFogDensity > 0)
+            {
+                // Set flat fog Y position relative to player
+                float playerY = (float)capi.World.Player.Entity.Pos.Y;
+                devastationAmbient.FlatFogYPos.Value = playerY + flatFogYOffset;
+                devastationAmbient.FlatFogYPos.Weight = currentWeight * flatFogDensityWeight;
+                devastationAmbient.FlatFogDensity.Value = flatFogDensity;
+                devastationAmbient.FlatFogDensity.Weight = currentWeight * flatFogDensityWeight;
+            }
+            else
+            {
+                devastationAmbient.FlatFogYPos.Weight = 0;
+                devastationAmbient.FlatFogDensity.Weight = 0;
+            }
 
             // Register or update the ambient modifier
             if (currentWeight > 0.001f)
