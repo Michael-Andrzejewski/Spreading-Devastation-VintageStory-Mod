@@ -446,33 +446,35 @@ namespace SpreadingDevastation
         public float WeatherMinIntensity { get; set; } = 0.15f;
 
         /// <summary>
-        /// Devastation threshold for Tier 1 weather - atmospheric haze (default: 0.15).
+        /// Devastation threshold for Tier 1 weather - dark storm clouds (default: 0.15).
         /// </summary>
         public float WeatherTier1Threshold { get; set; } = 0.15f;
 
         /// <summary>
-        /// Devastation threshold for Tier 2 weather - storm clouds with light thunder (default: 0.35).
+        /// Devastation threshold for Tier 2 weather - storm clouds with light thunder (default: 0.30).
         /// </summary>
-        public float WeatherTier2Threshold { get; set; } = 0.35f;
+        public float WeatherTier2Threshold { get; set; } = 0.30f;
 
         /// <summary>
-        /// Devastation threshold for Tier 3 weather - heavy storms with thunder and lightning (default: 0.55).
+        /// Devastation threshold for Tier 3 weather - heavy storms with thunder and lightning (default: 0.50).
         /// </summary>
-        public float WeatherTier3Threshold { get; set; } = 0.55f;
+        public float WeatherTier3Threshold { get; set; } = 0.50f;
 
         /// <summary>
-        /// Weather pattern code for Tier 1 (default: "stronghaze").
-        /// Available patterns: clearsky, mediumhaze, stronghaze, cumulonimbus, cumulonimbusr, cumulonimbusrf
+        /// Weather pattern code for Tier 1 (default: "cumulonimbus").
+        /// Dark storm clouds appear early. Available patterns: clearsky, mediumhaze, stronghaze, cumulonimbus, cumulonimbusr, cumulonimbusrf
         /// </summary>
-        public string WeatherTier1Pattern { get; set; } = "stronghaze";
+        public string WeatherTier1Pattern { get; set; } = "cumulonimbus";
 
         /// <summary>
-        /// Weather pattern code for Tier 2 (default: "cumulonimbus").
+        /// Weather pattern code for Tier 2 (default: "cumulonimbusr").
+        /// Heavier storm clouds with rain.
         /// </summary>
-        public string WeatherTier2Pattern { get; set; } = "cumulonimbus";
+        public string WeatherTier2Pattern { get; set; } = "cumulonimbusr";
 
         /// <summary>
         /// Weather pattern code for Tier 3 (default: "cumulonimbusrf").
+        /// Full storm with rain and potential for lightning.
         /// </summary>
         public string WeatherTier3Pattern { get; set; } = "cumulonimbusrf";
 
@@ -486,5 +488,18 @@ namespace SpreadingDevastation
         /// Weather event code for Tier 3 (default: "heavythunder").
         /// </summary>
         public string WeatherTier3Event { get; set; } = "heavythunder";
+
+        /// <summary>
+        /// Whether weather transitions should be instant (true) or gradual (false).
+        /// Gradual transitions blend smoothly between weather patterns. (default: false)
+        /// </summary>
+        public bool WeatherInstantTransitions { get; set; } = false;
+
+        /// <summary>
+        /// Hysteresis amount for weather tier thresholds (default: 0.05).
+        /// Weather tier activates at threshold, but only deactivates at (threshold - hysteresis).
+        /// This prevents flickering when intensity hovers near a threshold.
+        /// </summary>
+        public float WeatherHysteresis { get; set; } = 0.05f;
     }
 }

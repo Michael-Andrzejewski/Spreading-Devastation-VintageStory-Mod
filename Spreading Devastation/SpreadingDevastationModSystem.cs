@@ -2867,38 +2867,73 @@ namespace SpreadingDevastation
 
         /// <summary>
         /// Updates weather for a specific region based on devastation intensity.
+        /// Uses hysteresis to prevent flickering near thresholds.
         /// </summary>
         private void UpdateRegionWeather(long regionKey, float intensity)
         {
             if (intensity < config.WeatherMinIntensity) return;
 
-            // Determine weather tier based on intensity
+            // Get current weather state for this region (if any) for hysteresis
+            bool hasExistingWeather = activeWeatherRegions.TryGetValue(regionKey, out var current);
+            float hysteresis = config.WeatherHysteresis;
+
+            // Determine weather tier based on intensity with hysteresis
+            // When entering a tier, use the threshold; when leaving, use threshold - hysteresis
             string pattern = null;
             string weatherEvent = null;
+            int newTier = 0;
 
-            if (intensity >= config.WeatherTier3Threshold)
+            // Determine current tier (if any) for hysteresis comparison
+            int currentTier = 0;
+            if (hasExistingWeather)
+            {
+                if (current.pattern == config.WeatherTier3Pattern) currentTier = 3;
+                else if (current.pattern == config.WeatherTier2Pattern) currentTier = 2;
+                else if (current.pattern == config.WeatherTier1Pattern) currentTier = 1;
+            }
+
+            // Check Tier 3 (highest priority)
+            float tier3Enter = config.WeatherTier3Threshold;
+            float tier3Exit = config.WeatherTier3Threshold - hysteresis;
+            if (intensity >= tier3Enter || (currentTier == 3 && intensity >= tier3Exit))
             {
                 pattern = config.WeatherTier3Pattern;
                 weatherEvent = config.WeatherTier3Event;
+                newTier = 3;
             }
-            else if (intensity >= config.WeatherTier2Threshold)
+            // Check Tier 2
+            else
             {
-                pattern = config.WeatherTier2Pattern;
-                weatherEvent = config.WeatherTier2Event;
-            }
-            else if (intensity >= config.WeatherTier1Threshold)
-            {
-                pattern = config.WeatherTier1Pattern;
-                // Tier 1 has no weather event, just haze
+                float tier2Enter = config.WeatherTier2Threshold;
+                float tier2Exit = config.WeatherTier2Threshold - hysteresis;
+                if (intensity >= tier2Enter || (currentTier == 2 && intensity >= tier2Exit))
+                {
+                    pattern = config.WeatherTier2Pattern;
+                    weatherEvent = config.WeatherTier2Event;
+                    newTier = 2;
+                }
+                // Check Tier 1
+                else
+                {
+                    float tier1Enter = config.WeatherTier1Threshold;
+                    float tier1Exit = config.WeatherTier1Threshold - hysteresis;
+                    if (intensity >= tier1Enter || (currentTier == 1 && intensity >= tier1Exit))
+                    {
+                        pattern = config.WeatherTier1Pattern;
+                        // Tier 1 has no weather event, just haze
+                        newTier = 1;
+                    }
+                }
             }
 
             if (pattern == null) return;
 
             // Check if weather already set to this tier (avoid redundant updates)
-            if (activeWeatherRegions.TryGetValue(regionKey, out var current))
+            if (hasExistingWeather && current.pattern == pattern && current.weatherEvent == weatherEvent)
             {
-                if (current.pattern == pattern && current.weatherEvent == weatherEvent)
-                    return; // No change needed
+                // Update intensity tracking but don't re-apply weather
+                activeWeatherRegions[regionKey] = (intensity, pattern, weatherEvent);
+                return;
             }
 
             // Get the weather simulation for this region
@@ -2908,40 +2943,42 @@ namespace SpreadingDevastation
                 return;
             }
 
-            // Apply weather pattern
-            if (weatherSim.SetWeatherPattern(pattern, true))
+            // Apply weather pattern (instant or gradual based on config)
+            bool instant = config.WeatherInstantTransitions;
+            if (weatherSim.SetWeatherPattern(pattern, instant))
             {
                 // Apply weather event if specified
                 if (!string.IsNullOrEmpty(weatherEvent))
                 {
-                    weatherSim.SetWeatherEvent(weatherEvent, true);
+                    weatherSim.SetWeatherEvent(weatherEvent, instant);
                     if (weatherSim.CurWeatherEvent != null)
                     {
                         weatherSim.CurWeatherEvent.OnBeginUse();
                     }
                 }
 
-                // Trigger immediate update
-                weatherSim.TickEvery25ms(0.025f);
-
                 // Track this region's weather state
                 activeWeatherRegions[regionKey] = (intensity, pattern, weatherEvent);
 
-                sapi.Logger.Debug($"SpreadingDevastation: Set weather for region {regionKey}: pattern={pattern}, event={weatherEvent ?? "none"}, intensity={intensity:F2}");
+                sapi.Logger.Debug($"SpreadingDevastation: Set weather for region {regionKey}: pattern={pattern}, event={weatherEvent ?? "none"}, intensity={intensity:F2}, tier={newTier}");
             }
         }
 
         /// <summary>
         /// Removes weather tracking for regions that are no longer devastated.
+        /// Uses hysteresis to prevent flickering - only removes when below (minIntensity - hysteresis).
         /// </summary>
         private void CleanupClearedWeatherRegions(Dictionary<long, float> currentIntensities)
         {
-            // Find regions that we're tracking but no longer have devastation
+            // Exit threshold with hysteresis (need to drop further below to exit)
+            float exitThreshold = config.WeatherMinIntensity - config.WeatherHysteresis;
+
+            // Find regions that we're tracking but no longer have sufficient devastation
             var toRemove = new List<long>();
             foreach (var regionKey in activeWeatherRegions.Keys)
             {
                 if (!currentIntensities.ContainsKey(regionKey) ||
-                    currentIntensities[regionKey] < config.WeatherMinIntensity)
+                    currentIntensities[regionKey] < exitThreshold)
                 {
                     toRemove.Add(regionKey);
                 }
