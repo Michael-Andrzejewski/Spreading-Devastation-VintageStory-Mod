@@ -252,7 +252,7 @@ namespace SpreadingDevastation
     }
 
     /// <summary>
-    /// Network packet sent from server to client containing devastated chunk positions.
+    /// Network packet sent from server to client containing devastated chunk positions and levels.
     /// Used for client-side fog/sky effects when player is in devastated areas.
     /// </summary>
     [ProtoContract]
@@ -270,6 +270,13 @@ namespace SpreadingDevastation
         /// </summary>
         [ProtoMember(2)]
         public List<int> ChunkZs = new List<int>();
+
+        /// <summary>
+        /// List of devastation levels (0.0 to 1.0) for each chunk.
+        /// Indices correspond to ChunkXs/ChunkZs.
+        /// </summary>
+        [ProtoMember(3)]
+        public List<float> DevastationLevels = new List<float>();
     }
 
     /// <summary>
@@ -310,6 +317,10 @@ namespace SpreadingDevastation
         public float InteriorIntensity = 1.2f;
         [ProtoMember(16)]
         public float DistanceFullIntensity = 48f;
+        [ProtoMember(17)]
+        public float ApproachDistance = 20f;
+        [ProtoMember(18)]
+        public float InterpolationSpeed = 0.5f;
     }
 
     #region Test Suite Data Structures

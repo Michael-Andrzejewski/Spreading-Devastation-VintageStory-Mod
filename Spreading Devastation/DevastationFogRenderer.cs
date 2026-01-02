@@ -28,16 +28,13 @@ namespace SpreadingDevastation
         private float fogColorWeight = 0.7f;
         private float fogDensityWeight = 0.5f;
         private float fogMinWeight = 0.6f;
-        private float transitionSpeed = 2.0f; // 1/0.5 seconds for smooth visual transitions
         private float flatFogDensity = 0.015f;
         private float flatFogDensityWeight = 0.8f;
         private float flatFogYOffset = -50f;
-        private float edgeIntensity = 0.4f;
-        private float interiorIntensity = 1.2f;
-        private float distanceFullIntensity = 48f;
+        private float interpolationSpeed = 0.5f; // How fast to interpolate toward target (per second)
 
-        // Current effect weight (0 = no effect, 1 = full effect)
-        // This is now driven by distance-based intensity, but smoothed for visual transitions
+        // Current effect weight (0 = no effect, 1+ = full effect)
+        // This smoothly interpolates toward the target score for seamless transitions
         private float currentWeight = 0f;
 
         public double RenderOrder => 0.0; // Render early in the pipeline
@@ -85,13 +82,10 @@ namespace SpreadingDevastation
             fogColorWeight = config.ColorWeight;
             fogDensityWeight = config.DensityWeight;
             fogMinWeight = config.MinWeight;
-            transitionSpeed = config.TransitionSpeed > 0 ? 1f / config.TransitionSpeed : 2f;
             flatFogDensity = config.FlatFogDensity;
             flatFogDensityWeight = config.FlatFogDensityWeight;
             flatFogYOffset = config.FlatFogYOffset;
-            edgeIntensity = config.EdgeIntensity;
-            interiorIntensity = config.InteriorIntensity;
-            distanceFullIntensity = config.DistanceFullIntensity;
+            interpolationSpeed = config.InterpolationSpeed > 0 ? config.InterpolationSpeed : 0.5f;
 
             // Update the ambient modifier values
             devastationAmbient.FogColor.Value = new float[] { fogColorR, fogColorG, fogColorB, 1.0f };
@@ -109,27 +103,28 @@ namespace SpreadingDevastation
         {
             if (capi?.World?.Player?.Entity == null) return;
 
-            // Get distance-based fog intensity data
-            var fogData = modSystem.GetFogIntensityData();
-            bool inDevastatedArea = enabled && fogData.inDevastated;
+            // Get the target fog score based on distance, devastation levels, and blending
+            // This already accounts for approach distance, edge/interior, and chunk devastation levels
+            float targetWeight = enabled ? modSystem.GetFogTargetScore() : 0f;
 
-            // Calculate target weight based on distance-driven intensity
-            // fogData.intensity is already calculated based on edge/interior and distance
-            float targetWeight = inDevastatedArea ? fogData.intensity : 0.0f;
-
-            // Smoothly transition towards target weight for visual polish
-            // This prevents jarring changes when crossing chunk boundaries
-            float maxChange = deltaTime * transitionSpeed;
-            if (currentWeight < targetWeight)
+            // Smoothly interpolate toward target at a constant rate
+            // This ensures seamless transitions regardless of how the target changes
+            float maxChange = deltaTime * interpolationSpeed;
+            if (Math.Abs(currentWeight - targetWeight) <= maxChange)
             {
-                currentWeight = Math.Min(currentWeight + maxChange, targetWeight);
+                // Close enough, snap to target
+                currentWeight = targetWeight;
             }
-            else if (currentWeight > targetWeight)
+            else if (currentWeight < targetWeight)
             {
-                currentWeight = Math.Max(currentWeight - maxChange, targetWeight);
+                currentWeight += maxChange;
+            }
+            else
+            {
+                currentWeight -= maxChange;
             }
 
-            // Update ambient modifier weights based on config and current intensity
+            // Update ambient modifier weights based on current interpolated weight
             devastationAmbient.FogColor.Weight = currentWeight * fogColorWeight;
             devastationAmbient.FogDensity.Weight = currentWeight * fogDensityWeight;
             devastationAmbient.FogMin.Weight = currentWeight * fogMinWeight;

@@ -67,7 +67,7 @@ namespace SpreadingDevastation
         // Client-side fields
         private ICoreClientAPI capi;
         private IClientNetworkChannel clientNetworkChannel;
-        private HashSet<long> clientDevastatedChunks = new HashSet<long>(); // Chunk keys received from server
+        private Dictionary<long, float> clientDevastatedChunks = new Dictionary<long, float>(); // Chunk key -> devastation level
         private DevastationFogRenderer fogRenderer;
         private FogConfigPacket clientFogConfig = new FogConfigPacket(); // Fog config received from server
 
@@ -159,10 +159,13 @@ namespace SpreadingDevastation
             if (packet.ChunkXs != null && packet.ChunkZs != null)
             {
                 int count = Math.Min(packet.ChunkXs.Count, packet.ChunkZs.Count);
+                bool hasLevels = packet.DevastationLevels != null && packet.DevastationLevels.Count >= count;
+
                 for (int i = 0; i < count; i++)
                 {
                     long chunkKey = DevastatedChunk.MakeChunkKey(packet.ChunkXs[i], packet.ChunkZs[i]);
-                    clientDevastatedChunks.Add(chunkKey);
+                    float level = hasLevels ? packet.DevastationLevels[i] : 1.0f; // Default to fully devastated if no level
+                    clientDevastatedChunks[chunkKey] = level;
                 }
             }
         }
@@ -179,187 +182,215 @@ namespace SpreadingDevastation
             int chunkZ = (int)playerPos.Z / CHUNK_SIZE;
             long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
 
-            return clientDevastatedChunks.Contains(chunkKey);
+            return clientDevastatedChunks.ContainsKey(chunkKey);
         }
 
         /// <summary>
-        /// Gets the distance to the nearest devastated chunk edge (for fog intensity).
-        /// Returns 0 if in a devastated chunk, positive distance to nearest devastated chunk edge.
+        /// Calculates the target fog score based on player position, nearby chunk devastation levels,
+        /// and distance to devastated areas. Returns a value from 0.0 to ~1.2 representing desired fog intensity.
+        /// This provides smooth transitions based on multiple factors.
         /// </summary>
-        public float GetDistanceToDevastatedChunk()
-        {
-            if (capi?.World?.Player?.Entity == null) return float.MaxValue;
-
-            var playerPos = capi.World.Player.Entity.Pos;
-            int playerChunkX = (int)playerPos.X / CHUNK_SIZE;
-            int playerChunkZ = (int)playerPos.Z / CHUNK_SIZE;
-            long playerChunkKey = DevastatedChunk.MakeChunkKey(playerChunkX, playerChunkZ);
-
-            // If player is in a devastated chunk, return 0
-            if (clientDevastatedChunks.Contains(playerChunkKey)) return 0f;
-
-            // Find the nearest devastated chunk
-            float nearestDistSq = float.MaxValue;
-            foreach (long chunkKey in clientDevastatedChunks)
-            {
-                int chunkX = (int)(chunkKey >> 32);
-                int chunkZ = (int)(chunkKey & 0xFFFFFFFF);
-
-                // Calculate distance to chunk center
-                float chunkCenterX = chunkX * CHUNK_SIZE + CHUNK_SIZE / 2f;
-                float chunkCenterZ = chunkZ * CHUNK_SIZE + CHUNK_SIZE / 2f;
-
-                float dx = (float)playerPos.X - chunkCenterX;
-                float dz = (float)playerPos.Z - chunkCenterZ;
-                float distSq = dx * dx + dz * dz;
-
-                if (distSq < nearestDistSq)
-                {
-                    nearestDistSq = distSq;
-                }
-            }
-
-            return (float)Math.Sqrt(nearestDistSq);
-        }
-
-        /// <summary>
-        /// Calculates fog intensity data based on player position relative to devastated areas.
-        /// Returns (isInDevastatedArea, distanceToEdge, isInteriorChunk, intensityMultiplier).
-        /// </summary>
-        public (bool inDevastated, float distanceToEdge, bool isInterior, float intensity) GetFogIntensityData()
+        public float GetFogTargetScore()
         {
             if (capi?.World?.Player?.Entity == null)
-                return (false, 0f, false, 0f);
+                return 0f;
+
+            if (clientDevastatedChunks.Count == 0)
+                return 0f;
 
             var playerPos = capi.World.Player.Entity.Pos;
             float playerX = (float)playerPos.X;
             float playerZ = (float)playerPos.Z;
             int playerChunkX = (int)playerX / CHUNK_SIZE;
             int playerChunkZ = (int)playerZ / CHUNK_SIZE;
-            long playerChunkKey = DevastatedChunk.MakeChunkKey(playerChunkX, playerChunkZ);
 
-            // Check if player is in a devastated chunk
-            if (!clientDevastatedChunks.Contains(playerChunkKey))
-                return (false, 0f, false, 0f);
-
-            // Player is in devastated area - calculate distance to nearest non-devastated edge
-            float minDistToEdge = float.MaxValue;
-
-            // Check all 4 cardinal adjacent chunks
-            int[] dxOffsets = { -1, 1, 0, 0 };
-            int[] dzOffsets = { 0, 0, -1, 1 };
-            bool hasNonDevastatedNeighbor = false;
-
-            for (int i = 0; i < 4; i++)
-            {
-                int adjChunkX = playerChunkX + dxOffsets[i];
-                int adjChunkZ = playerChunkZ + dzOffsets[i];
-                long adjChunkKey = DevastatedChunk.MakeChunkKey(adjChunkX, adjChunkZ);
-
-                if (!clientDevastatedChunks.Contains(adjChunkKey))
-                {
-                    hasNonDevastatedNeighbor = true;
-
-                    // Calculate distance to the edge between current chunk and this non-devastated chunk
-                    float edgeDist = CalculateDistanceToChunkEdge(playerX, playerZ, playerChunkX, playerChunkZ, dxOffsets[i], dzOffsets[i]);
-                    if (edgeDist < minDistToEdge)
-                    {
-                        minDistToEdge = edgeDist;
-                    }
-                }
-            }
-
-            // If current chunk is an edge chunk, also search for edges through adjacent devastated chunks
-            if (hasNonDevastatedNeighbor)
-            {
-                // We're in an edge chunk - minDistToEdge is already set
-            }
-            else
-            {
-                // We're in an interior chunk - find distance to nearest non-devastated chunk
-                // Search in expanding rings
-                for (int ring = 2; ring <= 8 && minDistToEdge == float.MaxValue; ring++)
-                {
-                    for (int dx = -ring; dx <= ring; dx++)
-                    {
-                        for (int dz = -ring; dz <= ring; dz++)
-                        {
-                            // Only check edge of ring
-                            if (Math.Abs(dx) != ring && Math.Abs(dz) != ring) continue;
-
-                            int checkChunkX = playerChunkX + dx;
-                            int checkChunkZ = playerChunkZ + dz;
-                            long checkKey = DevastatedChunk.MakeChunkKey(checkChunkX, checkChunkZ);
-
-                            if (!clientDevastatedChunks.Contains(checkKey))
-                            {
-                                // Found a non-devastated chunk - calculate distance to it
-                                float nearestEdgeX = checkChunkX * CHUNK_SIZE;
-                                float nearestEdgeZ = checkChunkZ * CHUNK_SIZE;
-
-                                // Clamp to nearest edge of that chunk
-                                if (playerX > nearestEdgeX + CHUNK_SIZE) nearestEdgeX += CHUNK_SIZE;
-                                else if (playerX >= nearestEdgeX) nearestEdgeX = playerX;
-
-                                if (playerZ > nearestEdgeZ + CHUNK_SIZE) nearestEdgeZ += CHUNK_SIZE;
-                                else if (playerZ >= nearestEdgeZ) nearestEdgeZ = playerZ;
-
-                                float distX = playerX - nearestEdgeX;
-                                float distZ = playerZ - nearestEdgeZ;
-                                float dist = (float)Math.Sqrt(distX * distX + distZ * distZ);
-
-                                if (dist < minDistToEdge)
-                                {
-                                    minDistToEdge = dist;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // If we still haven't found an edge, default to max distance
-            if (minDistToEdge == float.MaxValue)
-            {
-                minDistToEdge = 256f; // Deep interior
-            }
-
-            // Calculate intensity based on distance and edge/interior status
+            float approachDistance = clientFogConfig.ApproachDistance;
             float edgeIntensity = clientFogConfig.EdgeIntensity;
             float interiorIntensity = clientFogConfig.InteriorIntensity;
             float fullIntensityDist = clientFogConfig.DistanceFullIntensity;
 
-            // Lerp from edge intensity to full intensity based on distance
-            float t = Math.Clamp(minDistToEdge / fullIntensityDist, 0f, 1f);
-            float baseIntensity = edgeIntensity + t * (1f - edgeIntensity);
+            // Calculate weighted influence from all nearby devastated chunks
+            float totalInfluence = 0f;
+            float totalWeight = 0f;
+            float minDistanceToDevastation = float.MaxValue;
 
-            // Apply interior multiplier if in interior chunk
-            float finalIntensity = hasNonDevastatedNeighbor ? baseIntensity : baseIntensity * interiorIntensity;
+            // Search nearby chunks (within approach distance + 1 chunk buffer)
+            int searchRadius = (int)Math.Ceiling(approachDistance / CHUNK_SIZE) + 2;
 
-            return (true, minDistToEdge, !hasNonDevastatedNeighbor, finalIntensity);
+            for (int dx = -searchRadius; dx <= searchRadius; dx++)
+            {
+                for (int dz = -searchRadius; dz <= searchRadius; dz++)
+                {
+                    int checkChunkX = playerChunkX + dx;
+                    int checkChunkZ = playerChunkZ + dz;
+                    long chunkKey = DevastatedChunk.MakeChunkKey(checkChunkX, checkChunkZ);
+
+                    if (!clientDevastatedChunks.TryGetValue(chunkKey, out float devastationLevel))
+                        continue;
+
+                    // Calculate distance from player to the nearest edge of this chunk
+                    float chunkMinX = checkChunkX * CHUNK_SIZE;
+                    float chunkMinZ = checkChunkZ * CHUNK_SIZE;
+                    float chunkMaxX = chunkMinX + CHUNK_SIZE;
+                    float chunkMaxZ = chunkMinZ + CHUNK_SIZE;
+
+                    // Distance to chunk (0 if inside, positive if outside)
+                    float distX = 0f, distZ = 0f;
+                    if (playerX < chunkMinX) distX = chunkMinX - playerX;
+                    else if (playerX > chunkMaxX) distX = playerX - chunkMaxX;
+
+                    if (playerZ < chunkMinZ) distZ = chunkMinZ - playerZ;
+                    else if (playerZ > chunkMaxZ) distZ = playerZ - chunkMaxZ;
+
+                    float distToChunk = (float)Math.Sqrt(distX * distX + distZ * distZ);
+
+                    // Track minimum distance to any devastation
+                    if (distToChunk < minDistanceToDevastation)
+                        minDistanceToDevastation = distToChunk;
+
+                    // Calculate influence weight based on distance
+                    // Inside chunk: full weight based on how deep into chunk
+                    // Outside chunk: weight falls off with distance
+                    float weight;
+                    if (distToChunk <= 0)
+                    {
+                        // Player is inside this chunk - calculate depth into chunk
+                        float depthX = Math.Min(playerX - chunkMinX, chunkMaxX - playerX);
+                        float depthZ = Math.Min(playerZ - chunkMinZ, chunkMaxZ - playerZ);
+                        float depthIntoChunk = Math.Min(depthX, depthZ);
+
+                        // Weight based on depth (edges of chunk have less weight)
+                        weight = Math.Clamp(depthIntoChunk / (CHUNK_SIZE / 2f), 0.3f, 1f);
+                    }
+                    else if (distToChunk < approachDistance)
+                    {
+                        // Player is approaching this chunk - smooth falloff
+                        weight = 1f - (distToChunk / approachDistance);
+                        weight = weight * weight; // Quadratic falloff for smoother transition
+                    }
+                    else
+                    {
+                        // Too far, no influence
+                        continue;
+                    }
+
+                    // Apply devastation level to influence
+                    float influence = devastationLevel * weight;
+                    totalInfluence += influence;
+                    totalWeight += weight;
+                }
+            }
+
+            if (totalWeight <= 0)
+                return 0f;
+
+            // Calculate base score from weighted average of devastation levels
+            float baseScore = totalInfluence / totalWeight;
+
+            // Apply distance-based intensity scaling
+            float distanceFactor;
+            if (minDistanceToDevastation <= 0)
+            {
+                // Inside devastation - scale by depth
+                // Find distance to nearest non-devastated chunk edge
+                float distToCleanEdge = CalculateDistanceToCleanArea(playerX, playerZ, playerChunkX, playerChunkZ);
+                float t = Math.Clamp(distToCleanEdge / fullIntensityDist, 0f, 1f);
+                distanceFactor = edgeIntensity + t * (1f - edgeIntensity);
+
+                // Check if we're in an interior chunk (surrounded by devastation)
+                bool isInterior = IsInteriorChunk(playerChunkX, playerChunkZ);
+                if (isInterior)
+                {
+                    distanceFactor *= interiorIntensity;
+                }
+            }
+            else
+            {
+                // Approaching devastation - linear falloff based on approach distance
+                distanceFactor = 1f - Math.Clamp(minDistanceToDevastation / approachDistance, 0f, 1f);
+                distanceFactor *= edgeIntensity; // At best, approaching gives edge intensity
+            }
+
+            return baseScore * distanceFactor;
         }
 
         /// <summary>
-        /// Calculates the distance from player position to a specific chunk edge.
+        /// Calculates distance from player to the nearest non-devastated area.
         /// </summary>
-        private float CalculateDistanceToChunkEdge(float playerX, float playerZ, int chunkX, int chunkZ, int edgeDx, int edgeDz)
+        private float CalculateDistanceToCleanArea(float playerX, float playerZ, int playerChunkX, int playerChunkZ)
         {
-            float chunkMinX = chunkX * CHUNK_SIZE;
-            float chunkMinZ = chunkZ * CHUNK_SIZE;
-            float chunkMaxX = chunkMinX + CHUNK_SIZE;
-            float chunkMaxZ = chunkMinZ + CHUNK_SIZE;
+            float minDist = float.MaxValue;
 
-            // Calculate distance to the specific edge
-            if (edgeDx == -1) // West edge
-                return playerX - chunkMinX;
-            else if (edgeDx == 1) // East edge
-                return chunkMaxX - playerX;
-            else if (edgeDz == -1) // North edge
-                return playerZ - chunkMinZ;
-            else if (edgeDz == 1) // South edge
-                return chunkMaxZ - playerZ;
+            // Search in expanding rings for non-devastated chunks
+            for (int ring = 1; ring <= 8; ring++)
+            {
+                bool foundClean = false;
+                for (int dx = -ring; dx <= ring; dx++)
+                {
+                    for (int dz = -ring; dz <= ring; dz++)
+                    {
+                        // Only check edge of ring for efficiency
+                        if (ring > 1 && Math.Abs(dx) != ring && Math.Abs(dz) != ring) continue;
 
-            return 0f;
+                        int checkChunkX = playerChunkX + dx;
+                        int checkChunkZ = playerChunkZ + dz;
+                        long checkKey = DevastatedChunk.MakeChunkKey(checkChunkX, checkChunkZ);
+
+                        if (!clientDevastatedChunks.ContainsKey(checkKey))
+                        {
+                            foundClean = true;
+                            // Calculate distance to nearest edge of this clean chunk
+                            float chunkMinX = checkChunkX * CHUNK_SIZE;
+                            float chunkMinZ = checkChunkZ * CHUNK_SIZE;
+                            float chunkMaxX = chunkMinX + CHUNK_SIZE;
+                            float chunkMaxZ = chunkMinZ + CHUNK_SIZE;
+
+                            // Find nearest point on chunk to player
+                            float nearestX = Math.Clamp(playerX, chunkMinX, chunkMaxX);
+                            float nearestZ = Math.Clamp(playerZ, chunkMinZ, chunkMaxZ);
+
+                            float dist = (float)Math.Sqrt((playerX - nearestX) * (playerX - nearestX) +
+                                                          (playerZ - nearestZ) * (playerZ - nearestZ));
+                            if (dist < minDist)
+                                minDist = dist;
+                        }
+                    }
+                }
+                if (foundClean && minDist < float.MaxValue)
+                    break; // Found clean chunks at this ring, no need to search further
+            }
+
+            return minDist == float.MaxValue ? 256f : minDist;
+        }
+
+        /// <summary>
+        /// Checks if a chunk is surrounded by devastation on all 4 cardinal sides.
+        /// </summary>
+        private bool IsInteriorChunk(int chunkX, int chunkZ)
+        {
+            int[] dxOffsets = { -1, 1, 0, 0 };
+            int[] dzOffsets = { 0, 0, -1, 1 };
+
+            for (int i = 0; i < 4; i++)
+            {
+                long adjKey = DevastatedChunk.MakeChunkKey(chunkX + dxOffsets[i], chunkZ + dzOffsets[i]);
+                if (!clientDevastatedChunks.ContainsKey(adjKey))
+                    return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Legacy method - now calls GetFogTargetScore for compatibility.
+        /// Returns (inDevastated, distanceToEdge, isInterior, intensity).
+        /// </summary>
+        public (bool inDevastated, float distanceToEdge, bool isInterior, float intensity) GetFogIntensityData()
+        {
+            float score = GetFogTargetScore();
+            bool inDevastated = score > 0.001f;
+
+            // These are approximate values for backwards compatibility
+            return (inDevastated, 0f, false, score);
         }
 
         public override void StartServerSide(ICoreServerAPI api)
@@ -463,7 +494,7 @@ namespace SpreadingDevastation
             int chunkZ = (int)z / CHUNK_SIZE;
             long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
 
-            if (!clientDevastatedChunks.Contains(chunkKey)) return stability;
+            if (!clientDevastatedChunks.ContainsKey(chunkKey)) return stability;
 
             // Note: Rift ward protection is handled server-side - protected chunks
             // are removed from devastatedChunks before syncing to clients
@@ -507,7 +538,9 @@ namespace SpreadingDevastation
                     FlatFogYOffset = config.FlatFogYOffset,
                     EdgeIntensity = config.FogEdgeIntensity,
                     InteriorIntensity = config.FogInteriorIntensity,
-                    DistanceFullIntensity = config.FogDistanceFullIntensity
+                    DistanceFullIntensity = config.FogDistanceFullIntensity,
+                    ApproachDistance = config.FogApproachDistance,
+                    InterpolationSpeed = config.FogInterpolationSpeed
                 };
                 fogConfigDirty = false;
             }
@@ -545,6 +578,8 @@ namespace SpreadingDevastation
                         {
                             packet.ChunkXs.Add(chunk.ChunkX);
                             packet.ChunkZs.Add(chunk.ChunkZ);
+                            // Send devastation level (0.0 to 1.0) for smooth fog transitions
+                            packet.DevastationLevels.Add((float)Math.Clamp(chunk.DevastationLevel, 0.0, 1.0));
                         }
                     }
                 }

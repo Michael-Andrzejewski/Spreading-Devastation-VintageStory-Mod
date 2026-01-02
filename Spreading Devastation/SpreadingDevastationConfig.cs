@@ -281,6 +281,21 @@ namespace SpreadingDevastation
         /// </summary>
         public float FogDistanceFullIntensity { get; set; } = 48f;
 
+        /// <summary>
+        /// Distance in blocks outside devastated areas where fog effect begins.
+        /// At this distance, fog starts appearing (0% intensity).
+        /// As you get closer, fog increases until entering the devastated chunk.
+        /// Default: 20 blocks.
+        /// </summary>
+        public float FogApproachDistance { get; set; } = 20f;
+
+        /// <summary>
+        /// How fast the fog effect interpolates toward target intensity (per second).
+        /// Higher values = faster response, lower values = smoother transitions.
+        /// Default: 0.5 (takes ~2 seconds to fully transition).
+        /// </summary>
+        public float FogInterpolationSpeed { get; set; } = 0.5f;
+
         // === Animal Insanity Settings ===
 
         /// <summary>
