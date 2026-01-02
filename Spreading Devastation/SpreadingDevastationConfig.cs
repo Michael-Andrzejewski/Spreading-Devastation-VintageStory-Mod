@@ -424,5 +424,67 @@ namespace SpreadingDevastation
         /// Particles fade linearly from this opacity to fully transparent over their lifetime.
         /// </summary>
         public float ParticleOpacity { get; set; } = 1.0f;
+
+        // === Devastation Weather Settings ===
+
+        /// <summary>
+        /// Whether to create ominous weather (storm clouds, thunder, lightning) above devastated regions (default: true).
+        /// Weather intensity increases with devastation level in the region.
+        /// </summary>
+        public bool WeatherEffectsEnabled { get; set; } = true;
+
+        /// <summary>
+        /// Interval in seconds between weather updates (default: 30.0).
+        /// Lower values respond faster to devastation changes but may cause more frequent weather transitions.
+        /// </summary>
+        public double WeatherUpdateIntervalSeconds { get; set; } = 30.0;
+
+        /// <summary>
+        /// Minimum devastation intensity (0.0-1.0) to trigger any weather effects (default: 0.15).
+        /// Below this threshold, normal weather patterns continue.
+        /// </summary>
+        public float WeatherMinIntensity { get; set; } = 0.15f;
+
+        /// <summary>
+        /// Devastation threshold for Tier 1 weather - atmospheric haze (default: 0.15).
+        /// </summary>
+        public float WeatherTier1Threshold { get; set; } = 0.15f;
+
+        /// <summary>
+        /// Devastation threshold for Tier 2 weather - storm clouds with light thunder (default: 0.35).
+        /// </summary>
+        public float WeatherTier2Threshold { get; set; } = 0.35f;
+
+        /// <summary>
+        /// Devastation threshold for Tier 3 weather - heavy storms with thunder and lightning (default: 0.55).
+        /// </summary>
+        public float WeatherTier3Threshold { get; set; } = 0.55f;
+
+        /// <summary>
+        /// Weather pattern code for Tier 1 (default: "stronghaze").
+        /// Available patterns: clearsky, mediumhaze, stronghaze, cumulonimbus, cumulonimbusr, cumulonimbusrf
+        /// </summary>
+        public string WeatherTier1Pattern { get; set; } = "stronghaze";
+
+        /// <summary>
+        /// Weather pattern code for Tier 2 (default: "cumulonimbus").
+        /// </summary>
+        public string WeatherTier2Pattern { get; set; } = "cumulonimbus";
+
+        /// <summary>
+        /// Weather pattern code for Tier 3 (default: "cumulonimbusrf").
+        /// </summary>
+        public string WeatherTier3Pattern { get; set; } = "cumulonimbusrf";
+
+        /// <summary>
+        /// Weather event code for Tier 2 (default: "lightthunder").
+        /// Available events: noevent, lightthunder, heavythunder, smallhail, largehail
+        /// </summary>
+        public string WeatherTier2Event { get; set; } = "lightthunder";
+
+        /// <summary>
+        /// Weather event code for Tier 3 (default: "heavythunder").
+        /// </summary>
+        public string WeatherTier3Event { get; set; } = "heavythunder";
     }
 }

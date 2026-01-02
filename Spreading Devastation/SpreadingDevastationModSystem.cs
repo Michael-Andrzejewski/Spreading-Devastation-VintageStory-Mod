@@ -89,6 +89,12 @@ namespace SpreadingDevastation
         // (static reuse caused position race conditions with rapid spawning)
         private static bool particlesInitialized = false;
 
+        // Weather system integration
+        private WeatherSystemServer weatherSystem;
+        private double lastWeatherUpdateTime = 0;
+        private Dictionary<long, (float intensity, string pattern, string weatherEvent)> activeWeatherRegions
+            = new Dictionary<long, (float, string, string)>();
+
         public override void Start(ICoreAPI api)
         {
             base.Start(api);
@@ -420,6 +426,9 @@ namespace SpreadingDevastation
 
             // Process animal insanity every 1 second (actual interval controlled by config)
             api.Event.RegisterGameTickListener(ProcessAnimalInsanity, 1000);
+
+            // Process devastation weather every 5 seconds (actual interval controlled by config)
+            api.Event.RegisterGameTickListener(ProcessDevastationWeather, 5000);
 
             // Listen for block placement/removal to track rift wards efficiently
             api.Event.DidPlaceBlock += OnBlockPlaced;
@@ -2753,6 +2762,257 @@ namespace SpreadingDevastation
             insaneEntityIds.Clear();
             return count;
         }
+
+        #region Devastation Weather System
+
+        /// <summary>
+        /// Processes weather effects for devastated regions. Called every 5 seconds.
+        /// Creates ominous storm weather above heavily devastated areas.
+        /// </summary>
+        private void ProcessDevastationWeather(float dt)
+        {
+            // Early exits for performance
+            if (!config.WeatherEffectsEnabled) return;
+            if (isPaused || sapi == null) return;
+            if (devastatedChunks == null || devastatedChunks.Count == 0)
+            {
+                // No devastation - clear any active weather overrides
+                if (activeWeatherRegions.Count > 0)
+                {
+                    activeWeatherRegions.Clear();
+                }
+                return;
+            }
+
+            // Lazy-load weather system
+            if (weatherSystem == null)
+            {
+                weatherSystem = sapi.ModLoader.GetModSystem<WeatherSystemServer>();
+                if (weatherSystem == null)
+                {
+                    sapi.Logger.Warning("SpreadingDevastation: WeatherSystemServer not available - weather effects disabled");
+                    config.WeatherEffectsEnabled = false;
+                    return;
+                }
+            }
+
+            // Check interval (config is in seconds, compare against game hours)
+            double currentTime = sapi.World.Calendar.TotalHours;
+            double intervalHours = config.WeatherUpdateIntervalSeconds / 3600.0;
+            if (currentTime - lastWeatherUpdateTime < intervalHours) return;
+            lastWeatherUpdateTime = currentTime;
+
+            // Group chunks by weather region and calculate intensity
+            var regionIntensities = CalculateRegionIntensities();
+
+            // Update weather for each affected region
+            foreach (var kvp in regionIntensities)
+            {
+                UpdateRegionWeather(kvp.Key, kvp.Value);
+            }
+
+            // Clear regions that are no longer devastated
+            CleanupClearedWeatherRegions(regionIntensities);
+        }
+
+        /// <summary>
+        /// Calculates devastation intensity for each weather region based on devastated chunks within it.
+        /// </summary>
+        private Dictionary<long, float> CalculateRegionIntensities()
+        {
+            var result = new Dictionary<long, float>();
+
+            if (weatherSystem == null) return result;
+
+            int regionSize = sapi.World.BlockAccessor.RegionSize;
+            int chunksPerRegion = regionSize / CHUNK_SIZE; // Typically 16 chunks per region
+
+            // Group chunks by region
+            var regionChunks = new Dictionary<long, List<float>>();
+            foreach (var chunk in devastatedChunks.Values)
+            {
+                // Convert chunk coordinates to block coordinates, then to region coordinates
+                int blockX = chunk.ChunkX * CHUNK_SIZE;
+                int blockZ = chunk.ChunkZ * CHUNK_SIZE;
+                int regionX = blockX / regionSize;
+                int regionZ = blockZ / regionSize;
+
+                long regionKey = weatherSystem.MapRegionIndex2D(regionX, regionZ);
+
+                if (!regionChunks.TryGetValue(regionKey, out var list))
+                {
+                    list = new List<float>();
+                    regionChunks[regionKey] = list;
+                }
+                list.Add((float)chunk.DevastationLevel);
+            }
+
+            // Calculate average intensity weighted by chunk count
+            foreach (var kvp in regionChunks)
+            {
+                long regionKey = kvp.Key;
+                var levels = kvp.Value;
+
+                float avgLevel = levels.Average();
+                // Scale by coverage: more chunks = stronger effect
+                // A region has chunksPerRegion^2 chunks (typically 256)
+                float coverage = (float)levels.Count / (chunksPerRegion * chunksPerRegion);
+                // Double the effect of coverage (so 50% coverage = 100% intensity) but cap at 1.0
+                float intensity = avgLevel * Math.Min(coverage * 2f, 1f);
+                result[regionKey] = intensity;
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Updates weather for a specific region based on devastation intensity.
+        /// </summary>
+        private void UpdateRegionWeather(long regionKey, float intensity)
+        {
+            if (intensity < config.WeatherMinIntensity) return;
+
+            // Determine weather tier based on intensity
+            string pattern = null;
+            string weatherEvent = null;
+
+            if (intensity >= config.WeatherTier3Threshold)
+            {
+                pattern = config.WeatherTier3Pattern;
+                weatherEvent = config.WeatherTier3Event;
+            }
+            else if (intensity >= config.WeatherTier2Threshold)
+            {
+                pattern = config.WeatherTier2Pattern;
+                weatherEvent = config.WeatherTier2Event;
+            }
+            else if (intensity >= config.WeatherTier1Threshold)
+            {
+                pattern = config.WeatherTier1Pattern;
+                // Tier 1 has no weather event, just haze
+            }
+
+            if (pattern == null) return;
+
+            // Check if weather already set to this tier (avoid redundant updates)
+            if (activeWeatherRegions.TryGetValue(regionKey, out var current))
+            {
+                if (current.pattern == pattern && current.weatherEvent == weatherEvent)
+                    return; // No change needed
+            }
+
+            // Get the weather simulation for this region
+            if (!weatherSystem.weatherSimByMapRegion.TryGetValue(regionKey, out var weatherSim))
+            {
+                // Region not loaded yet, skip
+                return;
+            }
+
+            // Apply weather pattern
+            if (weatherSim.SetWeatherPattern(pattern, true))
+            {
+                // Apply weather event if specified
+                if (!string.IsNullOrEmpty(weatherEvent))
+                {
+                    weatherSim.SetWeatherEvent(weatherEvent, true);
+                    if (weatherSim.CurWeatherEvent != null)
+                    {
+                        weatherSim.CurWeatherEvent.OnBeginUse();
+                    }
+                }
+
+                // Trigger immediate update
+                weatherSim.TickEvery25ms(0.025f);
+
+                // Track this region's weather state
+                activeWeatherRegions[regionKey] = (intensity, pattern, weatherEvent);
+
+                sapi.Logger.Debug($"SpreadingDevastation: Set weather for region {regionKey}: pattern={pattern}, event={weatherEvent ?? "none"}, intensity={intensity:F2}");
+            }
+        }
+
+        /// <summary>
+        /// Removes weather tracking for regions that are no longer devastated.
+        /// </summary>
+        private void CleanupClearedWeatherRegions(Dictionary<long, float> currentIntensities)
+        {
+            // Find regions that we're tracking but no longer have devastation
+            var toRemove = new List<long>();
+            foreach (var regionKey in activeWeatherRegions.Keys)
+            {
+                if (!currentIntensities.ContainsKey(regionKey) ||
+                    currentIntensities[regionKey] < config.WeatherMinIntensity)
+                {
+                    toRemove.Add(regionKey);
+                }
+            }
+
+            // Remove from tracking (weather will naturally transition back to normal)
+            foreach (var regionKey in toRemove)
+            {
+                activeWeatherRegions.Remove(regionKey);
+                sapi.Logger.Debug($"SpreadingDevastation: Cleared weather tracking for region {regionKey} - no longer devastated");
+            }
+        }
+
+        /// <summary>
+        /// Gets the number of weather regions currently being affected by devastation.
+        /// </summary>
+        public int GetActiveWeatherRegionCount()
+        {
+            return activeWeatherRegions.Count;
+        }
+
+        /// <summary>
+        /// Gets a summary of active weather regions for status display.
+        /// </summary>
+        public IEnumerable<(long regionKey, float intensity, string pattern, string weatherEvent)> GetActiveWeatherRegions()
+        {
+            foreach (var kvp in activeWeatherRegions)
+            {
+                yield return (kvp.Key, kvp.Value.intensity, kvp.Value.pattern, kvp.Value.weatherEvent);
+            }
+        }
+
+        /// <summary>
+        /// Forces a specific weather pattern in the player's current region (for testing).
+        /// </summary>
+        public bool ForceWeatherInRegion(BlockPos pos, string pattern, string weatherEvent)
+        {
+            if (weatherSystem == null)
+            {
+                weatherSystem = sapi.ModLoader.GetModSystem<WeatherSystemServer>();
+                if (weatherSystem == null) return false;
+            }
+
+            int regionSize = sapi.World.BlockAccessor.RegionSize;
+            int regionX = pos.X / regionSize;
+            int regionZ = pos.Z / regionSize;
+            long regionKey = weatherSystem.MapRegionIndex2D(regionX, regionZ);
+
+            if (!weatherSystem.weatherSimByMapRegion.TryGetValue(regionKey, out var weatherSim))
+            {
+                return false;
+            }
+
+            if (!weatherSim.SetWeatherPattern(pattern, true))
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrEmpty(weatherEvent))
+            {
+                weatherSim.SetWeatherEvent(weatherEvent, true);
+                weatherSim.CurWeatherEvent?.OnBeginUse();
+            }
+
+            weatherSim.TickEvery25ms(0.025f);
+            activeWeatherRegions[regionKey] = (1.0f, pattern, weatherEvent);
+
+            return true;
+        }
+
+        #endregion
 
         /// <summary>
         /// Cardinal direction offsets for chunk spreading (N/S/E/W only, no diagonals)

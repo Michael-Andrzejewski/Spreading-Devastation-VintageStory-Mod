@@ -133,6 +133,12 @@ namespace SpreadingDevastation
                     .WithArgs(api.ChatCommands.Parsers.OptionalWord("setting"),
                               api.ChatCommands.Parsers.OptionalAll("value"))
                     .HandleWith(HandleParticleCommand)
+                .EndSubCommand()
+                .BeginSubCommand("weather")
+                    .WithDescription("Configure devastation weather effects")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("action"),
+                              api.ChatCommands.Parsers.OptionalAll("args"))
+                    .HandleWith(HandleWeatherCommand)
                 .EndSubCommand();
         }
 
@@ -668,6 +674,149 @@ namespace SpreadingDevastation
                         "  /dv particle airabove [on|off] - Toggle air-above requirement",
                         "  /dv particle reset - Reset all to defaults"
                     }, "Particle settings sent to chat");
+            }
+        }
+
+        private TextCommandResult HandleWeatherCommand(TextCommandCallingArgs args)
+        {
+            string action = (args.Parsers[0].GetValue() as string ?? "").ToLowerInvariant();
+            string value = args.Parsers[1].GetValue() as string ?? "";
+
+            switch (action)
+            {
+                case "enable":
+                case "on":
+                    config.WeatherEffectsEnabled = true;
+                    SaveConfig();
+                    return TextCommandResult.Success("Devastation weather effects ENABLED");
+
+                case "disable":
+                case "off":
+                    config.WeatherEffectsEnabled = false;
+                    activeWeatherRegions.Clear();
+                    SaveConfig();
+                    return TextCommandResult.Success("Devastation weather effects DISABLED");
+
+                case "force":
+                    {
+                        var player = args.Caller.Player as IServerPlayer;
+                        if (player == null) return TextCommandResult.Error("Player not found");
+
+                        var blockSel = player.CurrentBlockSelection;
+                        BlockPos pos = blockSel?.Position ?? player.Entity.ServerPos.AsBlockPos;
+
+                        string[] parts = value.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                        string pattern = parts.Length > 0 ? parts[0] : "cumulonimbusrf";
+                        string weatherEvent = parts.Length > 1 ? parts[1] : "heavythunder";
+
+                        if (ForceWeatherInRegion(pos, pattern, weatherEvent))
+                        {
+                            return TextCommandResult.Success($"Forced weather: pattern={pattern}, event={weatherEvent}");
+                        }
+                        return TextCommandResult.Error("Failed to set weather. Region may not be loaded or pattern name is invalid.");
+                    }
+
+                case "clear":
+                    {
+                        int count = activeWeatherRegions.Count;
+                        activeWeatherRegions.Clear();
+                        return TextCommandResult.Success($"Cleared {count} active weather region(s). Weather will transition naturally.");
+                    }
+
+                case "tier1":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Tier 1 (threshold {config.WeatherTier1Threshold:F2}): pattern={config.WeatherTier1Pattern}");
+                    }
+                    config.WeatherTier1Pattern = value.Trim();
+                    SaveConfig();
+                    return TextCommandResult.Success($"Weather Tier 1 pattern set to: {config.WeatherTier1Pattern}");
+
+                case "tier2":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Tier 2 (threshold {config.WeatherTier2Threshold:F2}): pattern={config.WeatherTier2Pattern}, event={config.WeatherTier2Event}");
+                    }
+                    {
+                        string[] parts = value.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                        if (parts.Length >= 1) config.WeatherTier2Pattern = parts[0];
+                        if (parts.Length >= 2) config.WeatherTier2Event = parts[1];
+                        SaveConfig();
+                        return TextCommandResult.Success($"Weather Tier 2 set: pattern={config.WeatherTier2Pattern}, event={config.WeatherTier2Event}");
+                    }
+
+                case "tier3":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Tier 3 (threshold {config.WeatherTier3Threshold:F2}): pattern={config.WeatherTier3Pattern}, event={config.WeatherTier3Event}");
+                    }
+                    {
+                        string[] parts = value.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                        if (parts.Length >= 1) config.WeatherTier3Pattern = parts[0];
+                        if (parts.Length >= 2) config.WeatherTier3Event = parts[1];
+                        SaveConfig();
+                        return TextCommandResult.Success($"Weather Tier 3 set: pattern={config.WeatherTier3Pattern}, event={config.WeatherTier3Event}");
+                    }
+
+                case "interval":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Weather update interval: {config.WeatherUpdateIntervalSeconds:F1} seconds");
+                    }
+                    if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double interval))
+                    {
+                        config.WeatherUpdateIntervalSeconds = Math.Clamp(interval, 5.0, 300.0);
+                        SaveConfig();
+                        return TextCommandResult.Success($"Weather update interval set to {config.WeatherUpdateIntervalSeconds:F1} seconds");
+                    }
+                    return TextCommandResult.Error("Invalid number. Usage: /dv weather interval [seconds] (5-300)");
+
+                case "":
+                case "status":
+                case "info":
+                default:
+                    var lines = new List<string>
+                    {
+                        "=== Devastation Weather ===",
+                        $"Weather effects: {(config.WeatherEffectsEnabled ? "ON" : "OFF")}",
+                        $"Update interval: {config.WeatherUpdateIntervalSeconds:F1} seconds",
+                        $"Min intensity: {config.WeatherMinIntensity:F2}",
+                        $"Active regions: {GetActiveWeatherRegionCount()}",
+                        "",
+                        "Weather Tiers:",
+                        $"  Tier 1 ({config.WeatherTier1Threshold:F2}+): {config.WeatherTier1Pattern}",
+                        $"  Tier 2 ({config.WeatherTier2Threshold:F2}+): {config.WeatherTier2Pattern} + {config.WeatherTier2Event}",
+                        $"  Tier 3 ({config.WeatherTier3Threshold:F2}+): {config.WeatherTier3Pattern} + {config.WeatherTier3Event}",
+                    };
+
+                    // Add active region details if any
+                    var activeRegions = GetActiveWeatherRegions().ToList();
+                    if (activeRegions.Count > 0)
+                    {
+                        lines.Add("");
+                        lines.Add("Active Regions:");
+                        foreach (var region in activeRegions.Take(5))
+                        {
+                            string eventStr = string.IsNullOrEmpty(region.weatherEvent) ? "none" : region.weatherEvent;
+                            lines.Add($"  Region {region.regionKey}: {region.pattern} + {eventStr} (intensity: {region.intensity:F2})");
+                        }
+                        if (activeRegions.Count > 5)
+                        {
+                            lines.Add($"  ... and {activeRegions.Count - 5} more");
+                        }
+                    }
+
+                    lines.Add("");
+                    lines.Add("Commands:");
+                    lines.Add("  /dv weather [on|off] - Enable or disable weather effects");
+                    lines.Add("  /dv weather force [pattern] [event] - Force weather in current region");
+                    lines.Add("  /dv weather clear - Clear all weather overrides");
+                    lines.Add("  /dv weather tier1 [pattern] - Set Tier 1 pattern");
+                    lines.Add("  /dv weather tier2 [pattern] [event] - Set Tier 2");
+                    lines.Add("  /dv weather tier3 [pattern] [event] - Set Tier 3");
+                    lines.Add("  /dv weather interval [seconds] - Set update interval");
+
+                    return SendChatLines(args, lines, "Weather settings sent to chat");
             }
         }
 
