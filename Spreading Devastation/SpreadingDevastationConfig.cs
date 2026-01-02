@@ -501,5 +501,58 @@ namespace SpreadingDevastation
         /// This prevents flickering when intensity hovers near a threshold.
         /// </summary>
         public float WeatherHysteresis { get; set; } = 0.05f;
+
+        // === Devastation Music Settings ===
+
+        /// <summary>
+        /// Whether to play eerie ambient music when in devastated chunks (default: true).
+        /// Music fades in as you enter devastated areas and fades out when you leave.
+        /// </summary>
+        public bool MusicEnabled { get; set; } = true;
+
+        /// <summary>
+        /// Base volume for devastation music (0.0-1.0, default: 0.8).
+        /// The actual volume scales with fog intensity.
+        /// </summary>
+        public float MusicVolume { get; set; } = 0.8f;
+
+        /// <summary>
+        /// Sound file path for devastation ambient sound (without .ogg extension).
+        /// Use "effect/tempstab-verylow" for intense temporal storm sound (default).
+        /// Use "effect/tempstab-low" for a less intense version.
+        /// Use "effect/tempstab-drain" for the stability drain sound.
+        /// For custom sounds, use just the filename and place in assets/spreadingdevastation/sounds/music/.
+        /// </summary>
+        public string MusicSoundFile { get; set; } = "effect/tempstab-verylow";
+
+        /// <summary>
+        /// How fast the music fades in per second (default: 0.3).
+        /// Lower values = slower fade in.
+        /// </summary>
+        public float MusicFadeInSpeed { get; set; } = 0.3f;
+
+        /// <summary>
+        /// How fast the music fades out per second (default: 0.5).
+        /// Lower values = slower fade out.
+        /// </summary>
+        public float MusicFadeOutSpeed { get; set; } = 0.5f;
+
+        /// <summary>
+        /// Minimum fog intensity (0.0-1.0) to trigger music playback (default: 0.1).
+        /// Music won't play until fog reaches this intensity level.
+        /// </summary>
+        public float MusicIntensityThreshold { get; set; } = 0.1f;
+
+        /// <summary>
+        /// Whether the music should loop continuously (default: true).
+        /// </summary>
+        public bool MusicLoop { get; set; } = true;
+
+        /// <summary>
+        /// How much to suppress normal ambient sounds when in devastated areas (0.0-1.0, default: 0.8).
+        /// 1.0 = full suppression (silence other ambient sounds), 0.0 = no suppression.
+        /// Note: This affects the volume of block ambient sounds like water, fire, etc.
+        /// </summary>
+        public float AmbientSoundSuppression { get; set; } = 0.8f;
     }
 }

@@ -65,6 +65,7 @@ namespace SpreadingDevastation
         private const string NETWORK_CHANNEL_NAME = "spreadingdevastation";
         private IServerNetworkChannel serverNetworkChannel;
         private bool fogConfigDirty = true; // Flag to track if fog config needs to be sent
+        private bool musicConfigDirty = true; // Flag to track if music config needs to be sent
 
         // Temporal stability system hook for gear visual (server and client)
         private SystemTemporalStability temporalStabilitySystemServer;
@@ -75,7 +76,9 @@ namespace SpreadingDevastation
         private IClientNetworkChannel clientNetworkChannel;
         private Dictionary<long, float> clientDevastatedChunks = new Dictionary<long, float>(); // Chunk key -> devastation level
         private DevastationFogRenderer fogRenderer;
+        private DevastationMusicManager musicManager;
         private FogConfigPacket clientFogConfig = new FogConfigPacket(); // Fog config received from server
+        private MusicConfigPacket clientMusicConfig = new MusicConfigPacket(); // Music config received from server
 
         // Animal insanity tracking
         private double lastInsanityCheckTime = 0; // Track last time we checked for animals to drive insane
@@ -109,7 +112,8 @@ namespace SpreadingDevastation
             api.Network
                 .RegisterChannel(NETWORK_CHANNEL_NAME)
                 .RegisterMessageType(typeof(DevastatedChunkSyncPacket))
-                .RegisterMessageType(typeof(FogConfigPacket));
+                .RegisterMessageType(typeof(FogConfigPacket))
+                .RegisterMessageType(typeof(MusicConfigPacket));
         }
 
         public override void StartClientSide(ICoreClientAPI api)
@@ -119,11 +123,16 @@ namespace SpreadingDevastation
             // Get the network channel and set up message handlers
             clientNetworkChannel = api.Network.GetChannel(NETWORK_CHANNEL_NAME)
                 .SetMessageHandler<DevastatedChunkSyncPacket>(OnDevastatedChunkSync)
-                .SetMessageHandler<FogConfigPacket>(OnFogConfigSync);
+                .SetMessageHandler<FogConfigPacket>(OnFogConfigSync)
+                .SetMessageHandler<MusicConfigPacket>(OnMusicConfigSync);
 
             // Create and register the fog renderer
             fogRenderer = new DevastationFogRenderer(api, this);
             api.Event.RegisterRenderer(fogRenderer, EnumRenderStage.Before, "devastationfog");
+
+            // Create and register the music manager
+            musicManager = new DevastationMusicManager(api, this);
+            api.Event.RegisterRenderer(musicManager, EnumRenderStage.Before, "devastationmusic");
 
             // Hook into the client-side temporal stability system after player enters world
             // This makes the gear spin counter-clockwise in devastated chunks
@@ -141,7 +150,7 @@ namespace SpreadingDevastation
                 }
             };
 
-            api.Logger.Notification("SpreadingDevastation: Client-side fog renderer initialized");
+            api.Logger.Notification("SpreadingDevastation: Client-side fog renderer and music manager initialized");
         }
 
         /// <summary>
@@ -154,11 +163,28 @@ namespace SpreadingDevastation
         }
 
         /// <summary>
+        /// Called when the client receives music configuration from the server.
+        /// </summary>
+        private void OnMusicConfigSync(MusicConfigPacket packet)
+        {
+            clientMusicConfig = packet;
+            musicManager?.UpdateConfig(packet);
+        }
+
+        /// <summary>
         /// Gets the current fog config for the client.
         /// </summary>
         public FogConfigPacket GetFogConfig()
         {
             return clientFogConfig;
+        }
+
+        /// <summary>
+        /// Gets the current music config for the client.
+        /// </summary>
+        public MusicConfigPacket GetMusicConfig()
+        {
+            return clientMusicConfig;
         }
 
         /// <summary>
@@ -560,6 +586,24 @@ namespace SpreadingDevastation
                 fogConfigDirty = false;
             }
 
+            // Only create music config packet when it has changed
+            MusicConfigPacket musicPacket = null;
+            if (musicConfigDirty)
+            {
+                musicPacket = new MusicConfigPacket
+                {
+                    Enabled = config.MusicEnabled,
+                    Volume = config.MusicVolume,
+                    FadeInSpeed = config.MusicFadeInSpeed,
+                    FadeOutSpeed = config.MusicFadeOutSpeed,
+                    IntensityThreshold = config.MusicIntensityThreshold,
+                    AmbientSuppression = config.AmbientSoundSuppression,
+                    SoundFile = config.MusicSoundFile ?? "devastation-ambient",
+                    Loop = config.MusicLoop
+                };
+                musicConfigDirty = false;
+            }
+
             bool hasChunks = devastatedChunks != null && devastatedChunks.Count > 0;
 
             for (int i = 0; i < players.Length; i++)
@@ -571,6 +615,12 @@ namespace SpreadingDevastation
                 if (fogPacket != null)
                 {
                     serverNetworkChannel.SendPacket(fogPacket, player);
+                }
+
+                // Send music config only when it changed
+                if (musicPacket != null)
+                {
+                    serverNetworkChannel.SendPacket(musicPacket, player);
                 }
 
                 var playerPos = player.Entity.Pos;
@@ -610,6 +660,14 @@ namespace SpreadingDevastation
         private void BroadcastFogConfig()
         {
             fogConfigDirty = true;
+        }
+
+        /// <summary>
+        /// Marks the music configuration as changed, so it will be sent to clients on next sync.
+        /// </summary>
+        private void BroadcastMusicConfig()
+        {
+            musicConfigDirty = true;
         }
 
         private void LoadConfig()

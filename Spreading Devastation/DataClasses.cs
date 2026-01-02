@@ -323,6 +323,45 @@ namespace SpreadingDevastation
         public float InterpolationSpeed = 0.5f;
     }
 
+    /// <summary>
+    /// Network packet sent from server to client containing music configuration.
+    /// </summary>
+    [ProtoContract]
+    public class MusicConfigPacket
+    {
+        /// <summary>Whether devastation music is enabled.</summary>
+        [ProtoMember(1)]
+        public bool Enabled = true;
+
+        /// <summary>Base volume for devastation music (0.0-1.0).</summary>
+        [ProtoMember(2)]
+        public float Volume = 0.8f;
+
+        /// <summary>Fade in speed (per second).</summary>
+        [ProtoMember(3)]
+        public float FadeInSpeed = 0.3f;
+
+        /// <summary>Fade out speed (per second).</summary>
+        [ProtoMember(4)]
+        public float FadeOutSpeed = 0.5f;
+
+        /// <summary>Minimum fog intensity to trigger music playback.</summary>
+        [ProtoMember(5)]
+        public float IntensityThreshold = 0.1f;
+
+        /// <summary>How much to suppress normal ambient sounds when in devastation (0-1).</summary>
+        [ProtoMember(6)]
+        public float AmbientSuppression = 0.8f;
+
+        /// <summary>Sound file path (without .ogg extension). Defaults to base game temporal storm sound.</summary>
+        [ProtoMember(7)]
+        public string SoundFile = "effect/tempstab-verylow";
+
+        /// <summary>Whether the music should loop.</summary>
+        [ProtoMember(8)]
+        public bool Loop = true;
+    }
+
     #region Test Suite Data Structures
 
     /// <summary>

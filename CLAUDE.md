@@ -12,6 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `SpreadingDevastationConfig.cs` | Configuration class with all settings |
 | `DataClasses.cs` | ProtoBuf data structures (DevastationSource, DevastatedChunk, etc.) |
 | `DevastationFogRenderer.cs` | Client-side fog/atmosphere rendering |
+| `DevastationMusicManager.cs` | Client-side ambient music for devastated areas |
 
 ## Build Commands
 
@@ -162,4 +163,5 @@ Use `OptionalAll` when the command accepts:
 2. **Client vs Server code** - `sapi` is server-only, `capi` is client-only. Check for null before using. Network sync required for client-side effects.
 3. **Block codes include domain** - Use `new AssetLocation("game", blockPath)` not just the path string
 4. **Particle spawning is server-side** - Particles are spawned via `sapi.World.SpawnParticles()` and automatically synced to clients
-5. **Config changes need `SaveConfig()` call** - And `BroadcastFogConfig()` if fog settings changed
+5. **Config changes need `SaveConfig()` call** - And `BroadcastFogConfig()` or `BroadcastMusicConfig()` if those settings changed
+6. **Music uses base game sounds** - Defaults to `effect/tempstab-verylow` (temporal storm ambient). Can be changed via `MusicSoundFile` config
