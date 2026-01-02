@@ -469,11 +469,35 @@ namespace SpreadingDevastation
         }
 
         /// <summary>
-        /// Marks the fog wall configuration as changed, so it will be sent to clients on next sync.
+        /// Immediately broadcasts fog wall configuration to all connected clients.
         /// </summary>
         private void BroadcastFogWallConfig()
         {
             fogWallConfigDirty = true;
+
+            // Also send immediately to all connected players for responsive feedback
+            if (sapi == null || serverNetworkChannel == null) return;
+
+            var packet = new FogWallConfigPacket
+            {
+                Enabled = config.FogWallsEnabled,
+                Height = config.FogWallHeight,
+                Opacity = config.FogWallOpacity,
+                ColorR = config.FogWallColorR,
+                ColorG = config.FogWallColorG,
+                ColorB = config.FogWallColorB,
+                MaxDistance = config.FogWallMaxDistance,
+                FadeDistance = config.FogWallFadeDistance,
+                ZOffset = config.FogWallZOffset
+            };
+
+            foreach (var player in sapi.World.AllOnlinePlayers)
+            {
+                if (player is IServerPlayer serverPlayer)
+                {
+                    serverNetworkChannel.SendPacket(packet, serverPlayer);
+                }
+            }
         }
 
         private void LoadConfig()

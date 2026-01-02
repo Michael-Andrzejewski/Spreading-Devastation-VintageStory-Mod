@@ -19,6 +19,9 @@ namespace SpreadingDevastation
         // Mesh references for uploaded geometry
         private MeshRef wallMeshRef;
 
+        // White texture for untextured rendering (vertex colors provide the color)
+        private LoadedTexture whiteTexture;
+
         // Configuration (updated from config)
         private bool enabled = true;
         private float wallHeight = 128f;
@@ -41,8 +44,31 @@ namespace SpreadingDevastation
             this.capi = capi;
             this.modSystem = modSystem;
 
+            // Create a simple 1x1 white texture for untextured rendering
+            // The vertex colors will provide the actual fog wall color
+            CreateWhiteTexture();
+
             // Create reusable quad mesh for walls
             CreateWallMesh();
+        }
+
+        /// <summary>
+        /// Creates a simple white texture for use with the standard shader.
+        /// This allows vertex colors to control the appearance without the "missing texture" pattern.
+        /// </summary>
+        private void CreateWhiteTexture()
+        {
+            // Create a 2x2 white texture from raw BGRA data
+            // Using 2x2 instead of 1x1 for better compatibility with texture filtering
+            int[] pixels = new int[] {
+                unchecked((int)0xFFFFFFFF), // White pixel (BGRA format)
+                unchecked((int)0xFFFFFFFF),
+                unchecked((int)0xFFFFFFFF),
+                unchecked((int)0xFFFFFFFF)
+            };
+
+            whiteTexture = new LoadedTexture(capi, 0, 2, 2);
+            capi.Render.LoadOrUpdateTextureFromRgba(pixels, false, 0, ref whiteTexture);
         }
 
         /// <summary>
@@ -52,6 +78,7 @@ namespace SpreadingDevastation
         {
             if (config == null) return;
 
+            capi.Logger.Debug($"[FogWall] UpdateConfig called: Enabled={config.Enabled}, was={enabled}");
             enabled = config.Enabled;
             wallHeight = config.Height;
             wallOpacity = config.Opacity;
@@ -130,9 +157,13 @@ namespace SpreadingDevastation
 
         public void OnRenderFrame(float deltaTime, EnumRenderStage stage)
         {
-            if (!enabled) return;
+            if (!enabled)
+            {
+                return;
+            }
             if (capi?.World?.Player?.Entity == null) return;
             if (wallMeshRef == null) return;
+            if (whiteTexture == null || whiteTexture.TextureId == 0) return;
 
             var playerPos = capi.World.Player.Entity.Pos.XYZ;
             int playerChunkX = (int)Math.Floor(playerPos.X / 32.0);
@@ -148,6 +179,9 @@ namespace SpreadingDevastation
             );
 
             prog.Use();
+
+            // Bind the white texture - vertex colors will provide the fog wall color
+            capi.Render.BindTexture2d(whiteTexture.TextureId);
 
             // Enable depth test but allow blending for transparency
             capi.Render.GLEnableDepthTest();
@@ -311,6 +345,8 @@ namespace SpreadingDevastation
         {
             wallMeshRef?.Dispose();
             wallMeshRef = null;
+            whiteTexture?.Dispose();
+            whiteTexture = null;
         }
     }
 
