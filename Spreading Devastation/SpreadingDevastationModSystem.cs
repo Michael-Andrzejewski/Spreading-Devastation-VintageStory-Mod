@@ -87,6 +87,10 @@ namespace SpreadingDevastation
         private string[] insanityExcludePatterns = null; // Cached parsed patterns from config
         private const string INSANITY_ATTRIBUTE = "devastationInsane"; // WatchedAttribute key for insane state
 
+        // Trader removal tracking
+        private double lastTraderRemovalCheckTime = 0; // Track last time we checked for traders to remove
+        private string[] traderEntityPatterns = null; // Cached parsed patterns from config
+
         // Particle effect tracking
         private double lastChunkBorderParticleTime = 0; // Track last time we emitted chunk border particles
         private int nearParticlesSpawnedThisSecond = 0; // Track NEAR particles spawned (high priority)
@@ -101,8 +105,17 @@ namespace SpreadingDevastation
         // Weather system integration
         private WeatherSystemServer weatherSystem;
         private double lastWeatherUpdateTime = 0;
-        private Dictionary<long, (float intensity, string pattern, string weatherEvent)> activeWeatherRegions
-            = new Dictionary<long, (float, string, string)>();
+        private Dictionary<long, (float intensity, string pattern, string weatherEvent, string windPattern)> activeWeatherRegions
+            = new Dictionary<long, (float, string, string, string)>();
+
+        // Edge spawning tracking (per-player: last time they saw devastation, last check time)
+        private Dictionary<string, (long lastDevastationSeenMs, long lastCheckMs)> playerEdgeSpawnTracking
+            = new Dictionary<string, (long, long)>();
+        private BlockPos lastKnownDevastationPos = null; // Track last known devastation position for direction calculation
+
+        // Temporal storm devastation tracking
+        private double lastStormSpawnTime = 0; // Last game time when storm spawning occurred
+        private bool wasStormActiveLastTick = false; // Track storm state transitions
 
         public override void Start(ICoreAPI api)
         {
@@ -459,8 +472,17 @@ namespace SpreadingDevastation
             // Process animal insanity every 1 second (actual interval controlled by config)
             api.Event.RegisterGameTickListener(ProcessAnimalInsanity, 1000);
 
+            // Process trader removal every 1 second (actual interval controlled by config)
+            api.Event.RegisterGameTickListener(ProcessTraderRemoval, 1000);
+
             // Process devastation weather every 5 seconds (actual interval controlled by config)
             api.Event.RegisterGameTickListener(ProcessDevastationWeather, 5000);
+
+            // Process edge spawning every 1 second (actual interval controlled by config)
+            api.Event.RegisterGameTickListener(ProcessEdgeSpawning, 1000);
+
+            // Process temporal storm devastation every 1 second (actual interval controlled by config)
+            api.Event.RegisterGameTickListener(ProcessTemporalStormDevastation, 1000);
 
             // Listen for block placement/removal to track rift wards efficiently
             api.Event.DidPlaceBlock += OnBlockPlaced;
@@ -686,9 +708,10 @@ namespace SpreadingDevastation
                     sapi.Logger.Notification("SpreadingDevastation: Loaded config file");
                 }
 
-                // Clear cached insanity patterns so they get re-parsed from new config
+                // Clear cached patterns so they get re-parsed from new config
                 insanityIncludePatterns = null;
                 insanityExcludePatterns = null;
+                traderEntityPatterns = null;
             }
             catch (Exception ex)
             {
@@ -847,7 +870,7 @@ namespace SpreadingDevastation
                         : SpreadDevastationAroundPosition(source.Pos.ToVec3d(), source);
                     
                     // Track success rate and adjust radius
-                    int effectiveAmount = Math.Max(1, (int)(source.Amount * config.SpeedMultiplier));
+                    int effectiveAmount = Math.Max(1, (int)(source.Amount * GetEffectiveSpeedMultiplier()));
                     source.SuccessfulAttempts += processed;
                     source.TotalAttempts += effectiveAmount * 5; // We try up to 5 times per block
                     
@@ -993,10 +1016,10 @@ namespace SpreadingDevastation
         {
             // Skip if this source is fully saturated
             if (source.IsSaturated) return 0;
-            
-            // Apply speed multiplier to effective amount
-            int effectiveAmount = Math.Max(1, (int)(source.Amount * config.SpeedMultiplier));
-            
+
+            // Apply speed multiplier to effective amount (includes storm boost)
+            int effectiveAmount = Math.Max(1, (int)(source.Amount * GetEffectiveSpeedMultiplier()));
+
             int devastatedCount = 0;
             int maxAttempts = effectiveAmount * 5; // Try up to 5 times per block we want to devastate
             
@@ -1085,9 +1108,9 @@ namespace SpreadingDevastation
 
         private int HealDevastationAroundPosition(Vec3d position, DevastationSource source)
         {
-            // Apply speed multiplier to effective amount
-            int effectiveAmount = Math.Max(1, (int)(source.Amount * config.SpeedMultiplier));
-            
+            // Apply speed multiplier to effective amount (includes storm boost)
+            int effectiveAmount = Math.Max(1, (int)(source.Amount * GetEffectiveSpeedMultiplier()));
+
             int healedCount = 0;
             int maxAttempts = effectiveAmount * 5;
             
@@ -1291,9 +1314,9 @@ namespace SpreadingDevastation
         {
             // Don't spawn from healing sources
             if (parentSource.IsHealing) return false;
-            
-            // Enforce spawn delay (affected by speed multiplier)
-            double effectiveDelay = config.ChildSpawnDelaySeconds / Math.Max(0.1, config.SpeedMultiplier);
+
+            // Enforce spawn delay (affected by speed multiplier, includes storm boost)
+            double effectiveDelay = config.ChildSpawnDelaySeconds / Math.Max(0.1, GetEffectiveSpeedMultiplier());
             double delayInHours = effectiveDelay / 3600.0; // Convert seconds to hours
             
             if (parentSource.LastChildSpawnTime > 0)
@@ -1803,6 +1826,34 @@ namespace SpreadingDevastation
                 devastatedBlock = "devastatedsoil-3";
                 regeneratesTo = "log-grown-aged-ud";
             }
+            // Wooden planks (all types: planks-*, plankstairs-*, plankfence-*, etc.)
+            else if (path.StartsWith("planks-") || path.StartsWith("plankstairs-") ||
+                     path.StartsWith("plankfence-") || path.StartsWith("plankslab-") ||
+                     path.StartsWith("plankpath-"))
+            {
+                devastatedBlock = "devastatedsoil-3";
+                regeneratesTo = "air"; // Planks are player-crafted, don't regenerate
+            }
+            // Wooden doors and trapdoors
+            else if (path.StartsWith("door-") || path.StartsWith("trapdoor-"))
+            {
+                devastatedBlock = "air"; // Doors just disappear
+                regeneratesTo = "air";
+            }
+            // Wooden furniture and structures (barrels, shelves, signs, ladders, chairs, tables)
+            else if (path.StartsWith("barrel-") || path.StartsWith("shelf-") ||
+                     path.StartsWith("sign-") || path.StartsWith("ladder-") ||
+                     path.StartsWith("chair-") || path.StartsWith("table-"))
+            {
+                devastatedBlock = "air"; // Furniture disappears
+                regeneratesTo = "air";
+            }
+            // Fences and fence gates (non-plank variants)
+            else if (path.StartsWith("fence-") || path.StartsWith("fencegate-"))
+            {
+                devastatedBlock = "air"; // Fences disappear
+                regeneratesTo = "air";
+            }
             // Fruit tree foliage (fruittree-foliage, fruittree-foliage-ripe, etc.)
             else if (path.StartsWith("fruittree-foliage"))
             {
@@ -1873,6 +1924,22 @@ namespace SpreadingDevastation
             else if (path.StartsWith("log-") || path.StartsWith("logsection-") ||
                      path.StartsWith("fruittree-branch") || path.StartsWith("fruittree-stem") ||
                      path.StartsWith("fruittree-trunk"))
+            {
+                return "wood";
+            }
+            // Wooden planks and plank-based blocks
+            else if (path.StartsWith("planks-") || path.StartsWith("plankstairs-") ||
+                     path.StartsWith("plankfence-") || path.StartsWith("plankslab-") ||
+                     path.StartsWith("plankpath-"))
+            {
+                return "wood";
+            }
+            // Wooden furniture and structures
+            else if (path.StartsWith("door-") || path.StartsWith("trapdoor-") ||
+                     path.StartsWith("barrel-") || path.StartsWith("shelf-") ||
+                     path.StartsWith("sign-") || path.StartsWith("ladder-") ||
+                     path.StartsWith("chair-") || path.StartsWith("table-") ||
+                     path.StartsWith("fence-") || path.StartsWith("fencegate-"))
             {
                 return "wood";
             }
@@ -2903,6 +2970,95 @@ namespace SpreadingDevastation
             return count;
         }
 
+        #region Trader Removal System
+
+        /// <summary>
+        /// Processes trader removal in devastated chunks. Traders in devastated areas are killed.
+        /// Since traders spawn during world generation with their carts, killing them and
+        /// devastating their structures effectively prevents respawning.
+        /// </summary>
+        private void ProcessTraderRemoval(float dt)
+        {
+            if (sapi == null || config == null || isPaused) return;
+            if (!config.TraderRemovalEnabled) return;
+            if (devastatedChunks == null || devastatedChunks.Count == 0) return;
+
+            // Check interval (config is in seconds, we need to compare against real time)
+            double currentTime = sapi.World.ElapsedMilliseconds / 1000.0;
+            if (currentTime - lastTraderRemovalCheckTime < config.TraderRemovalCheckIntervalSeconds) return;
+            lastTraderRemovalCheckTime = currentTime;
+
+            // Parse patterns from config if not already cached
+            if (traderEntityPatterns == null)
+            {
+                traderEntityPatterns = config.TraderEntityCodes
+                    .Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(s => s.Trim().ToLowerInvariant())
+                    .ToArray();
+            }
+
+            // Find and kill all traders in devastated chunks
+            var entitiesToKill = new List<Entity>();
+
+            foreach (var entity in sapi.World.LoadedEntities.Values)
+            {
+                if (entity == null || !entity.Alive) continue;
+                if (!IsEntityTrader(entity)) continue;
+
+                // Check if entity is in a devastated chunk
+                int chunkX = (int)entity.ServerPos.X / CHUNK_SIZE;
+                int chunkZ = (int)entity.ServerPos.Z / CHUNK_SIZE;
+                long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
+
+                if (!devastatedChunks.ContainsKey(chunkKey)) continue;
+
+                // Check if protected by rift ward
+                if (IsBlockProtectedByRiftWard(entity.ServerPos.AsBlockPos)) continue;
+
+                // Mark for removal
+                entitiesToKill.Add(entity);
+            }
+
+            // Kill all marked traders
+            foreach (var entity in entitiesToKill)
+            {
+                sapi.Logger.Notification($"SpreadingDevastation: Killing trader {entity.Code.Path} at ({entity.ServerPos.X:F0}, {entity.ServerPos.Y:F0}, {entity.ServerPos.Z:F0}) - in devastated chunk");
+                entity.Die(EnumDespawnReason.Death, null);
+            }
+        }
+
+        /// <summary>
+        /// Checks if an entity is a trader based on config patterns.
+        /// </summary>
+        private bool IsEntityTrader(Entity entity)
+        {
+            if (entity?.Code?.Path == null) return false;
+
+            // Ensure patterns are initialized
+            if (traderEntityPatterns == null)
+            {
+                traderEntityPatterns = config.TraderEntityCodes
+                    .Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(s => s.Trim().ToLowerInvariant())
+                    .ToArray();
+            }
+
+            string entityCode = entity.Code.Path.ToLowerInvariant();
+
+            foreach (var pattern in traderEntityPatterns)
+            {
+                if (string.IsNullOrEmpty(pattern)) continue;
+                if (entityCode.StartsWith(pattern) || entityCode.Contains(pattern))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        #endregion
+
         #region Devastation Weather System
 
         /// <summary>
@@ -3021,6 +3177,7 @@ namespace SpreadingDevastation
             // When entering a tier, use the threshold; when leaving, use threshold - hysteresis
             string pattern = null;
             string weatherEvent = null;
+            string windPattern = null;
             int newTier = 0;
 
             // Determine current tier (if any) for hysteresis comparison
@@ -3039,6 +3196,7 @@ namespace SpreadingDevastation
             {
                 pattern = config.WeatherTier3Pattern;
                 weatherEvent = config.WeatherTier3Event;
+                windPattern = config.WeatherTier3Wind;
                 newTier = 3;
             }
             // Check Tier 2
@@ -3050,6 +3208,7 @@ namespace SpreadingDevastation
                 {
                     pattern = config.WeatherTier2Pattern;
                     weatherEvent = config.WeatherTier2Event;
+                    windPattern = config.WeatherTier2Wind;
                     newTier = 2;
                 }
                 // Check Tier 1
@@ -3060,7 +3219,8 @@ namespace SpreadingDevastation
                     if (intensity >= tier1Enter || (currentTier == 1 && intensity >= tier1Exit))
                     {
                         pattern = config.WeatherTier1Pattern;
-                        // Tier 1 has no weather event, just haze
+                        weatherEvent = config.WeatherTier1Event;
+                        windPattern = config.WeatherTier1Wind;
                         newTier = 1;
                     }
                 }
@@ -3069,10 +3229,10 @@ namespace SpreadingDevastation
             if (pattern == null) return;
 
             // Check if weather already set to this tier (avoid redundant updates)
-            if (hasExistingWeather && current.pattern == pattern && current.weatherEvent == weatherEvent)
+            if (hasExistingWeather && current.pattern == pattern && current.weatherEvent == weatherEvent && current.windPattern == windPattern)
             {
                 // Update intensity tracking but don't re-apply weather
-                activeWeatherRegions[regionKey] = (intensity, pattern, weatherEvent);
+                activeWeatherRegions[regionKey] = (intensity, pattern, weatherEvent, windPattern);
                 return;
             }
 
@@ -3097,10 +3257,16 @@ namespace SpreadingDevastation
                     }
                 }
 
-                // Track this region's weather state
-                activeWeatherRegions[regionKey] = (intensity, pattern, weatherEvent);
+                // Apply wind pattern if specified
+                if (!string.IsNullOrEmpty(windPattern))
+                {
+                    weatherSim.SetWindPattern(windPattern, instant);
+                }
 
-                sapi.Logger.Debug($"SpreadingDevastation: Set weather for region {regionKey}: pattern={pattern}, event={weatherEvent ?? "none"}, intensity={intensity:F2}, tier={newTier}");
+                // Track this region's weather state
+                activeWeatherRegions[regionKey] = (intensity, pattern, weatherEvent, windPattern);
+
+                sapi.Logger.Debug($"SpreadingDevastation: Set weather for region {regionKey}: pattern={pattern}, event={weatherEvent ?? "none"}, wind={windPattern ?? "none"}, intensity={intensity:F2}, tier={newTier}");
             }
         }
 
@@ -3143,18 +3309,486 @@ namespace SpreadingDevastation
         /// <summary>
         /// Gets a summary of active weather regions for status display.
         /// </summary>
-        public IEnumerable<(long regionKey, float intensity, string pattern, string weatherEvent)> GetActiveWeatherRegions()
+        public IEnumerable<(long regionKey, float intensity, string pattern, string weatherEvent, string windPattern)> GetActiveWeatherRegions()
         {
             foreach (var kvp in activeWeatherRegions)
             {
-                yield return (kvp.Key, kvp.Value.intensity, kvp.Value.pattern, kvp.Value.weatherEvent);
+                yield return (kvp.Key, kvp.Value.intensity, kvp.Value.pattern, kvp.Value.weatherEvent, kvp.Value.windPattern);
+            }
+        }
+
+        // ==================== Edge Spawning System ====================
+        // Spawns devastated chunks at render distance edge when no devastation is visible for a configurable time
+
+        /// <summary>
+        /// Processes edge spawning for all online players.
+        /// Checks if any player has no visible devastation for the configured delay period,
+        /// and spawns a devastated chunk at their render distance edge if so.
+        /// </summary>
+        private void ProcessEdgeSpawning(float dt)
+        {
+            if (!config.EdgeSpawningEnabled || isPaused || sapi == null) return;
+            if (devastatedChunks == null) return;
+
+            long currentMs = sapi.World.ElapsedMilliseconds;
+            long checkIntervalMs = (long)(config.EdgeSpawningCheckIntervalSeconds * 1000);
+            long delayMs = (long)(config.EdgeSpawningDelayMinutes * 60 * 1000);
+
+            var allPlayers = sapi.World.AllOnlinePlayers;
+            for (int i = 0; i < allPlayers.Length; i++)
+            {
+                IServerPlayer player = allPlayers[i] as IServerPlayer;
+                if (player?.Entity == null) continue;
+
+                string uid = player.PlayerUID;
+
+                // Initialize tracking if needed
+                if (!playerEdgeSpawnTracking.TryGetValue(uid, out var tracking))
+                {
+                    tracking = (currentMs, currentMs);
+                    playerEdgeSpawnTracking[uid] = tracking;
+                    continue;
+                }
+
+                // Check interval (default: every 60 seconds)
+                if (currentMs - tracking.lastCheckMs < checkIntervalMs) continue;
+
+                // Update last check time
+                tracking.lastCheckMs = currentMs;
+
+                // Check if player has visible devastation within render distance
+                int playerChunkX = (int)player.Entity.Pos.X / CHUNK_SIZE;
+                int playerChunkZ = (int)player.Entity.Pos.Z / CHUNK_SIZE;
+
+                bool hasVisibleDevastation = HasDevastationWithinRenderDistance(playerChunkX, playerChunkZ);
+
+                if (hasVisibleDevastation)
+                {
+                    // Reset timer, update last known position
+                    tracking.lastDevastationSeenMs = currentMs;
+                    UpdateLastKnownDevastationPos(playerChunkX, playerChunkZ);
+                }
+                else
+                {
+                    // Check if delay period has passed without devastation
+                    if (currentMs - tracking.lastDevastationSeenMs >= delayMs)
+                    {
+                        // Try to spawn at edge
+                        if (TrySpawnEdgeDevastation(player, playerChunkX, playerChunkZ))
+                        {
+                            tracking.lastDevastationSeenMs = currentMs; // Reset timer after spawn
+                            sapi.Logger.Notification($"SpreadingDevastation: Spawned edge devastation for player {player.PlayerName}");
+                        }
+                    }
+                }
+
+                playerEdgeSpawnTracking[uid] = tracking;
+            }
+
+            // Periodically clean up disconnected players (every ~10 checks)
+            if (sapi.World.Rand.NextDouble() < 0.1)
+            {
+                CleanupDisconnectedPlayerTracking();
             }
         }
 
         /// <summary>
+        /// Checks if any devastated chunk exists within render distance of the given chunk position.
+        /// </summary>
+        private bool HasDevastationWithinRenderDistance(int playerChunkX, int playerChunkZ)
+        {
+            const int RENDER_RADIUS = 8; // chunks
+
+            foreach (var chunk in devastatedChunks.Values)
+            {
+                int dx = chunk.ChunkX - playerChunkX;
+                int dz = chunk.ChunkZ - playerChunkZ;
+
+                if (dx >= -RENDER_RADIUS && dx <= RENDER_RADIUS &&
+                    dz >= -RENDER_RADIUS && dz <= RENDER_RADIUS)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Updates the last known devastation position based on the nearest devastated chunk to the player.
+        /// </summary>
+        private void UpdateLastKnownDevastationPos(int playerChunkX, int playerChunkZ)
+        {
+            const int RENDER_RADIUS = 8;
+            BlockPos nearest = null;
+            int nearestDistSq = int.MaxValue;
+
+            foreach (var chunk in devastatedChunks.Values)
+            {
+                int dx = chunk.ChunkX - playerChunkX;
+                int dz = chunk.ChunkZ - playerChunkZ;
+
+                if (dx >= -RENDER_RADIUS && dx <= RENDER_RADIUS &&
+                    dz >= -RENDER_RADIUS && dz <= RENDER_RADIUS)
+                {
+                    int distSq = dx * dx + dz * dz;
+                    if (distSq < nearestDistSq)
+                    {
+                        nearestDistSq = distSq;
+                        nearest = new BlockPos(
+                            chunk.ChunkX * CHUNK_SIZE + CHUNK_SIZE / 2,
+                            0,
+                            chunk.ChunkZ * CHUNK_SIZE + CHUNK_SIZE / 2,
+                            0
+                        );
+                    }
+                }
+            }
+
+            if (nearest != null)
+            {
+                lastKnownDevastationPos = nearest;
+            }
+        }
+
+        /// <summary>
+        /// Attempts to spawn a devastated chunk at the edge of render distance for the given player.
+        /// Tries up to 16 different directions, validating terrain before creating chunks.
+        /// Returns false if all attempts fail, allowing the timer to retry on the next interval.
+        /// </summary>
+        private bool TrySpawnEdgeDevastation(IServerPlayer player, int playerChunkX, int playerChunkZ)
+        {
+            const int EDGE_RADIUS = 8; // spawn at edge of render distance
+            const int MAX_ATTEMPTS = 16;
+            const int MIN_DEVASTABLE_BLOCKS = 2; // require at least 2 sample points with devastable blocks
+
+            // Calculate starting direction - toward last known devastation or random
+            double baseAngle;
+            if (lastKnownDevastationPos != null)
+            {
+                double dx = lastKnownDevastationPos.X - player.Entity.Pos.X;
+                double dz = lastKnownDevastationPos.Z - player.Entity.Pos.Z;
+                double length = Math.Sqrt(dx * dx + dz * dz);
+                if (length > 0.001)
+                {
+                    baseAngle = Math.Atan2(dz, dx);
+                }
+                else
+                {
+                    baseAngle = sapi.World.Rand.NextDouble() * 2 * Math.PI;
+                }
+            }
+            else
+            {
+                baseAngle = sapi.World.Rand.NextDouble() * 2 * Math.PI;
+            }
+
+            // Try up to 16 directions, starting from the preferred direction and spreading out
+            for (int attempt = 0; attempt < MAX_ATTEMPTS; attempt++)
+            {
+                // Spread attempts in alternating directions from base angle
+                // Attempt 0: base, 1: +22.5°, 2: -22.5°, 3: +45°, 4: -45°, etc.
+                double angleOffset;
+                if (attempt == 0)
+                {
+                    angleOffset = 0;
+                }
+                else
+                {
+                    int step = (attempt + 1) / 2;
+                    double direction = (attempt % 2 == 1) ? 1 : -1;
+                    angleOffset = direction * step * (Math.PI / 8); // 22.5 degree increments
+                }
+
+                double angle = baseAngle + angleOffset;
+                double dirX = Math.Cos(angle);
+                double dirZ = Math.Sin(angle);
+
+                // Calculate target chunk at edge in this direction
+                int targetChunkX = playerChunkX + (int)Math.Round(dirX * EDGE_RADIUS);
+                int targetChunkZ = playerChunkZ + (int)Math.Round(dirZ * EDGE_RADIUS);
+
+                // Check if already devastated
+                long chunkKey = DevastatedChunk.MakeChunkKey(targetChunkX, targetChunkZ);
+                if (devastatedChunks.ContainsKey(chunkKey)) continue;
+
+                // Check rift ward protection
+                if (IsChunkProtectedByRiftWard(targetChunkX, targetChunkZ)) continue;
+
+                // Validate terrain - check if chunk has enough devastable blocks
+                int devastableCount = CountDevastableBlocksInChunk(targetChunkX, targetChunkZ);
+                if (devastableCount < MIN_DEVASTABLE_BLOCKS) continue;
+
+                // All checks passed - create the devastated chunk
+                var newChunk = new DevastatedChunk
+                {
+                    ChunkX = targetChunkX,
+                    ChunkZ = targetChunkZ,
+                    MarkedTime = sapi.World.Calendar.TotalHours,
+                    DevastationLevel = 0.0,
+                    IsFullyDevastated = false,
+                    FrontierInitialized = false
+                };
+
+                devastatedChunks[chunkKey] = newChunk;
+
+                // Frontier will be initialized automatically in ProcessDevastatedChunks
+                return true;
+            }
+
+            // All 16 attempts failed - return false so timer doesn't reset
+            // This allows the system to try again on the next check interval
+            return false;
+        }
+
+        /// <summary>
+        /// Counts the number of devastable blocks in a chunk by sampling a grid of surface points.
+        /// Used to validate that a chunk has usable terrain before creating a devastated chunk.
+        /// </summary>
+        private int CountDevastableBlocksInChunk(int chunkX, int chunkZ)
+        {
+            int count = 0;
+
+            // Sample 9 points in a 3x3 grid across the chunk
+            for (int gx = 0; gx < 3; gx++)
+            {
+                for (int gz = 0; gz < 3; gz++)
+                {
+                    // Calculate sample position within the chunk
+                    int localX = 4 + gx * 12;  // positions at 4, 16, 28 within the 32-block chunk
+                    int localZ = 4 + gz * 12;
+                    int blockX = chunkX * CHUNK_SIZE + localX;
+                    int blockZ = chunkZ * CHUNK_SIZE + localZ;
+
+                    // Get surface height at this position
+                    int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(blockX, 0, blockZ, 0));
+                    if (surfaceY <= 0) continue;
+
+                    // Check blocks at surface level ±2
+                    for (int dy = -2; dy <= 2; dy++)
+                    {
+                        BlockPos pos = new BlockPos(blockX, surfaceY + dy, blockZ, 0);
+                        Block block = sapi.World.BlockAccessor.GetBlock(pos);
+
+                        if (block == null || block.Id == 0) continue;
+
+                        // Check if this block can be devastated
+                        if (TryGetDevastatedForm(block, out _, out _))
+                        {
+                            count++;
+                            break; // Only count one devastable block per sample point
+                        }
+                    }
+                }
+            }
+
+            return count;
+        }
+
+        /// <summary>
+        /// Removes tracking entries for players who are no longer online.
+        /// </summary>
+        private void CleanupDisconnectedPlayerTracking()
+        {
+            var onlineUids = new HashSet<string>();
+            foreach (var p in sapi.World.AllOnlinePlayers)
+            {
+                if (p is IServerPlayer sp) onlineUids.Add(sp.PlayerUID);
+            }
+
+            var toRemove = playerEdgeSpawnTracking.Keys
+                .Where(uid => !onlineUids.Contains(uid))
+                .ToList();
+
+            foreach (var uid in toRemove)
+            {
+                playerEdgeSpawnTracking.Remove(uid);
+            }
+        }
+
+        // ==================== Temporal Storm Devastation System ====================
+        // During temporal storms, spawns devastation near players and boosts spread speed
+
+        #region Temporal Storm Devastation
+
+        /// <summary>
+        /// Checks if a temporal storm is currently active.
+        /// </summary>
+        private bool IsTemporalStormActive()
+        {
+            if (temporalStabilitySystemServer == null) return false;
+
+            try
+            {
+                var stormData = temporalStabilitySystemServer.StormData;
+                return stormData?.nowStormActive ?? false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Gets the effective speed multiplier, accounting for temporal storm boost.
+        /// This should be used instead of directly accessing config.SpeedMultiplier.
+        /// </summary>
+        private double GetEffectiveSpeedMultiplier()
+        {
+            double baseSpeed = config.SpeedMultiplier;
+
+            if (config.TemporalStormEffectsEnabled && IsTemporalStormActive())
+            {
+                return baseSpeed * config.TemporalStormSpeedMultiplier;
+            }
+
+            return baseSpeed;
+        }
+
+        /// <summary>
+        /// Processes temporal storm devastation effects.
+        /// During active temporal storms, spawns devastation at random positions around players.
+        /// </summary>
+        private void ProcessTemporalStormDevastation(float dt)
+        {
+            if (!config.TemporalStormEffectsEnabled || isPaused || sapi == null) return;
+
+            bool isStormActive = IsTemporalStormActive();
+
+            // Log storm state transitions
+            if (isStormActive != wasStormActiveLastTick)
+            {
+                if (isStormActive)
+                {
+                    sapi.Logger.Notification($"SpreadingDevastation: Temporal storm detected! Devastation spread boosted to {GetEffectiveSpeedMultiplier():F1}x");
+                }
+                else
+                {
+                    sapi.Logger.Notification($"SpreadingDevastation: Temporal storm ended. Devastation spread returning to {config.SpeedMultiplier:F1}x");
+                }
+                wasStormActiveLastTick = isStormActive;
+            }
+
+            if (!isStormActive) return;
+
+            double currentTime = sapi.World.Calendar.TotalHours;
+
+            // Convert spawn interval from seconds to hours
+            double spawnIntervalHours = config.TemporalStormSpawnIntervalSeconds / 3600.0;
+
+            if (currentTime - lastStormSpawnTime < spawnIntervalHours) return;
+
+            lastStormSpawnTime = currentTime;
+
+            // Spawn devastation around each online player
+            var allPlayers = sapi.World.AllOnlinePlayers;
+            foreach (var player in allPlayers)
+            {
+                IServerPlayer serverPlayer = player as IServerPlayer;
+                if (serverPlayer?.Entity == null) continue;
+
+                TrySpawnStormDevastation(serverPlayer);
+            }
+        }
+
+        /// <summary>
+        /// Attempts to spawn devastation at a random position around the player during a temporal storm.
+        /// </summary>
+        private void TrySpawnStormDevastation(IServerPlayer player)
+        {
+            if (player?.Entity == null) return;
+
+            BlockPos playerPos = player.Entity.Pos.AsBlockPos;
+            int radius = config.TemporalStormSpawnRadius;
+
+            // Try several times to find a valid spawn position
+            for (int attempt = 0; attempt < 10; attempt++)
+            {
+                // Random position within radius
+                int offsetX = sapi.World.Rand.Next(-radius, radius + 1);
+                int offsetZ = sapi.World.Rand.Next(-radius, radius + 1);
+
+                // Skip positions too close to player (within 8 blocks)
+                if (Math.Abs(offsetX) < 8 && Math.Abs(offsetZ) < 8) continue;
+
+                int targetX = playerPos.X + offsetX;
+                int targetZ = playerPos.Z + offsetZ;
+
+                // Find surface position at this X,Z
+                int surfaceY = sapi.World.BlockAccessor.GetRainMapHeightAt(targetX, targetZ);
+                if (surfaceY <= 0) continue;
+
+                BlockPos targetPos = new BlockPos(targetX, surfaceY, targetZ);
+
+                // Check if position is protected by a rift ward
+                if (IsBlockProtectedByRiftWard(targetPos)) continue;
+
+                // Get the block at this position
+                Block block = sapi.World.BlockAccessor.GetBlock(targetPos);
+                if (block == null || block.Id == 0) continue;
+
+                // Try to convert the block to devastated form
+                if (!TryGetDevastatedForm(block, out string devForm, out string regenTo)) continue;
+
+                Block devBlock = sapi.World.GetBlock(new AssetLocation(devForm));
+                if (devBlock == null || devBlock.Id == 0) continue;
+
+                // Convert the block
+                sapi.World.BlockAccessor.SetBlock(devBlock.Id, targetPos);
+
+                // Spawn particles
+                if (config.DevastationParticlesEnabled)
+                {
+                    SpawnDevastationParticles(targetPos);
+                }
+
+                // Mark chunk as devastated if configured
+                if (config.TemporalStormCreatesChunks)
+                {
+                    int chunkX = targetX / CHUNK_SIZE;
+                    int chunkZ = targetZ / CHUNK_SIZE;
+                    long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
+
+                    if (!devastatedChunks.ContainsKey(chunkKey))
+                    {
+                        // Create new devastated chunk
+                        var newChunk = new DevastatedChunk
+                        {
+                            ChunkX = chunkX,
+                            ChunkZ = chunkZ,
+                            MarkedTime = sapi.World.Calendar.TotalHours,
+                            DevastationLevel = 0.0,
+                            IsFullyDevastated = false,
+                            FrontierInitialized = false
+                        };
+
+                        devastatedChunks[chunkKey] = newChunk;
+                        sapi.Logger.VerboseDebug($"SpreadingDevastation: Temporal storm created new devastated chunk at ({chunkX}, {chunkZ})");
+                    }
+
+                    // Add to frontier if chunk already exists
+                    if (devastatedChunks.TryGetValue(chunkKey, out var chunk))
+                    {
+                        chunk.DevastationFrontier ??= new List<BlockPos>();
+                        if (!chunk.DevastationFrontier.Contains(targetPos))
+                        {
+                            chunk.DevastationFrontier.Add(targetPos.Copy());
+                        }
+                        chunk.BlocksDevastated++;
+                    }
+                }
+
+                // Successfully spawned devastation for this player
+                sapi.Logger.VerboseDebug($"SpreadingDevastation: Temporal storm spawned devastation at {targetPos} near player {player.PlayerName}");
+                return;
+            }
+        }
+
+        #endregion
+
+        /// <summary>
         /// Forces a specific weather pattern in the player's current region (for testing).
         /// </summary>
-        public bool ForceWeatherInRegion(BlockPos pos, string pattern, string weatherEvent)
+        public bool ForceWeatherInRegion(BlockPos pos, string pattern, string weatherEvent, string windPattern = null)
         {
             if (weatherSystem == null)
             {
@@ -3183,8 +3817,13 @@ namespace SpreadingDevastation
                 weatherSim.CurWeatherEvent?.OnBeginUse();
             }
 
+            if (!string.IsNullOrEmpty(windPattern))
+            {
+                weatherSim.SetWindPattern(windPattern, true);
+            }
+
             weatherSim.TickEvery25ms(0.025f);
-            activeWeatherRegions[regionKey] = (1.0f, pattern, weatherEvent);
+            activeWeatherRegions[regionKey] = (1.0f, pattern, weatherEvent, windPattern);
 
             return true;
         }
@@ -3212,10 +3851,10 @@ namespace SpreadingDevastation
         {
             if (!config.ChunkSpreadEnabled || devastatedChunks.Count == 0) return;
 
-            // Calculate effective interval (base 60 seconds, divided by speed multiplier)
+            // Calculate effective interval (base 60 seconds, divided by speed multiplier, includes storm boost)
             // At 1x speed: check every 60 seconds
             // At 100x speed: check every 0.6 seconds
-            double effectiveIntervalHours = (config.ChunkSpreadIntervalSeconds / 3600.0) / Math.Max(0.01, config.SpeedMultiplier);
+            double effectiveIntervalHours = (config.ChunkSpreadIntervalSeconds / 3600.0) / Math.Max(0.01, GetEffectiveSpeedMultiplier());
 
             if (currentTime - lastChunkSpreadCheckTime < effectiveIntervalHours) return;
             lastChunkSpreadCheckTime = currentTime;
@@ -3537,7 +4176,45 @@ namespace SpreadingDevastation
             new BlockPos(0, 0, -1)   // North
         };
 
+        /// <summary>
+        /// All 26 adjacent positions (6 cardinal + 12 edge-diagonal + 8 corner-diagonal).
+        /// Used for diagonal spreading to catch isolated blocks like leaves.
+        /// </summary>
+        private static readonly BlockPos[] AllNeighborOffsets = new BlockPos[]
+        {
+            // 6 Cardinal faces
+            new BlockPos(1, 0, 0),   // East (+X)
+            new BlockPos(-1, 0, 0),  // West (-X)
+            new BlockPos(0, 1, 0),   // Up (+Y)
+            new BlockPos(0, -1, 0),  // Down (-Y)
+            new BlockPos(0, 0, 1),   // South (+Z)
+            new BlockPos(0, 0, -1),  // North (-Z)
+            // 12 Edge diagonals (share one coordinate)
+            new BlockPos(1, 1, 0),   // East-Up
+            new BlockPos(1, -1, 0),  // East-Down
+            new BlockPos(-1, 1, 0),  // West-Up
+            new BlockPos(-1, -1, 0), // West-Down
+            new BlockPos(1, 0, 1),   // East-South
+            new BlockPos(1, 0, -1),  // East-North
+            new BlockPos(-1, 0, 1),  // West-South
+            new BlockPos(-1, 0, -1), // West-North
+            new BlockPos(0, 1, 1),   // Up-South
+            new BlockPos(0, 1, -1),  // Up-North
+            new BlockPos(0, -1, 1),  // Down-South
+            new BlockPos(0, -1, -1), // Down-North
+            // 8 Corner diagonals (all coordinates differ)
+            new BlockPos(1, 1, 1),   // East-Up-South
+            new BlockPos(1, 1, -1),  // East-Up-North
+            new BlockPos(1, -1, 1),  // East-Down-South
+            new BlockPos(1, -1, -1), // East-Down-North
+            new BlockPos(-1, 1, 1),  // West-Up-South
+            new BlockPos(-1, 1, -1), // West-Up-North
+            new BlockPos(-1, -1, 1), // West-Down-South
+            new BlockPos(-1, -1, -1) // West-Down-North
+        };
+
         // Reusable array indices for in-place shuffling (avoids allocations)
+        private readonly int[] shuffleIndices26 = new int[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25 };
         private readonly int[] shuffleIndices6 = new int[] { 0, 1, 2, 3, 4, 5 };
         private readonly int[] shuffleIndices4 = new int[] { 0, 1, 2, 3 };
 
@@ -3561,8 +4238,8 @@ namespace SpreadingDevastation
         /// </summary>
         private int[] GetShuffledIndices(int count, Random rand)
         {
-            int[] indices = count == 6 ? shuffleIndices6 : (count == 4 ? shuffleIndices4 : new int[count]);
-            if (count != 6 && count != 4)
+            int[] indices = count == 26 ? shuffleIndices26 : (count == 6 ? shuffleIndices6 : (count == 4 ? shuffleIndices4 : new int[count]));
+            if (count != 26 && count != 6 && count != 4)
             {
                 for (int i = 0; i < count; i++) indices[i] = i;
             }
@@ -3639,8 +4316,8 @@ namespace SpreadingDevastation
             int endX = startX + CHUNK_SIZE;
             int endZ = startZ + CHUNK_SIZE;
 
-            // Scale with speed multiplier: base 10 blocks per 500ms tick = 20/sec at 1x speed
-            int blocksToProcess = Math.Max(1, (int)(10 * config.SpeedMultiplier));
+            // Scale with speed multiplier: base 10 blocks per 500ms tick = 20/sec at 1x speed (includes storm boost)
+            int blocksToProcess = Math.Max(1, (int)(10 * GetEffectiveSpeedMultiplier()));
             int successCount = 0;
             int attempts = 0;
             int maxAttempts = blocksToProcess * 10; // More attempts since we're being selective
@@ -3656,14 +4333,16 @@ namespace SpreadingDevastation
                 int frontierIndex = sapi.World.Rand.Next(chunk.DevastationFrontier.Count);
                 BlockPos frontierPos = chunk.DevastationFrontier[frontierIndex];
 
-                // Try each cardinal direction from this frontier block
+                // Try each direction from this frontier block (cardinal or all neighbors based on config)
                 bool foundCandidate = false;
-                // Shuffle the cardinal directions to avoid bias (in-place, no allocation)
-                int[] shuffledIndices = GetShuffledIndices(CardinalOffsets.Length, sapi.World.Rand);
+                // Use diagonal spreading if enabled for better coverage of isolated blocks like leaves
+                var offsets = config.DiagonalSpreadingEnabled ? AllNeighborOffsets : CardinalOffsets;
+                // Shuffle directions to avoid bias (in-place, no allocation)
+                int[] shuffledIndices = GetShuffledIndices(offsets.Length, sapi.World.Rand);
 
                 for (int idx = 0; idx < shuffledIndices.Length; idx++)
                 {
-                    var offset = CardinalOffsets[shuffledIndices[idx]];
+                    var offset = offsets[shuffledIndices[idx]];
                     BlockPos targetPos = new BlockPos(
                         frontierPos.X + offset.X,
                         frontierPos.Y + offset.Y,
@@ -3753,7 +4432,8 @@ namespace SpreadingDevastation
                 if (!foundCandidate)
                 {
                     bool hasValidNeighbors = false;
-                    foreach (var offset in CardinalOffsets)
+                    // Use the same offset array as spreading to be consistent
+                    foreach (var offset in offsets)
                     {
                         BlockPos neighborPos = new BlockPos(
                             frontierPos.X + offset.X,
@@ -3846,33 +4526,26 @@ namespace SpreadingDevastation
                 TryFillInMissedBlocks(chunk, startX, startZ, endX, endZ);
             }
 
-            // Prune frontier if it gets too large (prioritize edge blocks to maintain spread)
+            // Prune frontier if it gets too large using random sampling
+            // This ensures uniform spreading across the chunk rather than edge-biased spreading
             if (chunk.DevastationFrontier.Count > 500)
             {
-                // Prioritize keeping blocks at chunk edges (for chunk-to-chunk spread)
-                // and blocks far from center (to maintain outward spread)
-                int centerX = startX + CHUNK_SIZE / 2;
-                int centerZ = startZ + CHUNK_SIZE / 2;
-                int edgeStartX = startX + 2;
-                int edgeEndX = endX - 2;
-                int edgeStartZ = startZ + 2;
-                int edgeEndZ = endZ - 2;
-
-                // Sort in place - higher score = keep (edge blocks get bonus, distance from center adds to score)
-                chunk.DevastationFrontier.Sort((a, b) =>
+                // Use Fisher-Yates shuffle on the frontier and keep the first 300
+                // This gives every frontier block an equal chance of being kept,
+                // resulting in natural, uniform spreading across the chunk interior
+                var frontier = chunk.DevastationFrontier;
+                int n = frontier.Count;
+                for (int i = n - 1; i > 0; i--)
                 {
-                    int distA = Math.Abs(a.X - centerX) + Math.Abs(a.Z - centerZ);
-                    int distB = Math.Abs(b.X - centerX) + Math.Abs(b.Z - centerZ);
-                    bool atEdgeA = a.X < edgeStartX || a.X >= edgeEndX || a.Z < edgeStartZ || a.Z >= edgeEndZ;
-                    bool atEdgeB = b.X < edgeStartX || b.X >= edgeEndX || b.Z < edgeStartZ || b.Z >= edgeEndZ;
-                    int scoreA = distA + (atEdgeA ? 100 : 0);
-                    int scoreB = distB + (atEdgeB ? 100 : 0);
-                    return scoreB.CompareTo(scoreA); // Descending order
-                });
-                // Keep top 300
-                if (chunk.DevastationFrontier.Count > 300)
+                    int j = sapi.World.Rand.Next(i + 1);
+                    var temp = frontier[i];
+                    frontier[i] = frontier[j];
+                    frontier[j] = temp;
+                }
+                // Keep first 300 after shuffling
+                if (frontier.Count > 300)
                 {
-                    chunk.DevastationFrontier.RemoveRange(300, chunk.DevastationFrontier.Count - 300);
+                    frontier.RemoveRange(300, frontier.Count - 300);
                 }
             }
 
@@ -3924,9 +4597,11 @@ namespace SpreadingDevastation
                     // Check if this block can be devastated
                     if (!TryGetDevastatedForm(block, out string devastatedForm, out string regeneratesTo)) continue;
 
-                    // Check if any cardinal neighbor is devastated (this block should have been caught)
+                    // Check if any neighbor is devastated (this block should have been caught)
+                    // Use diagonal checking if enabled to catch isolated blocks like leaves
                     bool hasDevastatedNeighbor = false;
-                    foreach (var offset in CardinalOffsets)
+                    var offsets = config.DiagonalSpreadingEnabled ? AllNeighborOffsets : CardinalOffsets;
+                    foreach (var offset in offsets)
                     {
                         BlockPos neighborPos = new BlockPos(pos.X + offset.X, pos.Y + offset.Y, pos.Z + offset.Z);
                         Block neighborBlock = sapi.World.BlockAccessor.GetBlock(neighborPos);
@@ -4074,8 +4749,8 @@ namespace SpreadingDevastation
         {
             if (chunk.BleedFrontier == null || chunk.BleedFrontier.Count == 0) return;
 
-            // Process a limited number of bleed blocks per tick
-            int maxToProcess = Math.Max(1, (int)(3 * config.SpeedMultiplier));
+            // Process a limited number of bleed blocks per tick (includes storm boost)
+            int maxToProcess = Math.Max(1, (int)(3 * GetEffectiveSpeedMultiplier()));
             int processed = 0;
 
             List<BleedBlock> newBleedBlocks = null; // Lazy init
@@ -4106,13 +4781,14 @@ namespace SpreadingDevastation
                     continue;
                 }
 
-                // Try to spread to an adjacent block (using CardinalOffsets - same 6 directions)
-                int[] shuffledOffsetIndices = GetShuffledIndices(CardinalOffsets.Length, sapi.World.Rand);
+                // Try to spread to an adjacent block (using diagonal offsets if enabled)
+                var offsets = config.DiagonalSpreadingEnabled ? AllNeighborOffsets : CardinalOffsets;
+                int[] shuffledOffsetIndices = GetShuffledIndices(offsets.Length, sapi.World.Rand);
                 bool foundTarget = false;
 
                 for (int oi = 0; oi < shuffledOffsetIndices.Length; oi++)
                 {
-                    var offset = CardinalOffsets[shuffledOffsetIndices[oi]];
+                    var offset = offsets[shuffledOffsetIndices[oi]];
                     BlockPos targetPos = new BlockPos(
                         bleedBlock.Pos.X + offset.X,
                         bleedBlock.Pos.Y + offset.Y,
@@ -4257,7 +4933,9 @@ namespace SpreadingDevastation
                     if (block != null && IsAlreadyDevastated(block))
                     {
                         // Check if this block has any non-devastated neighbors (making it a frontier block)
-                        foreach (var offset in CardinalOffsets)
+                        // Use diagonal checking if enabled to catch isolated blocks like leaves
+                        var offsets = config.DiagonalSpreadingEnabled ? AllNeighborOffsets : CardinalOffsets;
+                        foreach (var offset in offsets)
                         {
                             BlockPos neighborPos = new BlockPos(pos.X + offset.X, pos.Y + offset.Y, pos.Z + offset.Z);
                             Block neighborBlock = sapi.World.BlockAccessor.GetBlock(neighborPos);
@@ -4322,7 +5000,9 @@ namespace SpreadingDevastation
                         else
                         {
                             // Block can't be devastated, try to find a nearby convertible block
-                            foreach (var offset in CardinalOffsets)
+                            // Use diagonal offsets if enabled for better coverage
+                            var fallbackOffsets = config.DiagonalSpreadingEnabled ? AllNeighborOffsets : CardinalOffsets;
+                            foreach (var offset in fallbackOffsets)
                             {
                                 BlockPos nearbyPos = new BlockPos(startPos.X + offset.X, startPos.Y + offset.Y, startPos.Z + offset.Z);
                                 Block nearbyBlock = sapi.World.BlockAccessor.GetBlock(nearbyPos);

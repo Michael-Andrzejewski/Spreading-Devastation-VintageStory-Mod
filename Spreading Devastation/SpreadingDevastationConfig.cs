@@ -68,6 +68,13 @@ namespace SpreadingDevastation
         /// </summary>
         public bool ShowSourceMarkers { get; set; } = true;
 
+        /// <summary>
+        /// When enabled, devastation spreads diagonally (26 directions) instead of only cardinal (6 directions).
+        /// This helps catch isolated blocks like leaves that only touch diagonally.
+        /// (default: true)
+        /// </summary>
+        public bool DiagonalSpreadingEnabled { get; set; } = true;
+
         // === Devastated Chunk Settings ===
 
         /// <summary>
@@ -334,6 +341,28 @@ namespace SpreadingDevastation
         /// </summary>
         public string AnimalInsanityExcludeCodes { get; set; } = "drifter,locust,bell,bowtorn,eidolon,shiver";
 
+        // === Trader Removal Settings ===
+
+        /// <summary>
+        /// Whether traders in devastated areas should be killed (default: true).
+        /// Traders (humanoid-trader-*) within devastated chunks will die.
+        /// Since traders spawn with their carts during world generation, killing them
+        /// and devastating their structures prevents respawning.
+        /// </summary>
+        public bool TraderRemovalEnabled { get; set; } = true;
+
+        /// <summary>
+        /// Interval in seconds between trader removal checks (default: 5.0).
+        /// Lower values remove traders faster but use slightly more CPU.
+        /// </summary>
+        public double TraderRemovalCheckIntervalSeconds { get; set; } = 5.0;
+
+        /// <summary>
+        /// Comma-separated list of entity code patterns for traders to remove (default: humanoid-trader).
+        /// Uses prefix matching - "humanoid-trader" matches all trader variants.
+        /// </summary>
+        public string TraderEntityCodes { get; set; } = "humanoid-trader";
+
         // === Block Conversion Sound Settings ===
 
         /// <summary>
@@ -446,12 +475,12 @@ namespace SpreadingDevastation
         public float WeatherMinIntensity { get; set; } = 0.15f;
 
         /// <summary>
-        /// Devastation threshold for Tier 1 weather - dark storm clouds (default: 0.15).
+        /// Devastation threshold for Tier 1 weather - dark storm clouds with light thunder (default: 0.15).
         /// </summary>
         public float WeatherTier1Threshold { get; set; } = 0.15f;
 
         /// <summary>
-        /// Devastation threshold for Tier 2 weather - storm clouds with light thunder (default: 0.30).
+        /// Devastation threshold for Tier 2 weather - storm clouds with heavy thunder (default: 0.30).
         /// </summary>
         public float WeatherTier2Threshold { get; set; } = 0.30f;
 
@@ -462,32 +491,53 @@ namespace SpreadingDevastation
 
         /// <summary>
         /// Weather pattern code for Tier 1 (default: "cumulonimbus").
-        /// Dark storm clouds appear early. Available patterns: clearsky, mediumhaze, stronghaze, cumulonimbus, cumulonimbusr, cumulonimbusrf
+        /// Dark storm clouds. Available patterns: clearsky, mediumhaze, stronghaze, cumulonimbus, cumulonimbusr, cumulonimbusrf
         /// </summary>
         public string WeatherTier1Pattern { get; set; } = "cumulonimbus";
 
         /// <summary>
-        /// Weather pattern code for Tier 2 (default: "cumulonimbusr").
-        /// Heavier storm clouds with rain.
+        /// Weather pattern code for Tier 2 (default: "overcast").
+        /// Full cloud coverage.
         /// </summary>
-        public string WeatherTier2Pattern { get; set; } = "cumulonimbusr";
+        public string WeatherTier2Pattern { get; set; } = "overcast";
 
         /// <summary>
-        /// Weather pattern code for Tier 3 (default: "cumulonimbusrf").
-        /// Full storm with rain and potential for lightning.
+        /// Weather pattern code for Tier 3 (default: "overcastundulating").
+        /// Overcast with undulating clouds.
         /// </summary>
-        public string WeatherTier3Pattern { get; set; } = "cumulonimbusrf";
+        public string WeatherTier3Pattern { get; set; } = "overcastundulating";
 
         /// <summary>
-        /// Weather event code for Tier 2 (default: "lightthunder").
+        /// Weather event code for Tier 1 (default: "lightthunder").
         /// Available events: noevent, lightthunder, heavythunder, smallhail, largehail
         /// </summary>
-        public string WeatherTier2Event { get; set; } = "lightthunder";
+        public string WeatherTier1Event { get; set; } = "lightthunder";
+
+        /// <summary>
+        /// Weather event code for Tier 2 (default: "heavythunder").
+        /// </summary>
+        public string WeatherTier2Event { get; set; } = "heavythunder";
 
         /// <summary>
         /// Weather event code for Tier 3 (default: "heavythunder").
         /// </summary>
         public string WeatherTier3Event { get; set; } = "heavythunder";
+
+        /// <summary>
+        /// Wind pattern code for Tier 1 (default: "mediumbreeze").
+        /// Available patterns: still, lightbreeze, mediumbreeze, strongbreeze, storm
+        /// </summary>
+        public string WeatherTier1Wind { get; set; } = "mediumbreeze";
+
+        /// <summary>
+        /// Wind pattern code for Tier 2 (default: "strongbreeze").
+        /// </summary>
+        public string WeatherTier2Wind { get; set; } = "strongbreeze";
+
+        /// <summary>
+        /// Wind pattern code for Tier 3 (default: "storm").
+        /// </summary>
+        public string WeatherTier3Wind { get; set; } = "storm";
 
         /// <summary>
         /// Whether weather transitions should be instant (true) or gradual (false).
@@ -511,10 +561,10 @@ namespace SpreadingDevastation
         public bool MusicEnabled { get; set; } = true;
 
         /// <summary>
-        /// Base volume for devastation music (0.0-1.0, default: 0.8).
+        /// Base volume for devastation ambient sounds (0.0-1.0, default: 0.5).
         /// The actual volume scales with fog intensity.
         /// </summary>
-        public float MusicVolume { get; set; } = 0.8f;
+        public float MusicVolume { get; set; } = 0.5f;
 
         /// <summary>
         /// Sound file path for devastation ambient sound (without .ogg extension).
@@ -554,5 +604,60 @@ namespace SpreadingDevastation
         /// Note: This affects the volume of block ambient sounds like water, fire, etc.
         /// </summary>
         public float AmbientSoundSuppression { get; set; } = 0.8f;
+
+        // === Render Distance Edge Spawning Settings ===
+
+        /// <summary>
+        /// Whether to spawn devastation at render distance edge when none visible for a period (default: false).
+        /// When enabled, if no devastation is visible within render distance for EdgeSpawningDelayMinutes,
+        /// a new devastated chunk will spawn at the edge of render distance, positioned toward the last known devastation.
+        /// </summary>
+        public bool EdgeSpawningEnabled { get; set; } = false;
+
+        /// <summary>
+        /// Minutes without visible devastation before edge spawn triggers (default: 10.0).
+        /// Uses real-world time, not in-game time.
+        /// </summary>
+        public double EdgeSpawningDelayMinutes { get; set; } = 10.0;
+
+        /// <summary>
+        /// How often to check for visible devastation in seconds (default: 60.0).
+        /// Lower values detect devastation faster but use slightly more CPU.
+        /// </summary>
+        public double EdgeSpawningCheckIntervalSeconds { get; set; } = 60.0;
+
+        // === Temporal Storm Settings ===
+
+        /// <summary>
+        /// Whether temporal storm effects on devastation are enabled (default: true).
+        /// When enabled, temporal storms will spawn devastation near players and speed up spread.
+        /// </summary>
+        public bool TemporalStormEffectsEnabled { get; set; } = true;
+
+        /// <summary>
+        /// Speed multiplier for devastation spread during temporal storms (default: 5.0).
+        /// This multiplies the base SpeedMultiplier during active storms.
+        /// Set to 1.0 to disable speed boost during storms.
+        /// </summary>
+        public double TemporalStormSpeedMultiplier { get; set; } = 5.0;
+
+        /// <summary>
+        /// Radius in blocks around each player where new devastated blocks can spawn during storms (default: 64).
+        /// Devastation spawns at random positions within this radius.
+        /// </summary>
+        public int TemporalStormSpawnRadius { get; set; } = 64;
+
+        /// <summary>
+        /// Interval in seconds between storm devastation spawns around players (default: 20.0).
+        /// Lower values spawn more frequently during storms.
+        /// </summary>
+        public double TemporalStormSpawnIntervalSeconds { get; set; } = 20.0;
+
+        /// <summary>
+        /// Whether storm-spawned devastation creates new devastated chunks (default: true).
+        /// When true, spawned blocks will mark their chunk as devastated.
+        /// When false, only converts individual blocks without chunk-wide effects.
+        /// </summary>
+        public bool TemporalStormCreatesChunks { get; set; } = true;
     }
 }

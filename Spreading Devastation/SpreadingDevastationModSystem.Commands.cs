@@ -68,6 +68,11 @@ namespace SpreadingDevastation
                     .WithArgs(api.ChatCommands.Parsers.OptionalWord("onoff"))
                     .HandleWith(HandleMarkersCommand)
                 .EndSubCommand()
+                .BeginSubCommand("diagonal")
+                    .WithDescription("Toggle diagonal spreading (26 directions vs 6 cardinal)")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("onoff"))
+                    .HandleWith(HandleDiagonalCommand)
+                .EndSubCommand()
                 .BeginSubCommand("miny")
                     .WithDescription("Set minimum Y level for new sources")
                     .WithArgs(api.ChatCommands.Parsers.OptionalInt("level"))
@@ -139,6 +144,24 @@ namespace SpreadingDevastation
                     .WithArgs(api.ChatCommands.Parsers.OptionalWord("action"),
                               api.ChatCommands.Parsers.OptionalAll("args"))
                     .HandleWith(HandleWeatherCommand)
+                .EndSubCommand()
+                .BeginSubCommand("music")
+                    .WithDescription("Debug devastation ambient sounds (status, play, skip, stop, list)")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("action"),
+                              api.ChatCommands.Parsers.OptionalAll("args"))
+                    .HandleWith(HandleMusicCommand)
+                .EndSubCommand()
+                .BeginSubCommand("storm")
+                    .WithDescription("Configure temporal storm devastation effects")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("setting"),
+                              api.ChatCommands.Parsers.OptionalAll("value"))
+                    .HandleWith(HandleStormCommand)
+                .EndSubCommand()
+                .BeginSubCommand("edge")
+                    .WithDescription("Configure edge spawning (spawns devastation when none visible)")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("setting"),
+                              api.ChatCommands.Parsers.OptionalAll("value"))
+                    .HandleWith(HandleEdgeCommand)
                 .EndSubCommand();
         }
 
@@ -726,36 +749,43 @@ namespace SpreadingDevastation
                 case "tier1":
                     if (string.IsNullOrWhiteSpace(value))
                     {
-                        return TextCommandResult.Success($"Tier 1 (threshold {config.WeatherTier1Threshold:F2}): pattern={config.WeatherTier1Pattern}");
+                        return TextCommandResult.Success($"Tier 1 (threshold {config.WeatherTier1Threshold:F2}): pattern={config.WeatherTier1Pattern}, event={config.WeatherTier1Event}, wind={config.WeatherTier1Wind}");
                     }
-                    config.WeatherTier1Pattern = value.Trim();
-                    SaveConfig();
-                    return TextCommandResult.Success($"Weather Tier 1 pattern set to: {config.WeatherTier1Pattern}");
+                    {
+                        string[] parts = value.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                        if (parts.Length >= 1) config.WeatherTier1Pattern = parts[0];
+                        if (parts.Length >= 2) config.WeatherTier1Event = parts[1];
+                        if (parts.Length >= 3) config.WeatherTier1Wind = parts[2];
+                        SaveConfig();
+                        return TextCommandResult.Success($"Weather Tier 1 set: pattern={config.WeatherTier1Pattern}, event={config.WeatherTier1Event}, wind={config.WeatherTier1Wind}");
+                    }
 
                 case "tier2":
                     if (string.IsNullOrWhiteSpace(value))
                     {
-                        return TextCommandResult.Success($"Tier 2 (threshold {config.WeatherTier2Threshold:F2}): pattern={config.WeatherTier2Pattern}, event={config.WeatherTier2Event}");
+                        return TextCommandResult.Success($"Tier 2 (threshold {config.WeatherTier2Threshold:F2}): pattern={config.WeatherTier2Pattern}, event={config.WeatherTier2Event}, wind={config.WeatherTier2Wind}");
                     }
                     {
                         string[] parts = value.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
                         if (parts.Length >= 1) config.WeatherTier2Pattern = parts[0];
                         if (parts.Length >= 2) config.WeatherTier2Event = parts[1];
+                        if (parts.Length >= 3) config.WeatherTier2Wind = parts[2];
                         SaveConfig();
-                        return TextCommandResult.Success($"Weather Tier 2 set: pattern={config.WeatherTier2Pattern}, event={config.WeatherTier2Event}");
+                        return TextCommandResult.Success($"Weather Tier 2 set: pattern={config.WeatherTier2Pattern}, event={config.WeatherTier2Event}, wind={config.WeatherTier2Wind}");
                     }
 
                 case "tier3":
                     if (string.IsNullOrWhiteSpace(value))
                     {
-                        return TextCommandResult.Success($"Tier 3 (threshold {config.WeatherTier3Threshold:F2}): pattern={config.WeatherTier3Pattern}, event={config.WeatherTier3Event}");
+                        return TextCommandResult.Success($"Tier 3 (threshold {config.WeatherTier3Threshold:F2}): pattern={config.WeatherTier3Pattern}, event={config.WeatherTier3Event}, wind={config.WeatherTier3Wind}");
                     }
                     {
                         string[] parts = value.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
                         if (parts.Length >= 1) config.WeatherTier3Pattern = parts[0];
                         if (parts.Length >= 2) config.WeatherTier3Event = parts[1];
+                        if (parts.Length >= 3) config.WeatherTier3Wind = parts[2];
                         SaveConfig();
-                        return TextCommandResult.Success($"Weather Tier 3 set: pattern={config.WeatherTier3Pattern}, event={config.WeatherTier3Event}");
+                        return TextCommandResult.Success($"Weather Tier 3 set: pattern={config.WeatherTier3Pattern}, event={config.WeatherTier3Event}, wind={config.WeatherTier3Wind}");
                     }
 
                 case "interval":
@@ -784,9 +814,9 @@ namespace SpreadingDevastation
                         $"Active regions: {GetActiveWeatherRegionCount()}",
                         "",
                         "Weather Tiers:",
-                        $"  Tier 1 ({config.WeatherTier1Threshold:F2}+): {config.WeatherTier1Pattern}",
-                        $"  Tier 2 ({config.WeatherTier2Threshold:F2}+): {config.WeatherTier2Pattern} + {config.WeatherTier2Event}",
-                        $"  Tier 3 ({config.WeatherTier3Threshold:F2}+): {config.WeatherTier3Pattern} + {config.WeatherTier3Event}",
+                        $"  Tier 1 ({config.WeatherTier1Threshold:F2}+): {config.WeatherTier1Pattern} + {config.WeatherTier1Event} + {config.WeatherTier1Wind}",
+                        $"  Tier 2 ({config.WeatherTier2Threshold:F2}+): {config.WeatherTier2Pattern} + {config.WeatherTier2Event} + {config.WeatherTier2Wind}",
+                        $"  Tier 3 ({config.WeatherTier3Threshold:F2}+): {config.WeatherTier3Pattern} + {config.WeatherTier3Event} + {config.WeatherTier3Wind}",
                     };
 
                     // Add active region details if any
@@ -798,7 +828,8 @@ namespace SpreadingDevastation
                         foreach (var region in activeRegions.Take(5))
                         {
                             string eventStr = string.IsNullOrEmpty(region.weatherEvent) ? "none" : region.weatherEvent;
-                            lines.Add($"  Region {region.regionKey}: {region.pattern} + {eventStr} (intensity: {region.intensity:F2})");
+                            string windStr = string.IsNullOrEmpty(region.windPattern) ? "none" : region.windPattern;
+                            lines.Add($"  Region {region.regionKey}: {region.pattern} + {eventStr} + {windStr} (intensity: {region.intensity:F2})");
                         }
                         if (activeRegions.Count > 5)
                         {
@@ -817,6 +848,334 @@ namespace SpreadingDevastation
                     lines.Add("  /dv weather interval [seconds] - Set update interval");
 
                     return SendChatLines(args, lines, "Weather settings sent to chat");
+            }
+        }
+
+        private TextCommandResult HandleMusicCommand(TextCommandCallingArgs args)
+        {
+            string action = (args.Parsers[0].GetValue() as string ?? "").ToLowerInvariant();
+            string value = args.Parsers[1].GetValue() as string ?? "";
+
+            // Music manager is client-side, so debug commands only work in single player or for the host
+            bool canAccessMusicManager = musicManager != null;
+
+            switch (action)
+            {
+                case "enable":
+                case "on":
+                    config.MusicEnabled = true;
+                    SaveConfig();
+                    BroadcastMusicConfig();
+                    return TextCommandResult.Success("Devastation ambient sounds ENABLED");
+
+                case "disable":
+                case "off":
+                    config.MusicEnabled = false;
+                    SaveConfig();
+                    BroadcastMusicConfig();
+                    return TextCommandResult.Success("Devastation ambient sounds DISABLED");
+
+                case "volume":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Current volume: {config.MusicVolume:F2}");
+                    }
+                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float vol))
+                    {
+                        config.MusicVolume = Math.Clamp(vol, 0f, 1f);
+                        SaveConfig();
+                        BroadcastMusicConfig();
+                        return TextCommandResult.Success($"Volume set to {config.MusicVolume:F2}");
+                    }
+                    return TextCommandResult.Error("Invalid number. Usage: /dv music volume [0.0-1.0]");
+
+                case "play":
+                    if (!canAccessMusicManager)
+                    {
+                        return TextCommandResult.Error("Music debug commands only work in single player or for the host");
+                    }
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Error("Usage: /dv music play [soundfile] - e.g., effect/tempstab-low");
+                    }
+                    musicManager.ForcePlay(value.Trim());
+                    return TextCommandResult.Success($"Force playing: {value.Trim()}");
+
+                case "stop":
+                    if (!canAccessMusicManager)
+                    {
+                        return TextCommandResult.Error("Music debug commands only work in single player or for the host");
+                    }
+                    musicManager.ForcePlay(null); // Stops forced play
+                    musicManager.ForceSilence(9999f); // Long silence
+                    return TextCommandResult.Success("Stopped music playback");
+
+                case "skip":
+                case "next":
+                    if (!canAccessMusicManager)
+                    {
+                        return TextCommandResult.Error("Music debug commands only work in single player or for the host");
+                    }
+                    musicManager.SkipToNext();
+                    return TextCommandResult.Success("Skipped to next sound or silence");
+
+                case "silence":
+                    if (!canAccessMusicManager)
+                    {
+                        return TextCommandResult.Error("Music debug commands only work in single player or for the host");
+                    }
+                    float duration = 30f;
+                    if (!string.IsNullOrWhiteSpace(value) && float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float dur))
+                    {
+                        duration = dur;
+                    }
+                    musicManager.ForceSilence(duration);
+                    return TextCommandResult.Success($"Entering silence for {duration:F0} seconds");
+
+                case "resume":
+                    if (!canAccessMusicManager)
+                    {
+                        return TextCommandResult.Error("Music debug commands only work in single player or for the host");
+                    }
+                    musicManager.ForcePlay(null); // Clear forced mode
+                    musicManager.SkipToNext(); // Resume normal cycling
+                    return TextCommandResult.Success("Resumed normal sound cycling");
+
+                case "list":
+                    if (canAccessMusicManager)
+                    {
+                        var sounds = musicManager.AvailableSounds;
+                        var lines = new List<string> { "=== Available Sounds ===" };
+                        for (int i = 0; i < sounds.Count; i++)
+                        {
+                            string current = (sounds[i] == musicManager.CurrentSoundFile) ? " [CURRENT]" : "";
+                            lines.Add($"  {i + 1}. {sounds[i]}{current}");
+                        }
+                        return SendChatLines(args, lines, "Sound list sent to chat");
+                    }
+                    else
+                    {
+                        return SendChatLines(args, new List<string>
+                        {
+                            "=== Default Sounds ===",
+                            "  1. effect/tempstab-verylow (very low stability drone)",
+                            "  2. effect/tempstab-low (low stability drone)",
+                            "  3. effect/tempstab-drain (stability drain sound)"
+                        }, "Sound list sent to chat");
+                    }
+
+                case "":
+                case "status":
+                case "info":
+                default:
+                    var statusLines = new List<string>
+                    {
+                        "=== Devastation Ambient Sounds ===",
+                        $"Enabled: {(config.MusicEnabled ? "ON" : "OFF")}",
+                        $"Volume: {config.MusicVolume:F2}",
+                        $"Fade in speed: {config.MusicFadeInSpeed:F2} (per sec)",
+                        $"Fade out speed: {config.MusicFadeOutSpeed:F2} (per sec)",
+                        $"Intensity threshold: {config.MusicIntensityThreshold:F2}",
+                    };
+
+                    if (canAccessMusicManager)
+                    {
+                        statusLines.Add("");
+                        statusLines.Add("Current State:");
+                        statusLines.Add($"  {musicManager.GetStatusString()}");
+                    }
+                    else
+                    {
+                        statusLines.Add("");
+                        statusLines.Add("(Debug commands available in single player or for host only)");
+                    }
+
+                    statusLines.Add("");
+                    statusLines.Add("Commands:");
+                    statusLines.Add("  /dv music [on|off] - Enable or disable");
+                    statusLines.Add("  /dv music volume [0.0-1.0] - Set volume");
+                    statusLines.Add("  /dv music status - Show current state");
+                    statusLines.Add("  /dv music list - List available sounds");
+                    statusLines.Add("  /dv music play [sound] - Force play a sound");
+                    statusLines.Add("  /dv music skip - Skip to next sound");
+                    statusLines.Add("  /dv music silence [seconds] - Force silence");
+                    statusLines.Add("  /dv music stop - Stop playback");
+                    statusLines.Add("  /dv music resume - Resume normal cycling");
+
+                    return SendChatLines(args, statusLines, "Music settings sent to chat");
+            }
+        }
+
+        private TextCommandResult HandleStormCommand(TextCommandCallingArgs args)
+        {
+            string setting = (args.Parsers[0].GetValue() as string ?? "").ToLowerInvariant();
+            string value = args.Parsers[1].GetValue() as string ?? "";
+
+            switch (setting)
+            {
+                case "enable":
+                case "on":
+                    config.TemporalStormEffectsEnabled = true;
+                    SaveConfig();
+                    return TextCommandResult.Success("Temporal storm devastation effects ENABLED");
+
+                case "disable":
+                case "off":
+                    config.TemporalStormEffectsEnabled = false;
+                    SaveConfig();
+                    return TextCommandResult.Success("Temporal storm devastation effects DISABLED");
+
+                case "speed":
+                case "multiplier":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Current storm speed multiplier: {config.TemporalStormSpeedMultiplier:F1}x");
+                    }
+                    if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double speedMult))
+                    {
+                        config.TemporalStormSpeedMultiplier = Math.Clamp(speedMult, 0.1, 100.0);
+                        SaveConfig();
+                        return TextCommandResult.Success($"Storm speed multiplier set to {config.TemporalStormSpeedMultiplier:F1}x");
+                    }
+                    return TextCommandResult.Error("Invalid number. Usage: /dv storm speed [multiplier]");
+
+                case "radius":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Current storm spawn radius: {config.TemporalStormSpawnRadius} blocks");
+                    }
+                    if (int.TryParse(value, out int radius))
+                    {
+                        config.TemporalStormSpawnRadius = Math.Clamp(radius, 16, 256);
+                        SaveConfig();
+                        return TextCommandResult.Success($"Storm spawn radius set to {config.TemporalStormSpawnRadius} blocks");
+                    }
+                    return TextCommandResult.Error("Invalid number. Usage: /dv storm radius [blocks]");
+
+                case "interval":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Current storm spawn interval: {config.TemporalStormSpawnIntervalSeconds:F1} seconds");
+                    }
+                    if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double interval))
+                    {
+                        config.TemporalStormSpawnIntervalSeconds = Math.Clamp(interval, 1.0, 300.0);
+                        SaveConfig();
+                        return TextCommandResult.Success($"Storm spawn interval set to {config.TemporalStormSpawnIntervalSeconds:F1} seconds");
+                    }
+                    return TextCommandResult.Error("Invalid number. Usage: /dv storm interval [seconds]");
+
+                case "chunks":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Storm creates chunks: {(config.TemporalStormCreatesChunks ? "ON" : "OFF")}");
+                    }
+                    if (value.ToLowerInvariant() == "on" || value.ToLowerInvariant() == "true")
+                    {
+                        config.TemporalStormCreatesChunks = true;
+                        SaveConfig();
+                        return TextCommandResult.Success("Storm-spawned devastation will now create devastated chunks");
+                    }
+                    else if (value.ToLowerInvariant() == "off" || value.ToLowerInvariant() == "false")
+                    {
+                        config.TemporalStormCreatesChunks = false;
+                        SaveConfig();
+                        return TextCommandResult.Success("Storm-spawned devastation will only convert individual blocks");
+                    }
+                    return TextCommandResult.Error("Usage: /dv storm chunks [on|off]");
+
+                case "":
+                case "status":
+                case "info":
+                default:
+                    bool stormActive = IsTemporalStormActive();
+                    double effectiveSpeed = GetEffectiveSpeedMultiplier();
+
+                    var lines = new List<string>
+                    {
+                        "=== Temporal Storm Devastation ===",
+                        $"Enabled: {(config.TemporalStormEffectsEnabled ? "ON" : "OFF")}",
+                        $"Storm active: {(stormActive ? "YES" : "NO")}",
+                        $"Speed multiplier: {config.TemporalStormSpeedMultiplier:F1}x" + (stormActive ? $" (current effective: {effectiveSpeed:F1}x)" : ""),
+                        $"Spawn radius: {config.TemporalStormSpawnRadius} blocks",
+                        $"Spawn interval: {config.TemporalStormSpawnIntervalSeconds:F1} seconds",
+                        $"Creates chunks: {(config.TemporalStormCreatesChunks ? "ON" : "OFF")}",
+                        "",
+                        "Commands:",
+                        "  /dv storm [on|off] - Enable or disable storm effects",
+                        "  /dv storm speed [multiplier] - Set speed boost during storms",
+                        "  /dv storm radius [blocks] - Set spawn radius around players",
+                        "  /dv storm interval [seconds] - Set spawn interval",
+                        "  /dv storm chunks [on|off] - Whether spawns create devastated chunks"
+                    };
+                    return SendChatLines(args, lines, "Storm settings sent to chat");
+            }
+        }
+
+        private TextCommandResult HandleEdgeCommand(TextCommandCallingArgs args)
+        {
+            string setting = (args.Parsers[0].GetValue() as string ?? "").ToLowerInvariant();
+            string value = args.Parsers[1].GetValue() as string ?? "";
+
+            switch (setting)
+            {
+                case "enable":
+                case "on":
+                    config.EdgeSpawningEnabled = true;
+                    SaveConfig();
+                    return TextCommandResult.Success("Edge spawning ENABLED - devastation will spawn at render distance when none visible");
+
+                case "disable":
+                case "off":
+                    config.EdgeSpawningEnabled = false;
+                    SaveConfig();
+                    return TextCommandResult.Success("Edge spawning DISABLED");
+
+                case "delay":
+                case "minutes":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Current edge spawn delay: {config.EdgeSpawningDelayMinutes:F1} minutes");
+                    }
+                    if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double delayMin))
+                    {
+                        config.EdgeSpawningDelayMinutes = Math.Clamp(delayMin, 0.5, 60.0);
+                        SaveConfig();
+                        return TextCommandResult.Success($"Edge spawn delay set to {config.EdgeSpawningDelayMinutes:F1} minutes");
+                    }
+                    return TextCommandResult.Error("Invalid number. Usage: /dv edge delay [minutes]");
+
+                case "interval":
+                case "check":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Current edge check interval: {config.EdgeSpawningCheckIntervalSeconds:F1} seconds");
+                    }
+                    if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double intervalSec))
+                    {
+                        config.EdgeSpawningCheckIntervalSeconds = Math.Clamp(intervalSec, 10.0, 300.0);
+                        SaveConfig();
+                        return TextCommandResult.Success($"Edge check interval set to {config.EdgeSpawningCheckIntervalSeconds:F1} seconds");
+                    }
+                    return TextCommandResult.Error("Invalid number. Usage: /dv edge interval [seconds]");
+
+                case "":
+                case "status":
+                case "info":
+                default:
+                    var lines = new List<string>
+                    {
+                        "=== Edge Spawning ===",
+                        $"Enabled: {(config.EdgeSpawningEnabled ? "ON" : "OFF")}",
+                        $"Delay: {config.EdgeSpawningDelayMinutes:F1} minutes (time without visible devastation before spawn)",
+                        $"Check interval: {config.EdgeSpawningCheckIntervalSeconds:F1} seconds",
+                        "",
+                        "Commands:",
+                        "  /dv edge [on|off] - Enable or disable edge spawning",
+                        "  /dv edge delay [minutes] - Set delay before spawning",
+                        "  /dv edge interval [seconds] - Set check interval"
+                    };
+                    return SendChatLines(args, lines, "Edge spawning settings sent to chat");
             }
         }
 
@@ -1482,6 +1841,40 @@ namespace SpreadingDevastation
             }
         }
 
+        private TextCommandResult HandleDiagonalCommand(TextCommandCallingArgs args)
+        {
+            string onOff = args.Parsers[0].GetValue() as string;
+
+            if (string.IsNullOrEmpty(onOff))
+            {
+                string status = config.DiagonalSpreadingEnabled ? "ON" : "OFF";
+                return SendChatLines(args, new[]
+                {
+                    $"Diagonal spreading: {status}",
+                    "When ON, devastation spreads in 26 directions (including diagonals)",
+                    "When OFF, devastation spreads in 6 cardinal directions only",
+                    "Usage: /devastate diagonal [on|off]"
+                }, "Diagonal setting sent to chat");
+            }
+
+            if (onOff.Equals("on", StringComparison.OrdinalIgnoreCase) || onOff == "1" || onOff.Equals("true", StringComparison.OrdinalIgnoreCase))
+            {
+                config.DiagonalSpreadingEnabled = true;
+                SaveConfig();
+                return TextCommandResult.Success("Diagonal spreading ENABLED - spreading in 26 directions (catches isolated blocks like leaves)");
+            }
+            else if (onOff.Equals("off", StringComparison.OrdinalIgnoreCase) || onOff == "0" || onOff.Equals("false", StringComparison.OrdinalIgnoreCase))
+            {
+                config.DiagonalSpreadingEnabled = false;
+                SaveConfig();
+                return TextCommandResult.Success("Diagonal spreading DISABLED - spreading in 6 cardinal directions only");
+            }
+            else
+            {
+                return TextCommandResult.Error("Invalid value. Use: on, off, 1, 0, true, or false");
+            }
+        }
+
         private TextCommandResult HandleMinYCommand(TextCommandCallingArgs args)
         {
             int? levelArg = args.Parsers[0].GetValue() as int?;
@@ -1504,13 +1897,18 @@ namespace SpreadingDevastation
         private TextCommandResult HandleStatusCommand(TextCommandCallingArgs args)
         {
             string statusText = isPaused ? "PAUSED" : "RUNNING";
+            bool stormActive = IsTemporalStormActive();
+            double effectiveSpeed = GetEffectiveSpeedMultiplier();
+
             var lines = new List<string>
             {
                 $"Devastation status: {statusText}",
-                $"Speed multiplier: {config.SpeedMultiplier:F2}x",
+                $"Speed multiplier: {config.SpeedMultiplier:F2}x" + (stormActive ? $" (STORM ACTIVE: {effectiveSpeed:F1}x effective)" : ""),
+                $"Temporal storm effects: {(config.TemporalStormEffectsEnabled ? "ON" : "OFF")} (storm boost: {config.TemporalStormSpeedMultiplier:F1}x)",
                 $"Active sources: {devastationSources.Count}/{config.MaxSources}",
                 $"Tracked blocks for regen: {regrowingBlocks?.Count ?? 0}",
                 $"Surface spreading: {(config.RequireSourceAirContact ? "ON" : "OFF")}",
+                $"Diagonal spreading: {(config.DiagonalSpreadingEnabled ? "ON (26 dirs)" : "OFF (6 dirs)")}",
                 $"Min Y level: {config.MinYLevel}",
                 $"Child spawn delay: {config.ChildSpawnDelaySeconds}s",
                 $"Max failed attempts: {config.MaxFailedSpawnAttempts}"

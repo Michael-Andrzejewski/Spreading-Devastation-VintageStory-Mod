@@ -335,7 +335,7 @@ namespace SpreadingDevastation
 
         /// <summary>Base volume for devastation music (0.0-1.0).</summary>
         [ProtoMember(2)]
-        public float Volume = 0.8f;
+        public float Volume = 0.5f;
 
         /// <summary>Fade in speed (per second).</summary>
         [ProtoMember(3)]
