@@ -112,6 +112,21 @@ namespace SpreadingDevastation
         public int ChunkSpawnMaxMobsPerChunk { get; set; } = 3;
 
         /// <summary>
+        /// Comma-separated list of entity codes to spawn in devastated chunks (default: "drifter-corrupt,locust-corrupt").
+        /// Supports modded entities - use the full entity code (e.g., "game:drifter-corrupt" or "mymod:custom-monster").
+        /// If an entity code doesn't include a domain prefix, "game:" is assumed.
+        /// </summary>
+        public string ChunkSpawnEntityCodes { get; set; } = "drifter-corrupt,locust-corrupt";
+
+        /// <summary>
+        /// Comma-separated list of spawn weights for each entity in ChunkSpawnEntityCodes (default: "70,30").
+        /// Weights determine relative spawn chance - higher weight = more likely to spawn.
+        /// Must have the same number of values as ChunkSpawnEntityCodes.
+        /// If fewer weights are provided, missing weights default to 100.
+        /// </summary>
+        public string ChunkSpawnEntityWeights { get; set; } = "70,30";
+
+        /// <summary>
         /// Temporal stability drain rate per 500ms tick when player is in devastated chunk (default: 0.0001)
         /// </summary>
         public double ChunkStabilityDrainRate { get; set; } = 0.0001;
@@ -196,6 +211,18 @@ namespace SpreadingDevastation
         /// If RiftWardCleanMode is not set, this determines radial (true) vs random (false).
         /// </summary>
         public bool RiftWardRadialCleanEnabled { get; set; } = true;
+
+        /// <summary>
+        /// Whether rift wards should restore temporal stability to players within their protection radius (default: true).
+        /// Players in rift ward protected areas will gradually regain temporal stability.
+        /// </summary>
+        public bool RiftWardStabilityRestoreEnabled { get; set; } = true;
+
+        /// <summary>
+        /// Temporal stability restore rate per 500ms tick when player is in rift ward protected area (default: 0.0005).
+        /// This is approximately 0.1% per second, or about 10% per 100 seconds.
+        /// </summary>
+        public double RiftWardStabilityRestoreRate { get; set; } = 0.0005;
 
         // === Devastation Fog Effect Settings ===
 
@@ -604,6 +631,14 @@ namespace SpreadingDevastation
         /// Note: This affects the volume of block ambient sounds like water, fire, etc.
         /// </summary>
         public float AmbientSoundSuppression { get; set; } = 0.8f;
+
+        /// <summary>
+        /// Stability value returned in devastated chunks, controlling intensity of game's stability effects (0.0-1.0, default: 0.0).
+        /// 0.0 = maximum instability effect (gear spins fast counter-clockwise, game plays loud stability sounds).
+        /// Higher values reduce the effect intensity. 1.0 = no stability effect at all.
+        /// Note: When MusicEnabled is false, stability effects are completely disabled regardless of this value.
+        /// </summary>
+        public float StabilityOverrideValue { get; set; } = 0f;
 
         // === Render Distance Edge Spawning Settings ===
 

@@ -151,6 +151,12 @@ namespace SpreadingDevastation
                               api.ChatCommands.Parsers.OptionalAll("args"))
                     .HandleWith(HandleMusicCommand)
                 .EndSubCommand()
+                .BeginSubCommand("sound")
+                    .WithDescription("Configure block conversion sound effects")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("setting"),
+                              api.ChatCommands.Parsers.OptionalAll("value"))
+                    .HandleWith(HandleSoundCommand)
+                .EndSubCommand()
                 .BeginSubCommand("storm")
                     .WithDescription("Configure temporal storm devastation effects")
                     .WithArgs(api.ChatCommands.Parsers.OptionalWord("setting"),
@@ -856,8 +862,8 @@ namespace SpreadingDevastation
             string action = (args.Parsers[0].GetValue() as string ?? "").ToLowerInvariant();
             string value = args.Parsers[1].GetValue() as string ?? "";
 
-            // Music manager is client-side, so debug commands only work in single player or for the host
-            bool canAccessMusicManager = musicManager != null;
+            // Get the player to send network packets to
+            IServerPlayer player = args.Caller.Player as IServerPlayer;
 
             switch (action)
             {
@@ -866,6 +872,11 @@ namespace SpreadingDevastation
                     config.MusicEnabled = true;
                     SaveConfig();
                     BroadcastMusicConfig();
+                    // Also send resume command to immediately start sounds if in devastated area
+                    if (player != null)
+                    {
+                        serverNetworkChannel.SendPacket(new MusicCommandPacket { Command = "resume" }, player);
+                    }
                     return TextCommandResult.Success("Devastation ambient sounds ENABLED");
 
                 case "disable":
@@ -873,6 +884,11 @@ namespace SpreadingDevastation
                     config.MusicEnabled = false;
                     SaveConfig();
                     BroadcastMusicConfig();
+                    // Also send stop command to immediately silence any playing sounds
+                    if (player != null)
+                    {
+                        serverNetworkChannel.SendPacket(new MusicCommandPacket { Command = "stop" }, player);
+                    }
                     return TextCommandResult.Success("Devastation ambient sounds DISABLED");
 
                 case "volume":
@@ -889,80 +905,78 @@ namespace SpreadingDevastation
                     }
                     return TextCommandResult.Error("Invalid number. Usage: /dv music volume [0.0-1.0]");
 
-                case "play":
-                    if (!canAccessMusicManager)
+                case "stability":
+                    if (string.IsNullOrWhiteSpace(value))
                     {
-                        return TextCommandResult.Error("Music debug commands only work in single player or for the host");
+                        return TextCommandResult.Success($"Stability override value: {config.StabilityOverrideValue:F2} (0=max effect, 1=no effect)");
+                    }
+                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float stabVal))
+                    {
+                        config.StabilityOverrideValue = Math.Clamp(stabVal, 0f, 1f);
+                        SaveConfig();
+                        BroadcastMusicConfig();
+                        return TextCommandResult.Success($"Stability override set to {config.StabilityOverrideValue:F2} (0=max effect, 1=no effect)");
+                    }
+                    return TextCommandResult.Error("Invalid number. Usage: /dv music stability [0.0-1.0]");
+
+                case "play":
+                    if (player == null)
+                    {
+                        return TextCommandResult.Error("This command must be run by a player");
                     }
                     if (string.IsNullOrWhiteSpace(value))
                     {
                         return TextCommandResult.Error("Usage: /dv music play [soundfile] - e.g., effect/tempstab-low");
                     }
-                    musicManager.ForcePlay(value.Trim());
+                    serverNetworkChannel.SendPacket(new MusicCommandPacket { Command = "play", Argument = value.Trim() }, player);
                     return TextCommandResult.Success($"Force playing: {value.Trim()}");
 
                 case "stop":
-                    if (!canAccessMusicManager)
+                    if (player == null)
                     {
-                        return TextCommandResult.Error("Music debug commands only work in single player or for the host");
+                        return TextCommandResult.Error("This command must be run by a player");
                     }
-                    musicManager.ForcePlay(null); // Stops forced play
-                    musicManager.ForceSilence(9999f); // Long silence
+                    serverNetworkChannel.SendPacket(new MusicCommandPacket { Command = "stop" }, player);
                     return TextCommandResult.Success("Stopped music playback");
 
                 case "skip":
                 case "next":
-                    if (!canAccessMusicManager)
+                    if (player == null)
                     {
-                        return TextCommandResult.Error("Music debug commands only work in single player or for the host");
+                        return TextCommandResult.Error("This command must be run by a player");
                     }
-                    musicManager.SkipToNext();
+                    serverNetworkChannel.SendPacket(new MusicCommandPacket { Command = "skip" }, player);
                     return TextCommandResult.Success("Skipped to next sound or silence");
 
                 case "silence":
-                    if (!canAccessMusicManager)
+                    if (player == null)
                     {
-                        return TextCommandResult.Error("Music debug commands only work in single player or for the host");
+                        return TextCommandResult.Error("This command must be run by a player");
                     }
                     float duration = 30f;
                     if (!string.IsNullOrWhiteSpace(value) && float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float dur))
                     {
                         duration = dur;
                     }
-                    musicManager.ForceSilence(duration);
+                    serverNetworkChannel.SendPacket(new MusicCommandPacket { Command = "silence", Argument = duration.ToString(CultureInfo.InvariantCulture) }, player);
                     return TextCommandResult.Success($"Entering silence for {duration:F0} seconds");
 
                 case "resume":
-                    if (!canAccessMusicManager)
+                    if (player == null)
                     {
-                        return TextCommandResult.Error("Music debug commands only work in single player or for the host");
+                        return TextCommandResult.Error("This command must be run by a player");
                     }
-                    musicManager.ForcePlay(null); // Clear forced mode
-                    musicManager.SkipToNext(); // Resume normal cycling
+                    serverNetworkChannel.SendPacket(new MusicCommandPacket { Command = "resume" }, player);
                     return TextCommandResult.Success("Resumed normal sound cycling");
 
                 case "list":
-                    if (canAccessMusicManager)
+                    return SendChatLines(args, new List<string>
                     {
-                        var sounds = musicManager.AvailableSounds;
-                        var lines = new List<string> { "=== Available Sounds ===" };
-                        for (int i = 0; i < sounds.Count; i++)
-                        {
-                            string current = (sounds[i] == musicManager.CurrentSoundFile) ? " [CURRENT]" : "";
-                            lines.Add($"  {i + 1}. {sounds[i]}{current}");
-                        }
-                        return SendChatLines(args, lines, "Sound list sent to chat");
-                    }
-                    else
-                    {
-                        return SendChatLines(args, new List<string>
-                        {
-                            "=== Default Sounds ===",
-                            "  1. effect/tempstab-verylow (very low stability drone)",
-                            "  2. effect/tempstab-low (low stability drone)",
-                            "  3. effect/tempstab-drain (stability drain sound)"
-                        }, "Sound list sent to chat");
-                    }
+                        "=== Default Sounds ===",
+                        "  1. effect/tempstab-verylow (very low stability drone)",
+                        "  2. effect/tempstab-low (low stability drone)",
+                        "  3. effect/tempstab-drain (stability drain sound)"
+                    }, "Sound list sent to chat");
 
                 case "":
                 case "status":
@@ -973,27 +987,17 @@ namespace SpreadingDevastation
                         "=== Devastation Ambient Sounds ===",
                         $"Enabled: {(config.MusicEnabled ? "ON" : "OFF")}",
                         $"Volume: {config.MusicVolume:F2}",
+                        $"Stability effect: {config.StabilityOverrideValue:F2} (0=max, 1=none)",
                         $"Fade in speed: {config.MusicFadeInSpeed:F2} (per sec)",
                         $"Fade out speed: {config.MusicFadeOutSpeed:F2} (per sec)",
                         $"Intensity threshold: {config.MusicIntensityThreshold:F2}",
                     };
 
-                    if (canAccessMusicManager)
-                    {
-                        statusLines.Add("");
-                        statusLines.Add("Current State:");
-                        statusLines.Add($"  {musicManager.GetStatusString()}");
-                    }
-                    else
-                    {
-                        statusLines.Add("");
-                        statusLines.Add("(Debug commands available in single player or for host only)");
-                    }
-
                     statusLines.Add("");
                     statusLines.Add("Commands:");
-                    statusLines.Add("  /dv music [on|off] - Enable or disable");
-                    statusLines.Add("  /dv music volume [0.0-1.0] - Set volume");
+                    statusLines.Add("  /dv music [on|off] - Enable or disable all audio");
+                    statusLines.Add("  /dv music volume [0.0-1.0] - Set ambient music volume");
+                    statusLines.Add("  /dv music stability [0.0-1.0] - Set stability effect (0=max, 1=none)");
                     statusLines.Add("  /dv music status - Show current state");
                     statusLines.Add("  /dv music list - List available sounds");
                     statusLines.Add("  /dv music play [sound] - Force play a sound");

@@ -126,7 +126,8 @@ namespace SpreadingDevastation
                 .RegisterChannel(NETWORK_CHANNEL_NAME)
                 .RegisterMessageType(typeof(DevastatedChunkSyncPacket))
                 .RegisterMessageType(typeof(FogConfigPacket))
-                .RegisterMessageType(typeof(MusicConfigPacket));
+                .RegisterMessageType(typeof(MusicConfigPacket))
+                .RegisterMessageType(typeof(MusicCommandPacket));
         }
 
         public override void StartClientSide(ICoreClientAPI api)
@@ -137,7 +138,8 @@ namespace SpreadingDevastation
             clientNetworkChannel = api.Network.GetChannel(NETWORK_CHANNEL_NAME)
                 .SetMessageHandler<DevastatedChunkSyncPacket>(OnDevastatedChunkSync)
                 .SetMessageHandler<FogConfigPacket>(OnFogConfigSync)
-                .SetMessageHandler<MusicConfigPacket>(OnMusicConfigSync);
+                .SetMessageHandler<MusicConfigPacket>(OnMusicConfigSync)
+                .SetMessageHandler<MusicCommandPacket>(OnMusicCommand);
 
             // Create and register the fog renderer
             fogRenderer = new DevastationFogRenderer(api, this);
@@ -182,6 +184,43 @@ namespace SpreadingDevastation
         {
             clientMusicConfig = packet;
             musicManager?.UpdateConfig(packet);
+        }
+
+        /// <summary>
+        /// Called when the client receives a music command from the server.
+        /// Executes the command on the client-side music manager.
+        /// </summary>
+        private void OnMusicCommand(MusicCommandPacket packet)
+        {
+            if (musicManager == null) return;
+
+            switch (packet.Command)
+            {
+                case "play":
+                    musicManager.ForcePlay(packet.Argument);
+                    break;
+                case "stop":
+                    musicManager.ForcePlay(null);
+                    musicManager.ForceSilence(9999f);
+                    break;
+                case "skip":
+                    musicManager.SkipToNext();
+                    break;
+                case "silence":
+                    if (float.TryParse(packet.Argument, NumberStyles.Float, CultureInfo.InvariantCulture, out float duration))
+                    {
+                        musicManager.ForceSilence(duration);
+                    }
+                    else
+                    {
+                        musicManager.ForceSilence(30f);
+                    }
+                    break;
+                case "resume":
+                    musicManager.ForcePlay(null);
+                    musicManager.SkipToNext();
+                    break;
+            }
         }
 
         /// <summary>
@@ -526,6 +565,10 @@ namespace SpreadingDevastation
             // Early exit if no devastated chunks
             if (devastatedChunks == null || devastatedChunks.Count == 0) return stability;
 
+            // Check if music/audio is enabled - if disabled, don't override stability
+            // This prevents the game's stability sounds from playing
+            if (config == null || !config.MusicEnabled) return stability;
+
             // Check if this position is in a devastated chunk
             int chunkX = (int)x / CHUNK_SIZE;
             int chunkZ = (int)z / CHUNK_SIZE;
@@ -537,9 +580,8 @@ namespace SpreadingDevastation
             BlockPos blockPos = new BlockPos((int)x, (int)y, (int)z);
             if (IsBlockProtectedByRiftWard(blockPos)) return stability;
 
-            // Return a very low stability value to make the gear spin counter-clockwise
-            // Using 0.0 ensures maximum instability visual effect
-            return 0f;
+            // Return the configured stability value (default 0.0 for maximum instability effect)
+            return config.StabilityOverrideValue;
         }
 
         /// <summary>
@@ -552,6 +594,10 @@ namespace SpreadingDevastation
             // Early exit if no devastated chunks synced from server
             if (clientDevastatedChunks == null || clientDevastatedChunks.Count == 0) return stability;
 
+            // Check if music/audio is enabled - if disabled, don't override stability
+            // This prevents both the gear spinning AND the game's stability sounds
+            if (clientMusicConfig == null || !clientMusicConfig.Enabled) return stability;
+
             // Check if this position is in a devastated chunk
             int chunkX = (int)x / CHUNK_SIZE;
             int chunkZ = (int)z / CHUNK_SIZE;
@@ -562,9 +608,9 @@ namespace SpreadingDevastation
             // Note: Rift ward protection is handled server-side - protected chunks
             // are removed from devastatedChunks before syncing to clients
 
-            // Return a very low stability value to make the gear spin counter-clockwise
-            // Using 0.0 ensures maximum instability visual effect
-            return 0f;
+            // Return the configured stability value (default 0.0 for maximum instability effect)
+            // Higher values reduce the intensity of both visual and audio effects
+            return clientMusicConfig.StabilityOverrideValue;
         }
 
         /// <summary>
@@ -621,7 +667,8 @@ namespace SpreadingDevastation
                     IntensityThreshold = config.MusicIntensityThreshold,
                     AmbientSuppression = config.AmbientSoundSuppression,
                     SoundFile = config.MusicSoundFile ?? "devastation-ambient",
-                    Loop = config.MusicLoop
+                    Loop = config.MusicLoop,
+                    StabilityOverrideValue = config.StabilityOverrideValue
                 };
                 musicConfigDirty = false;
             }
@@ -2518,8 +2565,8 @@ namespace SpreadingDevastation
                 // Check particle rate limit (uses near/far priority system)
                 if (!CanSpawnParticle(pos)) return;
 
-                // Use the same particle properties as devastation particles
-                var particles = CreateDevastationParticles(pos);
+                // Use blue particles for protected chunk borders (shows rift ward protection boundary)
+                var particles = CreateHealingParticles(pos);
                 sapi.World.SpawnParticles(particles);
             }
             catch
@@ -2706,7 +2753,7 @@ namespace SpreadingDevastation
 
         /// <summary>
         /// Drains temporal stability from players standing in devastated chunks.
-        /// Acts as if they're in an unstable temporal region.
+        /// Restores temporal stability for players in rift ward protected areas.
         /// </summary>
         private void DrainPlayerTemporalStability(float dt)
         {
@@ -2716,27 +2763,35 @@ namespace SpreadingDevastation
                 IServerPlayer player = allPlayers[i] as IServerPlayer;
                 if (player?.Entity == null) continue;
 
+                BlockPos playerBlockPos = player.Entity.Pos.AsBlockPos;
+                bool isProtectedByRiftWard = IsBlockProtectedByRiftWard(playerBlockPos);
+
                 // Check if player is in a devastated chunk
                 int chunkX = (int)player.Entity.Pos.X / CHUNK_SIZE;
                 int chunkZ = (int)player.Entity.Pos.Z / CHUNK_SIZE;
                 long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
-
-                if (!devastatedChunks.ContainsKey(chunkKey)) continue;
-
-                // Skip if player is protected by a rift ward
-                BlockPos playerBlockPos = player.Entity.Pos.AsBlockPos;
-                if (IsBlockProtectedByRiftWard(playerBlockPos)) continue;
+                bool isInDevastatedChunk = devastatedChunks.ContainsKey(chunkKey);
 
                 // Get the temporal stability behavior
                 var stabilityBehavior = player.Entity.GetBehavior<EntityBehaviorTemporalStabilityAffected>();
                 if (stabilityBehavior == null) continue;
 
-                // Drain stability at configured rate (default 0.001 per 500ms tick = ~0.2% per second)
-                double drainRate = config.ChunkStabilityDrainRate;
                 double currentStability = stabilityBehavior.OwnStability;
-                double newStability = Math.Max(0, currentStability - drainRate);
 
-                stabilityBehavior.OwnStability = newStability;
+                // Restore stability if in rift ward protected area
+                if (isProtectedByRiftWard && config.RiftWardStabilityRestoreEnabled)
+                {
+                    double restoreRate = config.RiftWardStabilityRestoreRate;
+                    double newStability = Math.Min(1.0, currentStability + restoreRate);
+                    stabilityBehavior.OwnStability = newStability;
+                }
+                // Drain stability if in devastated chunk and not protected
+                else if (isInDevastatedChunk && !isProtectedByRiftWard)
+                {
+                    double drainRate = config.ChunkStabilityDrainRate;
+                    double newStability = Math.Max(0, currentStability - drainRate);
+                    stabilityBehavior.OwnStability = newStability;
+                }
             }
         }
 

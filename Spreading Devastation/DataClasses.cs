@@ -324,6 +324,22 @@ namespace SpreadingDevastation
     }
 
     /// <summary>
+    /// Network packet sent from server to client to execute music debug commands.
+    /// Since the music manager is client-side only, commands must be sent via network.
+    /// </summary>
+    [ProtoContract]
+    public class MusicCommandPacket
+    {
+        /// <summary>The command to execute: "play", "stop", "skip", "silence", "resume"</summary>
+        [ProtoMember(1)]
+        public string Command = "";
+
+        /// <summary>Optional argument for the command (e.g., sound file for "play", duration for "silence")</summary>
+        [ProtoMember(2)]
+        public string Argument = "";
+    }
+
+    /// <summary>
     /// Network packet sent from server to client containing music configuration.
     /// </summary>
     [ProtoContract]
@@ -360,6 +376,14 @@ namespace SpreadingDevastation
         /// <summary>Whether the music should loop.</summary>
         [ProtoMember(8)]
         public bool Loop = true;
+
+        /// <summary>
+        /// Stability value to return in devastated chunks (0.0-1.0).
+        /// 0.0 = maximum instability effect (gear spins fast, loud game sounds).
+        /// Higher values reduce the intensity. 1.0 = no effect.
+        /// </summary>
+        [ProtoMember(9)]
+        public float StabilityOverrideValue = 0f;
     }
 
     #region Test Suite Data Structures
