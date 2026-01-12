@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+
 namespace SpreadingDevastation
 {
     /// <summary>
@@ -112,19 +114,100 @@ namespace SpreadingDevastation
         public int ChunkSpawnMaxMobsPerChunk { get; set; } = 3;
 
         /// <summary>
-        /// Comma-separated list of entity codes to spawn in devastated chunks (default: "drifter-corrupt,locust-corrupt").
-        /// Supports modded entities - use the full entity code (e.g., "game:drifter-corrupt" or "mymod:custom-monster").
+        /// Dictionary of entity codes to spawn weights for devastated chunk spawning.
+        /// Keys are entity codes (e.g., "game:drifter-corrupt" or "mymod:creature").
+        /// Values are spawn weights - higher weight = more likely to spawn.
         /// If an entity code doesn't include a domain prefix, "game:" is assumed.
+        /// Default includes base game corrupt creatures plus creatures from
+        /// compatible mods. Invalid entities (mods not installed) are automatically filtered.
         /// </summary>
-        public string ChunkSpawnEntityCodes { get; set; } = "drifter-corrupt,locust-corrupt";
+        public Dictionary<string, int> ChunkSpawnEntityPool { get; set; } = new Dictionary<string, int>
+        {
+            // ==================== BASE GAME CORRUPT CREATURES ====================
+            // Tier 3 corruption creatures - spawn in devastated areas
+            { "game:drifter-corrupt", 100 },        // HP: 30, Damage: 12 - standard corrupt drifter
+            { "game:locust-corrupt", 80 },          // HP: 12, Damage: 4 - climbing insectoid
+            { "game:bowtorn-corrupt", 70 },         // HP: 25, Damage: 7 - ranged attacker
+            { "game:shiver-corrupt", 70 },          // HP: 34, Damage: 12 - wall-climbing spider
 
-        /// <summary>
-        /// Comma-separated list of spawn weights for each entity in ChunkSpawnEntityCodes (default: "70,30").
-        /// Weights determine relative spawn chance - higher weight = more likely to spawn.
-        /// Must have the same number of values as ChunkSpawnEntityCodes.
-        /// If fewer weights are provided, missing weights default to 100.
-        /// </summary>
-        public string ChunkSpawnEntityWeights { get; set; } = "70,30";
+            // Special corrupt variants - rarer, more dangerous
+            { "game:locust-corrupt-sawblade", 30 }, // HP: 40, Damage: 16 - elite sawblade locust
+
+            // Tier 4 nightmare creatures - very rare, very dangerous
+            { "game:drifter-nightmare", 20 },       // HP: 40, Damage: 20 - nightmare drifter
+            { "game:bowtorn-nightmare", 15 },       // HP: 32, Damage: 12 - nightmare ranged
+            { "game:shiver-nightmare", 15 },        // HP: 45, Damage: 20 - nightmare spider
+
+            // Special tier 4 variants - extremely rare
+            { "game:drifter-double-headed", 10 },   // HP: 54, Damage: 24 - temporal storm spawn
+            { "game:shiver-stilt", 10 },            // HP: 45, Damage: 24 - tall stilt variant
+            { "game:shiver-bellhead", 5 },          // HP: 66, Damage: 24 - bell-headed horror
+            { "game:bowtorn-gearfoot", 5 },         // HP: 50, Damage: 14 - geared nightmare
+
+            // ==================== RUST AND ROT MOD (rustandrot) ====================
+            // Rotten creatures - undead horrors, spawn in caves
+            { "rustandrot:rotwalker-normal", 60 },  // Corrupted humanoid, sickly glow
+            { "rustandrot:rotwalker-deep", 40 },    // Underground variant
+            { "rustandrot:rotwalker-blackguard", 25 }, // Elite underground variant
+            { "rustandrot:rotcrawler", 70 },        // Skeletal crawler, putrid stench
+            { "rustandrot:rotbeast-wolf", 50 },     // Corrupted wolf
+            { "rustandrot:rotbeast-pig", 50 },      // Corrupted pig
+            { "rustandrot:rotbeast-sheep", 50 },    // Corrupted sheep
+            { "rustandrot:rotpillar", 30 },         // Living column of rot, spreads blight
+            { "rustandrot:miasma", 25 },            // Spawns parasitic flies
+            { "rustandrot:parasitic-flies", 40 },   // Flying pests from miasma
+
+            // Rusted creatures - metallic horrors, spawn at night
+            { "rustandrot:roamer-normal", 50 },     // Scavenger among ruins
+            { "rustandrot:itinerant-normal", 40 },  // Metallic wanderer
+            { "rustandrot:golem-normal", 20 },      // Ancient metal construct, drops fire clay
+            { "rustandrot:mimic", 15 },             // Deceptive disguised creature
+
+            // Drifted ones - half-metal half-organic from rifts
+            { "rustandrot:drifted-hollowed", 35 },  // Hollowed drifted
+            { "rustandrot:drifted-profound", 30 },  // Profound drifted
+            { "rustandrot:drifted-tainted", 35 },   // Tainted drifted
+            { "rustandrot:drifted-corrupt", 30 },   // Corrupt drifted
+            { "rustandrot:drifted-nightmare", 15 }, // Nightmare drifted - very dangerous
+
+            // Bosses - extremely rare spawns
+            { "rustandrot:bonemass", 3 },           // Slow powerful boss, bone-crushing
+            { "rustandrot:boiler", 3 },             // Metal boss, brute force
+
+            // ==================== PRIMITIVE SURVIVAL MOD ====================
+            { "primitivesurvival:livingdead", 40 }, // HP: 100 - Lovecraft-inspired undead, 5 blocks tall
+
+            // Venomous snakes - semi-hostile, will attack but often flee
+            { "primitivesurvival:snake-pitviper", 60 },    // Venomous viper
+            { "primitivesurvival:snake-chainviper", 60 },  // Venomous chain viper
+
+            // ==================== WILDERLANDS RUSTBOUND MOD ====================
+            // Rustborn drifters - replaces vanilla with tiered system
+            { "wrustbound:rustborn-tier1", 80 },    // Basic rustborn
+            { "wrustbound:rustborn-tier2", 70 },    // Slightly stronger
+            { "wrustbound:rustborn-tier3", 60 },    // Moderate threat
+            { "wrustbound:rustborn-tier4", 50 },    // Dangerous
+            { "wrustbound:rustborn-tier5", 35 },    // Very dangerous
+            { "wrustbound:rustborn-tier6", 20 },    // Elite rustborn
+            { "wrustbound:rustborn-tier7", 10 },    // Near-boss tier
+            { "wrustbound:rustborn-tier8", 5 },     // Near-boss tier
+            { "wrustbound:rustborn-tier9", 3 },     // HP: ~600 - top tier
+
+            // Skulkers - rust bug creatures
+            { "wrustbound:skulker-young", 70 },     // Young skulker
+            { "wrustbound:skulker-adolescent", 50 }, // Growing skulker
+            { "wrustbound:skulker-mature", 30 },    // Full-grown skulker
+
+            // Caretakers - guard nests, spawn at night
+            { "wrustbound:caretaker-ramhorned", 25 },  // Ram-horned guardian
+            { "wrustbound:caretaker-deerhorned", 25 }, // Deer-horned guardian
+
+            // Special creatures
+            { "wrustbound:blightworm", 40 },        // Tropical corruption worm
+            { "wrustbound:bellskulker", 35 },       // Larval bell form, flees to establish nests
+            { "wrustbound:shepherd", 5 },           // Mini-boss, summons drifters, drops temporal gears
+            { "wrustbound:wbonemass", 3 }           // Ported bonemass boss
+        };
 
         /// <summary>
         /// Temporal stability drain rate per 500ms tick when player is in devastated chunk (default: 0.0001)

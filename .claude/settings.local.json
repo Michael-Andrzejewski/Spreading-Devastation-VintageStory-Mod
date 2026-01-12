@@ -18,7 +18,9 @@
       "WebFetch(domain:www.claude.com)",
       "WebFetch(domain:raw.githubusercontent.com)",
       "WebFetch(domain:api.github.com)",
-      "Bash(findstr:*)"
+      "Bash(findstr:*)",
+      "WebFetch(domain:www.vintagestory.at)",
+      "WebFetch(domain:spearandfang.github.io)"
     ]
   }
 }

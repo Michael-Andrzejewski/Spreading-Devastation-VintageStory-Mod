@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using Vintagestory.API.Common;
+using Vintagestory.API.Common.Entities;
 using Vintagestory.API.Config;
 using Vintagestory.API.MathTools;
 using Vintagestory.API.Server;
@@ -168,6 +169,12 @@ namespace SpreadingDevastation
                     .WithArgs(api.ChatCommands.Parsers.OptionalWord("setting"),
                               api.ChatCommands.Parsers.OptionalAll("value"))
                     .HandleWith(HandleEdgeCommand)
+                .EndSubCommand()
+                .BeginSubCommand("spawnpool")
+                    .WithDescription("Manage entity spawn pool for devastated chunks")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("action"),
+                              api.ChatCommands.Parsers.OptionalAll("args"))
+                    .HandleWith(HandleSpawnPoolCommand)
                 .EndSubCommand();
         }
 
@@ -2649,6 +2656,225 @@ namespace SpreadingDevastation
 
             devastatedChunks[chunkKey] = newChunk;
             return TextCommandResult.Success($"Marked chunk at ({chunkX}, {chunkZ}) as devastated starting from {pos}. Devastation will spread in cardinal directions.");
+        }
+
+        private TextCommandResult HandleSpawnPoolCommand(TextCommandCallingArgs args)
+        {
+            string action = args.Parsers[0].GetValue() as string ?? "";
+            string argsStr = args.Parsers[1].GetValue() as string ?? "";
+
+            switch (action.ToLowerInvariant())
+            {
+                case "list":
+                case "":
+                    return SpawnPoolList(args);
+
+                case "add":
+                    return SpawnPoolAdd(args, argsStr);
+
+                case "remove":
+                    return SpawnPoolRemove(args, argsStr);
+
+                case "weight":
+                case "set":
+                    return SpawnPoolSetWeight(args, argsStr);
+
+                case "reload":
+                case "refresh":
+                    InvalidateSpawnPoolCache();
+                    return TextCommandResult.Success("Spawn pool cache invalidated. Will rebuild on next spawn attempt.");
+
+                case "clear":
+                    config.ChunkSpawnEntityPool.Clear();
+                    InvalidateSpawnPoolCache();
+                    SaveConfig();
+                    return TextCommandResult.Success("Spawn pool cleared. No entities will spawn until you add some.");
+
+                case "reset":
+                    config.ChunkSpawnEntityPool = new SpreadingDevastationConfig().ChunkSpawnEntityPool;
+                    InvalidateSpawnPoolCache();
+                    SaveConfig();
+                    return TextCommandResult.Success($"Spawn pool reset to defaults ({config.ChunkSpawnEntityPool.Count} entities).");
+
+                default:
+                    return SendChatLines(args, new List<string>
+                    {
+                        "=== Spawn Pool Commands ===",
+                        "  /dv spawnpool - List all entities in spawn pool",
+                        "  /dv spawnpool add [entityCode] [weight] - Add entity to pool",
+                        "  /dv spawnpool remove [entityCode] - Remove entity from pool",
+                        "  /dv spawnpool weight [entityCode] [weight] - Set entity weight",
+                        "  /dv spawnpool reload - Rebuild spawn pool cache",
+                        "  /dv spawnpool clear - Clear all entities from pool",
+                        "  /dv spawnpool reset - Reset pool to defaults",
+                        "",
+                        "Entity codes format: modid:entityname (e.g., game:drifter-corrupt)",
+                        "Weight determines relative spawn chance (higher = more likely)"
+                    }, "Spawn pool help sent to chat");
+            }
+        }
+
+        private TextCommandResult SpawnPoolList(TextCommandCallingArgs args)
+        {
+            if (config.ChunkSpawnEntityPool == null || config.ChunkSpawnEntityPool.Count == 0)
+            {
+                return TextCommandResult.Success("Spawn pool is empty. No entities will spawn.");
+            }
+
+            var lines = new List<string> { "=== Entity Spawn Pool ===" };
+
+            // Calculate total weight for percentage display
+            int totalWeight = 0;
+            foreach (var kvp in config.ChunkSpawnEntityPool)
+            {
+                totalWeight += kvp.Value;
+            }
+
+            // Build sorted list by weight
+            var sorted = config.ChunkSpawnEntityPool.OrderByDescending(kvp => kvp.Value).ToList();
+
+            foreach (var kvp in sorted)
+            {
+                double percent = totalWeight > 0 ? (double)kvp.Value / totalWeight * 100 : 0;
+
+                // Check if entity exists
+                string entityCode = kvp.Key;
+                AssetLocation entityLocation;
+                if (entityCode.Contains(":"))
+                {
+                    string[] parts = entityCode.Split(':');
+                    entityLocation = new AssetLocation(parts[0], parts[1]);
+                }
+                else
+                {
+                    entityLocation = new AssetLocation("game", entityCode);
+                }
+
+                EntityProperties entityType = sapi.World.GetEntityType(entityLocation);
+                string status = entityType != null ? "" : " [NOT FOUND]";
+
+                lines.Add($"  {kvp.Key}: {kvp.Value} ({percent:F1}%){status}");
+            }
+
+            lines.Add($"Total weight: {totalWeight}");
+            lines.Add($"Valid entities: {sorted.Count(kvp => sapi.World.GetEntityType(GetAssetLocation(kvp.Key)) != null)} of {sorted.Count}");
+
+            return SendChatLines(args, lines, "Spawn pool listed");
+        }
+
+        private AssetLocation GetAssetLocation(string entityCode)
+        {
+            if (entityCode.Contains(":"))
+            {
+                string[] parts = entityCode.Split(':');
+                return new AssetLocation(parts[0], parts[1]);
+            }
+            return new AssetLocation("game", entityCode);
+        }
+
+        private TextCommandResult SpawnPoolAdd(TextCommandCallingArgs args, string argsStr)
+        {
+            string[] parts = argsStr.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 1)
+            {
+                return TextCommandResult.Error("Usage: /dv spawnpool add [entityCode] [weight]");
+            }
+
+            string entityCode = parts[0];
+            int weight = 100; // Default weight
+
+            if (parts.Length >= 2 && int.TryParse(parts[1], out int parsedWeight))
+            {
+                weight = Math.Max(1, parsedWeight);
+            }
+
+            // Normalize entity code to include domain if missing
+            if (!entityCode.Contains(":"))
+            {
+                entityCode = "game:" + entityCode;
+            }
+
+            if (config.ChunkSpawnEntityPool.ContainsKey(entityCode))
+            {
+                return TextCommandResult.Error($"Entity '{entityCode}' is already in the spawn pool. Use '/dv spawnpool weight' to change its weight.");
+            }
+
+            config.ChunkSpawnEntityPool[entityCode] = weight;
+            InvalidateSpawnPoolCache();
+            SaveConfig();
+
+            // Check if entity exists
+            EntityProperties entityType = sapi.World.GetEntityType(GetAssetLocation(entityCode));
+            string warning = entityType == null ? " (WARNING: entity not found, mod may not be installed)" : "";
+
+            return TextCommandResult.Success($"Added '{entityCode}' to spawn pool with weight {weight}{warning}");
+        }
+
+        private TextCommandResult SpawnPoolRemove(TextCommandCallingArgs args, string argsStr)
+        {
+            string entityCode = argsStr.Trim();
+            if (string.IsNullOrEmpty(entityCode))
+            {
+                return TextCommandResult.Error("Usage: /dv spawnpool remove [entityCode]");
+            }
+
+            // Try with and without domain prefix
+            if (!config.ChunkSpawnEntityPool.ContainsKey(entityCode))
+            {
+                if (!entityCode.Contains(":"))
+                {
+                    entityCode = "game:" + entityCode;
+                }
+            }
+
+            if (!config.ChunkSpawnEntityPool.ContainsKey(entityCode))
+            {
+                return TextCommandResult.Error($"Entity '{entityCode}' not found in spawn pool.");
+            }
+
+            config.ChunkSpawnEntityPool.Remove(entityCode);
+            InvalidateSpawnPoolCache();
+            SaveConfig();
+
+            return TextCommandResult.Success($"Removed '{entityCode}' from spawn pool.");
+        }
+
+        private TextCommandResult SpawnPoolSetWeight(TextCommandCallingArgs args, string argsStr)
+        {
+            string[] parts = argsStr.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2)
+            {
+                return TextCommandResult.Error("Usage: /dv spawnpool weight [entityCode] [weight]");
+            }
+
+            string entityCode = parts[0];
+            if (!int.TryParse(parts[1], out int weight))
+            {
+                return TextCommandResult.Error("Weight must be a number.");
+            }
+
+            weight = Math.Max(1, weight);
+
+            // Try with and without domain prefix
+            if (!config.ChunkSpawnEntityPool.ContainsKey(entityCode))
+            {
+                if (!entityCode.Contains(":"))
+                {
+                    entityCode = "game:" + entityCode;
+                }
+            }
+
+            if (!config.ChunkSpawnEntityPool.ContainsKey(entityCode))
+            {
+                return TextCommandResult.Error($"Entity '{entityCode}' not found in spawn pool. Use '/dv spawnpool add' to add it first.");
+            }
+
+            int oldWeight = config.ChunkSpawnEntityPool[entityCode];
+            config.ChunkSpawnEntityPool[entityCode] = weight;
+            InvalidateSpawnPoolCache();
+            SaveConfig();
+
+            return TextCommandResult.Success($"Updated '{entityCode}' weight from {oldWeight} to {weight}.");
         }
 
         #endregion

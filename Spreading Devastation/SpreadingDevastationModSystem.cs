@@ -845,6 +845,9 @@ namespace SpreadingDevastation
                 insanityIncludePatterns = null;
                 insanityExcludePatterns = null;
                 traderEntityPatterns = null;
+
+                // Clear spawn pool cache to force rebuild with new entities
+                InvalidateSpawnPoolCache();
             }
             catch (Exception ex)
             {
@@ -4453,15 +4456,32 @@ namespace SpreadingDevastation
                 sapi.World.Rand.NextDouble() * (config.ChunkSpawnIntervalMaxHours - config.ChunkSpawnIntervalMinHours);
             chunk.NextSpawnTime = currentTime + Math.Max(randomInterval, config.ChunkSpawnCooldownHours);
 
-            // Randomly choose between corrupted drifter and corrupted locust
-            string entityCode = sapi.World.Rand.NextDouble() < 0.7 ? "drifter-corrupt" : "locust-corrupt";
+            // Select entity from weighted spawn pool
+            string entityCode = SelectWeightedEntityFromPool();
+            if (entityCode == null)
+            {
+                sapi.Logger.Warning("SpreadingDevastation: No valid entities in spawn pool");
+                return;
+            }
 
             try
             {
-                EntityProperties entityType = sapi.World.GetEntityType(new AssetLocation("game", entityCode));
+                // Parse the entity code - if no domain prefix, assume "game:"
+                AssetLocation entityLocation;
+                if (entityCode.Contains(":"))
+                {
+                    string[] parts = entityCode.Split(':');
+                    entityLocation = new AssetLocation(parts[0], parts[1]);
+                }
+                else
+                {
+                    entityLocation = new AssetLocation("game", entityCode);
+                }
+
+                EntityProperties entityType = sapi.World.GetEntityType(entityLocation);
                 if (entityType == null)
                 {
-                    sapi.Logger.Warning($"SpreadingDevastation: Entity type '{entityCode}' not found");
+                    sapi.Logger.Debug($"SpreadingDevastation: Entity type '{entityCode}' not found (mod may not be installed)");
                     return;
                 }
 
@@ -4474,6 +4494,110 @@ namespace SpreadingDevastation
             {
                 sapi.Logger.Warning($"SpreadingDevastation: Failed to spawn {entityCode}: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Cached list of valid spawn pool entries with their cumulative weights.
+        /// Rebuilt when config changes.
+        /// </summary>
+        private List<(string entityCode, int cumulativeWeight)> cachedSpawnPool = null;
+        private int cachedSpawnPoolTotalWeight = 0;
+
+        /// <summary>
+        /// Selects a random entity code from the spawn pool using weighted random selection.
+        /// Only considers entities that actually exist in the loaded mods.
+        /// </summary>
+        private string SelectWeightedEntityFromPool()
+        {
+            // Rebuild cache if needed
+            if (cachedSpawnPool == null)
+            {
+                RebuildSpawnPoolCache();
+            }
+
+            if (cachedSpawnPool.Count == 0 || cachedSpawnPoolTotalWeight <= 0)
+            {
+                return null;
+            }
+
+            // Weighted random selection
+            int roll = sapi.World.Rand.Next(cachedSpawnPoolTotalWeight);
+            foreach (var entry in cachedSpawnPool)
+            {
+                if (roll < entry.cumulativeWeight)
+                {
+                    return entry.entityCode;
+                }
+            }
+
+            // Fallback to last entry (shouldn't happen)
+            return cachedSpawnPool[cachedSpawnPool.Count - 1].entityCode;
+        }
+
+        /// <summary>
+        /// Rebuilds the spawn pool cache, filtering out entities that don't exist.
+        /// Called when config changes or on first spawn attempt.
+        /// </summary>
+        private void RebuildSpawnPoolCache()
+        {
+            cachedSpawnPool = new List<(string, int)>();
+            cachedSpawnPoolTotalWeight = 0;
+
+            if (config.ChunkSpawnEntityPool == null || config.ChunkSpawnEntityPool.Count == 0)
+            {
+                sapi.Logger.Warning("SpreadingDevastation: ChunkSpawnEntityPool is empty, no entities will spawn");
+                return;
+            }
+
+            foreach (var kvp in config.ChunkSpawnEntityPool)
+            {
+                string entityCode = kvp.Key;
+                int weight = kvp.Value;
+
+                if (weight <= 0) continue;
+
+                // Check if this entity type exists
+                AssetLocation entityLocation;
+                if (entityCode.Contains(":"))
+                {
+                    string[] parts = entityCode.Split(':');
+                    entityLocation = new AssetLocation(parts[0], parts[1]);
+                }
+                else
+                {
+                    entityLocation = new AssetLocation("game", entityCode);
+                }
+
+                EntityProperties entityType = sapi.World.GetEntityType(entityLocation);
+                if (entityType != null)
+                {
+                    cachedSpawnPoolTotalWeight += weight;
+                    cachedSpawnPool.Add((entityCode, cachedSpawnPoolTotalWeight));
+                }
+                else
+                {
+                    sapi.Logger.Debug($"SpreadingDevastation: Spawn pool entity '{entityCode}' not found (mod not installed), skipping");
+                }
+            }
+
+            if (cachedSpawnPool.Count > 0)
+            {
+                sapi.Logger.Notification($"SpreadingDevastation: Spawn pool initialized with {cachedSpawnPool.Count} entities (total weight: {cachedSpawnPoolTotalWeight})");
+            }
+            else
+            {
+                sapi.Logger.Warning("SpreadingDevastation: No valid entities found in spawn pool!");
+            }
+        }
+
+        /// <summary>
+        /// Invalidates the spawn pool cache, forcing a rebuild on next spawn.
+        /// Call this when ChunkSpawnEntityPool config changes.
+        /// </summary>
+        public void InvalidateSpawnPoolCache()
+        {
+            cachedSpawnPool = null;
+            cachedSpawnPoolTotalWeight = 0;
         }
 
         /// <summary>
