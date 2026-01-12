@@ -2985,7 +2985,7 @@ namespace SpreadingDevastation
                     if (!chunk.IsFullyDevastated &&
                         chunk.FrontierInitialized &&
                         chunk.ConsecutiveEmptyFrontierChecks >= 3 &&
-                        chunk.BlocksDevastated < 1000) // Must have < 1000 blocks to be considered stuck
+                        chunk.BlocksDevastated < 1000)
                     {
                         // Check repair cooldown (60 seconds real time, assuming ~1 tick per second)
                         double timeSinceLastRepair = currentTime - chunk.LastRepairAttemptTime;
@@ -3059,6 +3059,15 @@ namespace SpreadingDevastation
             // Re-initialize the frontier
             chunk.FrontierInitialized = false;
             InitializeChunkFrontier(chunk);
+
+            // If chunk wasn't loaded, InitializeChunkFrontier will have left FrontierInitialized = false
+            // Don't count this as a failed repair attempt
+            if (!chunk.FrontierInitialized)
+            {
+                chunk.RepairAttemptCount--; // Undo the increment since we couldn't actually try
+                sapi.Logger.VerboseDebug($"SpreadingDevastation: Chunk ({chunk.ChunkX}, {chunk.ChunkZ}) not loaded, skipping repair attempt");
+                return;
+            }
 
             int newFrontierCount = chunk.DevastationFrontier?.Count ?? 0;
             sapi.Logger.Notification($"SpreadingDevastation: Repaired stuck chunk at ({chunk.ChunkX}, {chunk.ChunkZ}), frontier now has {newFrontierCount} blocks (attempt {chunk.RepairAttemptCount}/5)");
@@ -5314,6 +5323,15 @@ namespace SpreadingDevastation
         /// </summary>
         private void InitializeChunkFrontier(DevastatedChunk chunk)
         {
+            // Check if chunk is loaded before trying to access blocks
+            var worldChunk = sapi.World.BlockAccessor.GetChunk(chunk.ChunkX, 0, chunk.ChunkZ);
+            if (worldChunk == null)
+            {
+                // Chunk not loaded - leave FrontierInitialized false so we try again later
+                chunk.FrontierInitialized = false;
+                return;
+            }
+
             chunk.FrontierInitialized = true;
             chunk.DevastationFrontier = new List<BlockPos>();
 
