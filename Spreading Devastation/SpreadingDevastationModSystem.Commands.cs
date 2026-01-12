@@ -1010,6 +1010,55 @@ namespace SpreadingDevastation
             }
         }
 
+        private TextCommandResult HandleSoundCommand(TextCommandCallingArgs args)
+        {
+            string setting = (args.Parsers[0].GetValue() as string ?? "").ToLowerInvariant();
+            string value = args.Parsers[1].GetValue() as string ?? "";
+
+            switch (setting)
+            {
+                case "enable":
+                case "on":
+                    config.EnableConversionSounds = true;
+                    SaveConfig();
+                    return TextCommandResult.Success("Block conversion sounds ENABLED");
+
+                case "disable":
+                case "off":
+                    config.EnableConversionSounds = false;
+                    SaveConfig();
+                    return TextCommandResult.Success("Block conversion sounds DISABLED");
+
+                case "volume":
+                case "vol":
+                    if (string.IsNullOrEmpty(value))
+                    {
+                        return TextCommandResult.Success($"Current volume: {config.ConversionSoundVolume:F2} (0.0-1.0)");
+                    }
+                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float vol))
+                    {
+                        config.ConversionSoundVolume = Math.Clamp(vol, 0f, 1f);
+                        SaveConfig();
+                        return TextCommandResult.Success($"Conversion sound volume set to {config.ConversionSoundVolume:F2}");
+                    }
+                    return TextCommandResult.Error("Invalid volume value (must be 0.0-1.0)");
+
+                case "":
+                default:
+                    var statusLines = new List<string>
+                    {
+                        "=== Sound Settings ===",
+                        $"Enabled: {config.EnableConversionSounds}",
+                        $"Volume: {config.ConversionSoundVolume:F2}",
+                        "",
+                        "Usage:",
+                        "  /dv sound [on|off] - Enable or disable sounds",
+                        "  /dv sound volume [0.0-1.0] - Set volume"
+                    };
+                    return SendChatLines(args, statusLines, "Sound settings sent to chat");
+            }
+        }
+
         private TextCommandResult HandleStormCommand(TextCommandCallingArgs args)
         {
             string setting = (args.Parsers[0].GetValue() as string ?? "").ToLowerInvariant();
@@ -2415,15 +2464,35 @@ namespace SpreadingDevastation
 
             // Force re-initialize and reset repair state
             int oldFrontierCount = chunk.DevastationFrontier?.Count ?? 0;
+            bool wasFullyDevastated = chunk.IsFullyDevastated;
             chunk.FrontierInitialized = false;
             chunk.IsFullyDevastated = false;
             chunk.IsUnrepairable = false; // Reset unrepairable flag
             chunk.RepairAttemptCount = 0;
             chunk.ConsecutiveEmptyFrontierChecks = 0;
+            chunk.DevastationFrontier = new List<BlockPos>(); // Clear existing frontier
+
+            // First try the standard initialization
             InitializeChunkFrontier(chunk);
+            int afterInitCount = chunk.DevastationFrontier?.Count ?? 0;
+
+            // If frontier is still empty, try the thorough scan
+            bool usedThoroughScan = false;
+            if (afterInitCount == 0)
+            {
+                usedThoroughScan = true;
+                bool foundConvertible = TryFindRemainingConvertibleBlocks(chunk);
+                if (!foundConvertible)
+                {
+                    // Truly no convertible blocks - mark as done
+                    chunk.IsFullyDevastated = true;
+                }
+            }
 
             int newFrontierCount = chunk.DevastationFrontier?.Count ?? 0;
-            return TextCommandResult.Success($"Fixed chunk ({chunkX}, {chunkZ}): frontier {oldFrontierCount} to {newFrontierCount} blocks (repair state reset)");
+            string scanMethod = usedThoroughScan ? " (used thorough scan)" : "";
+            string statusChange = wasFullyDevastated ? $", was marked fully devastated: now {(chunk.IsFullyDevastated ? "still done" : "RESUMED")}" : "";
+            return TextCommandResult.Success($"Fixed chunk ({chunkX}, {chunkZ}): frontier {oldFrontierCount} to {newFrontierCount} blocks{scanMethod}{statusChange}");
         }
 
         private TextCommandResult HandleChunkUnrepairableCommand(TextCommandCallingArgs args, string value)

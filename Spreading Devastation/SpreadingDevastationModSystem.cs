@@ -30,6 +30,7 @@ namespace SpreadingDevastation
         private Dictionary<long, DevastatedChunk> devastatedChunks; // Chunk-based devastation tracking
         private SpreadingDevastationConfig config;
         private bool isPaused = false; // When true, all devastation processing stops
+        private bool needsFrontierRebuild = false; // Flag to defer frontier rebuild until world is loaded
         private int nextSourceId = 1; // Counter for generating unique source IDs
         private int cleanupTickCounter = 0; // Counter for periodic cleanup
         private const int CHUNK_SIZE = 32; // VS chunk size in blocks
@@ -527,6 +528,9 @@ namespace SpreadingDevastation
             api.Event.DidPlaceBlock += OnBlockPlaced;
             api.Event.DidBreakBlock += OnBlockBroken;
 
+            // Send immediate sync to players when they join (don't make them wait for periodic sync)
+            api.Event.PlayerNowPlaying += OnPlayerJoin;
+
             // Save/load events
             api.Event.SaveGameLoaded += OnSaveGameLoading;
             api.Event.GameWorldSave += OnSaveGameSaving;
@@ -540,6 +544,9 @@ namespace SpreadingDevastation
                 .RequiresPrivilege(Privilege.controlserver)
                 .HandleWith(args => {
                     LoadConfig();
+                    // Broadcast updated fog and music configs to all clients
+                    BroadcastFogConfig();
+                    BroadcastMusicConfig();
                     return TextCommandResult.Success("Configuration reloaded from SpreadingDevastationConfig.json");
                 });
 
@@ -739,6 +746,85 @@ namespace SpreadingDevastation
             musicConfigDirty = true;
         }
 
+        /// <summary>
+        /// Called when a player joins the game. Sends immediate sync of all devastation data
+        /// so they don't have to wait for the periodic sync timer.
+        /// </summary>
+        private void OnPlayerJoin(IServerPlayer player)
+        {
+            if (player?.Entity == null || serverNetworkChannel == null) return;
+
+            // Send fog config immediately
+            var fogPacket = new FogConfigPacket
+            {
+                Enabled = config.FogEffectEnabled,
+                ColorR = config.FogColorR,
+                ColorG = config.FogColorG,
+                ColorB = config.FogColorB,
+                Density = config.FogDensity,
+                Min = config.FogMin,
+                ColorWeight = config.FogColorWeight,
+                DensityWeight = config.FogDensityWeight,
+                MinWeight = config.FogMinWeight,
+                TransitionSpeed = config.FogTransitionSpeed,
+                FlatFogDensity = config.FlatFogDensity,
+                FlatFogDensityWeight = config.FlatFogDensityWeight,
+                FlatFogYOffset = config.FlatFogYOffset,
+                EdgeIntensity = config.FogEdgeIntensity,
+                InteriorIntensity = config.FogInteriorIntensity,
+                DistanceFullIntensity = config.FogDistanceFullIntensity,
+                ApproachDistance = config.FogApproachDistance,
+                InterpolationSpeed = config.FogInterpolationSpeed
+            };
+            serverNetworkChannel.SendPacket(fogPacket, player);
+
+            // Send music config immediately
+            var musicPacket = new MusicConfigPacket
+            {
+                Enabled = config.MusicEnabled,
+                Volume = config.MusicVolume,
+                FadeInSpeed = config.MusicFadeInSpeed,
+                FadeOutSpeed = config.MusicFadeOutSpeed,
+                IntensityThreshold = config.MusicIntensityThreshold,
+                AmbientSuppression = config.AmbientSoundSuppression,
+                SoundFile = config.MusicSoundFile ?? "devastation-ambient",
+                Loop = config.MusicLoop,
+                StabilityOverrideValue = config.StabilityOverrideValue
+            };
+            serverNetworkChannel.SendPacket(musicPacket, player);
+
+            // Send devastated chunks near the player (same logic as periodic sync)
+            var playerPos = player.Entity.Pos;
+            int playerChunkX = (int)playerPos.X / CHUNK_SIZE;
+            int playerChunkZ = (int)playerPos.Z / CHUNK_SIZE;
+            const int SYNC_RADIUS_CHUNKS = 8;
+
+            var chunkPacket = new DevastatedChunkSyncPacket();
+
+            if (devastatedChunks != null && devastatedChunks.Count > 0)
+            {
+                foreach (var kvp in devastatedChunks)
+                {
+                    var chunk = kvp.Value;
+                    int dx = chunk.ChunkX - playerChunkX;
+                    int dz = chunk.ChunkZ - playerChunkZ;
+
+                    if (dx >= -SYNC_RADIUS_CHUNKS && dx <= SYNC_RADIUS_CHUNKS &&
+                        dz >= -SYNC_RADIUS_CHUNKS && dz <= SYNC_RADIUS_CHUNKS)
+                    {
+                        chunkPacket.ChunkXs.Add(chunk.ChunkX);
+                        chunkPacket.ChunkZs.Add(chunk.ChunkZ);
+                        chunkPacket.DevastationLevels.Add((float)Math.Clamp(chunk.DevastationLevel, 0.0, 1.0));
+                    }
+                }
+            }
+
+            // Always send chunk packet (even if empty) so client has accurate state
+            serverNetworkChannel.SendPacket(chunkPacket, player);
+
+            sapi.Logger.VerboseDebug($"SpreadingDevastation: Sent initial sync to player {player.PlayerName} ({chunkPacket.ChunkXs.Count} chunks nearby)");
+        }
+
         private void LoadConfig()
         {
             try
@@ -805,6 +891,11 @@ namespace SpreadingDevastation
                     {
                         devastatedChunks[chunk.ChunkKey] = chunk;
                     }
+
+                    // Defer frontier rebuild until world is actually loaded
+                    // SaveGameLoaded fires before chunks are loaded, so GetBlock() returns null
+                    // The actual rebuild happens in ProcessDevastatedChunks when game ticks start
+                    needsFrontierRebuild = true;
                 }
 
                 // Load rift wards
@@ -852,6 +943,235 @@ namespace SpreadingDevastation
             {
                 sapi.Logger.Error($"SpreadingDevastation: Error saving data: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Reinitializes chunk frontiers after loading from save.
+        /// For each chunk that isn't truly done, finds devastated blocks with convertible neighbors
+        /// and rebuilds the frontier so spreading can resume.
+        /// </summary>
+        private void ReinitializeChunkFrontiersOnLoad()
+        {
+            if (devastatedChunks == null || devastatedChunks.Count == 0) return;
+
+            int rebuiltCount = 0;
+            int trulyDoneCount = 0;
+
+            var offsets = config.DiagonalSpreadingEnabled ? AllNeighborOffsets : CardinalOffsets;
+
+            int skippedNotLoaded = 0;
+
+            foreach (var chunk in devastatedChunks.Values)
+            {
+                // Skip chunks marked unrepairable - they've been abandoned
+                if (chunk.IsUnrepairable) continue;
+
+                // Check if the chunk is actually loaded before scanning
+                // If not loaded, skip it - it will be rebuilt lazily when accessed
+                var worldChunk = sapi.World.BlockAccessor.GetChunk(chunk.ChunkX, 0, chunk.ChunkZ);
+                if (worldChunk == null)
+                {
+                    // Chunk not loaded - mark for lazy rebuild later
+                    chunk.FrontierInitialized = false;
+                    skippedNotLoaded++;
+                    continue;
+                }
+
+                // Rebuild frontier for this loaded chunk
+                chunk.IsFullyDevastated = false;
+                chunk.FrontierInitialized = true;
+                chunk.DevastationFrontier = new List<BlockPos>();
+                chunk.ConsecutiveEmptyFrontierChecks = 0;
+                chunk.RepairAttemptCount = 0;
+
+                // Scan chunk to find devastated blocks that have convertible neighbors
+                int startX = chunk.ChunkX * CHUNK_SIZE;
+                int startZ = chunk.ChunkZ * CHUNK_SIZE;
+                int endX = startX + CHUNK_SIZE;
+                int endZ = startZ + CHUNK_SIZE;
+
+                HashSet<long> addedPositions = new HashSet<long>();
+                bool foundAnyConvertible = false;
+
+                // Scan every 2nd block for efficiency
+                for (int x = startX; x < endX; x += 2)
+                {
+                    for (int z = startZ; z < endZ; z += 2)
+                    {
+                        int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(x, 0, z));
+                        if (surfaceY <= 0) surfaceY = 100;
+
+                        // Wide vertical range
+                        int minY = Math.Max(1, surfaceY - 20);
+                        int maxY = Math.Min(255, surfaceY + 30);
+
+                        for (int y = minY; y <= maxY; y++)
+                        {
+                            BlockPos pos = new BlockPos(x, y, z);
+                            Block block = sapi.World.BlockAccessor.GetBlock(pos);
+
+                            if (block == null || block.Id == 0) continue;
+
+                            // Look for DEVASTATED blocks that have convertible neighbors
+                            if (IsAlreadyDevastated(block))
+                            {
+                                bool hasConvertibleNeighbor = false;
+
+                                foreach (var offset in offsets)
+                                {
+                                    BlockPos neighborPos = new BlockPos(pos.X + offset.X, pos.Y + offset.Y, pos.Z + offset.Z);
+                                    Block neighborBlock = sapi.World.BlockAccessor.GetBlock(neighborPos);
+
+                                    if (neighborBlock != null && neighborBlock.Id != 0 &&
+                                        !IsAlreadyDevastated(neighborBlock) &&
+                                        TryGetDevastatedForm(neighborBlock, out _, out _))
+                                    {
+                                        hasConvertibleNeighbor = true;
+                                        foundAnyConvertible = true;
+                                        break;
+                                    }
+                                }
+
+                                if (hasConvertibleNeighbor)
+                                {
+                                    long posKey = ((long)pos.X << 40) | ((long)pos.Y << 20) | (long)(pos.Z & 0xFFFFF);
+                                    if (!addedPositions.Contains(posKey))
+                                    {
+                                        addedPositions.Add(posKey);
+                                        chunk.DevastationFrontier.Add(pos.Copy());
+                                    }
+                                }
+                            }
+                            // Also check if this block itself is convertible (for chunks with no devastation yet)
+                            else if (!foundAnyConvertible && TryGetDevastatedForm(block, out _, out _))
+                            {
+                                foundAnyConvertible = true;
+                            }
+                        }
+                    }
+                }
+
+                if (chunk.DevastationFrontier.Count > 0)
+                {
+                    rebuiltCount++;
+                    sapi.Logger.VerboseDebug($"SpreadingDevastation: Rebuilt frontier for chunk ({chunk.ChunkX}, {chunk.ChunkZ}) with {chunk.DevastationFrontier.Count} blocks on load");
+                }
+                else if (!foundAnyConvertible)
+                {
+                    // No convertible blocks found anywhere - chunk is truly done
+                    chunk.IsFullyDevastated = true;
+                    trulyDoneCount++;
+                }
+                else
+                {
+                    // Found convertible blocks but no devastated blocks adjacent to them
+                    // This shouldn't happen normally, but leave chunk active for stuck detection
+                    sapi.Logger.Warning($"SpreadingDevastation: Chunk ({chunk.ChunkX}, {chunk.ChunkZ}) has convertible blocks but no adjacent devastation - may need manual fix");
+                }
+            }
+
+            sapi.Logger.Notification($"SpreadingDevastation: On load - rebuilt {rebuiltCount} chunk frontiers, {trulyDoneCount} fully devastated, {skippedNotLoaded} pending (not yet loaded)");
+        }
+
+        /// <summary>
+        /// Lazily rebuilds the frontier for a single chunk that wasn't loaded during initial rebuild.
+        /// Called from ProcessDevastatedChunks when a chunk becomes accessible.
+        /// Returns true if frontier was successfully rebuilt, false if chunk still not loaded.
+        /// </summary>
+        private bool TryRebuildChunkFrontierLazy(DevastatedChunk chunk)
+        {
+            // Check if chunk is loaded
+            var worldChunk = sapi.World.BlockAccessor.GetChunk(chunk.ChunkX, 0, chunk.ChunkZ);
+            if (worldChunk == null)
+            {
+                return false; // Still not loaded
+            }
+
+            var offsets = config.DiagonalSpreadingEnabled ? AllNeighborOffsets : CardinalOffsets;
+
+            // Initialize frontier
+            chunk.IsFullyDevastated = false;
+            chunk.FrontierInitialized = true;
+            chunk.DevastationFrontier = new List<BlockPos>();
+            chunk.ConsecutiveEmptyFrontierChecks = 0;
+            chunk.RepairAttemptCount = 0;
+
+            // Scan chunk to find devastated blocks that have convertible neighbors
+            int startX = chunk.ChunkX * CHUNK_SIZE;
+            int startZ = chunk.ChunkZ * CHUNK_SIZE;
+            int endX = startX + CHUNK_SIZE;
+            int endZ = startZ + CHUNK_SIZE;
+
+            HashSet<long> addedPositions = new HashSet<long>();
+            bool foundAnyConvertible = false;
+
+            // Scan every 2nd block for efficiency
+            for (int x = startX; x < endX; x += 2)
+            {
+                for (int z = startZ; z < endZ; z += 2)
+                {
+                    int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(x, 0, z));
+                    if (surfaceY <= 0) surfaceY = 100;
+
+                    int minY = Math.Max(1, surfaceY - 20);
+                    int maxY = Math.Min(255, surfaceY + 30);
+
+                    for (int y = minY; y <= maxY; y++)
+                    {
+                        BlockPos pos = new BlockPos(x, y, z);
+                        Block block = sapi.World.BlockAccessor.GetBlock(pos);
+
+                        if (block == null || block.Id == 0) continue;
+
+                        if (IsAlreadyDevastated(block))
+                        {
+                            bool hasConvertibleNeighbor = false;
+
+                            foreach (var offset in offsets)
+                            {
+                                BlockPos neighborPos = new BlockPos(pos.X + offset.X, pos.Y + offset.Y, pos.Z + offset.Z);
+                                Block neighborBlock = sapi.World.BlockAccessor.GetBlock(neighborPos);
+
+                                if (neighborBlock != null && neighborBlock.Id != 0 &&
+                                    !IsAlreadyDevastated(neighborBlock) &&
+                                    TryGetDevastatedForm(neighborBlock, out _, out _))
+                                {
+                                    hasConvertibleNeighbor = true;
+                                    foundAnyConvertible = true;
+                                    break;
+                                }
+                            }
+
+                            if (hasConvertibleNeighbor)
+                            {
+                                long posKey = ((long)pos.X << 40) | ((long)pos.Y << 20) | (long)(pos.Z & 0xFFFFF);
+                                if (!addedPositions.Contains(posKey))
+                                {
+                                    addedPositions.Add(posKey);
+                                    chunk.DevastationFrontier.Add(pos.Copy());
+                                }
+                            }
+                        }
+                        // Also check if this block itself is convertible (for chunks with no devastation yet)
+                        else if (!foundAnyConvertible && TryGetDevastatedForm(block, out _, out _))
+                        {
+                            foundAnyConvertible = true;
+                        }
+                    }
+                }
+            }
+
+            if (chunk.DevastationFrontier.Count > 0)
+            {
+                sapi.Logger.Notification($"SpreadingDevastation: Lazy rebuilt frontier for chunk ({chunk.ChunkX}, {chunk.ChunkZ}) with {chunk.DevastationFrontier.Count} blocks");
+            }
+            else if (!foundAnyConvertible)
+            {
+                chunk.IsFullyDevastated = true;
+                sapi.Logger.VerboseDebug($"SpreadingDevastation: Lazy scan confirmed chunk ({chunk.ChunkX}, {chunk.ChunkZ}) is fully devastated");
+            }
+
+            return true;
         }
 
         /// <summary>
@@ -2589,6 +2909,14 @@ namespace SpreadingDevastation
             if (isPaused || sapi == null) return;
             if (devastatedChunks == null || devastatedChunks.Count == 0) return;
 
+            // Deferred frontier rebuild - runs once when world is loaded
+            // This was deferred from OnSaveGameLoading because blocks aren't loaded during SaveGameLoaded event
+            if (needsFrontierRebuild)
+            {
+                needsFrontierRebuild = false;
+                ReinitializeChunkFrontiersOnLoad();
+            }
+
             perfStopwatch.Restart();
 
             try
@@ -2618,6 +2946,17 @@ namespace SpreadingDevastation
                 {
                     // Skip chunks protected by rift wards - no processing needed
                     if (IsChunkProtectedByRiftWard(chunk.ChunkX, chunk.ChunkZ)) continue;
+
+                    // Lazy frontier rebuild for chunks that weren't loaded during initial rebuild
+                    // This handles chunks outside render distance at load time
+                    if (!chunk.FrontierInitialized && !chunk.IsUnrepairable)
+                    {
+                        if (!TryRebuildChunkFrontierLazy(chunk))
+                        {
+                            // Chunk still not loaded - skip processing for now
+                            continue;
+                        }
+                    }
 
                     // Spawn corrupted entities periodically
                     TrySpawnCorruptedEntitiesInChunk(chunk, currentTime);
@@ -4352,18 +4691,32 @@ namespace SpreadingDevastation
                 InitializeChunkFrontier(chunk);
             }
 
-            // If frontier is empty after initialization, check if chunk is actually done
-            // Don't mark as fully devastated unless we've actually devastated a significant number of blocks
+            // If frontier is empty after initialization, verify the chunk is actually done
+            // by scanning for any remaining convertible blocks
             if (chunk.DevastationFrontier.Count == 0)
             {
-                if (chunk.BlocksDevastated >= 1000) // Reasonable minimum for a "fully devastated" chunk
+                // Do a thorough scan to find any remaining convertible blocks
+                if (TryFindRemainingConvertibleBlocks(chunk))
                 {
+                    // Found convertible blocks - frontier was rebuilt, continue processing
+                    if (chunk.DevastationFrontier.Count > 0)
+                    {
+                        // Continue with spreading below
+                    }
+                    else
+                    {
+                        // Couldn't rebuild frontier even though convertible blocks exist
+                        // Let stuck chunk detection handle it
+                        return;
+                    }
+                }
+                else
+                {
+                    // No convertible blocks found - chunk is truly done
                     chunk.IsFullyDevastated = true;
+                    sapi.Logger.VerboseDebug($"SpreadingDevastation: Chunk ({chunk.ChunkX}, {chunk.ChunkZ}) marked fully devastated after verification scan");
                     return;
                 }
-                // Frontier is empty but chunk isn't done - this is a stuck chunk, don't process further this tick
-                // The stuck chunk detection will pick it up and repair it
-                return;
             }
 
             int startX = chunk.ChunkX * CHUNK_SIZE;
@@ -5095,6 +5448,105 @@ namespace SpreadingDevastation
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Scans a chunk thoroughly to find any remaining convertible blocks.
+        /// If found, rebuilds the frontier by finding devastated blocks adjacent to convertible blocks.
+        /// Returns true if any convertible blocks were found, false if chunk is truly done.
+        /// This scan is AGGRESSIVE - it ignores MinYLevel and depth constraints to find ALL convertible blocks.
+        /// </summary>
+        private bool TryFindRemainingConvertibleBlocks(DevastatedChunk chunk)
+        {
+            // Check if chunk is loaded before scanning
+            // If not loaded, return true to prevent incorrectly marking as fully devastated
+            var worldChunk = sapi.World.BlockAccessor.GetChunk(chunk.ChunkX, 0, chunk.ChunkZ);
+            if (worldChunk == null)
+            {
+                sapi.Logger.VerboseDebug($"SpreadingDevastation: Chunk ({chunk.ChunkX}, {chunk.ChunkZ}) not loaded, skipping verification scan");
+                return true; // Assume there could be convertible blocks - don't mark as done
+            }
+
+            int startX = chunk.ChunkX * CHUNK_SIZE;
+            int startZ = chunk.ChunkZ * CHUNK_SIZE;
+            int endX = startX + CHUNK_SIZE;
+            int endZ = startZ + CHUNK_SIZE;
+
+            // Use diagonal spreading offsets if enabled
+            var offsets = config.DiagonalSpreadingEnabled ? AllNeighborOffsets : CardinalOffsets;
+
+            bool foundConvertible = false;
+            int convertibleCount = 0;
+            HashSet<long> addedFrontierPositions = new HashSet<long>();
+
+            // Aggressive scan - check every 2nd block, wide Y range, NO constraints
+            // This matches what /dv chunk analyze does but more thoroughly
+            for (int x = startX; x < endX; x += 2)
+            {
+                for (int z = startZ; z < endZ; z += 2)
+                {
+                    int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(x, 0, z));
+                    if (surfaceY <= 0) surfaceY = 100; // Fallback if terrain height fails
+
+                    // Wide vertical range around surface - NO depth or MinY constraints
+                    // We want to find ANY convertible blocks
+                    int minY = Math.Max(1, surfaceY - 20);
+                    int maxY = Math.Min(255, surfaceY + 30);
+
+                    for (int y = minY; y <= maxY; y++)
+                    {
+                        BlockPos pos = new BlockPos(x, y, z);
+                        Block block = sapi.World.BlockAccessor.GetBlock(pos);
+
+                        if (block == null || block.Id == 0) continue;
+
+                        // Check if this is a convertible (non-devastated) block
+                        if (!IsAlreadyDevastated(block) && TryGetDevastatedForm(block, out _, out _))
+                        {
+                            foundConvertible = true;
+                            convertibleCount++;
+
+                            // Find adjacent devastated blocks to add to frontier
+                            foreach (var offset in offsets)
+                            {
+                                BlockPos neighborPos = new BlockPos(pos.X + offset.X, pos.Y + offset.Y, pos.Z + offset.Z);
+
+                                // Must be within chunk bounds for X/Z
+                                if (neighborPos.X < startX || neighborPos.X >= endX ||
+                                    neighborPos.Z < startZ || neighborPos.Z >= endZ)
+                                    continue;
+
+                                Block neighborBlock = sapi.World.BlockAccessor.GetBlock(neighborPos);
+                                if (neighborBlock != null && IsAlreadyDevastated(neighborBlock))
+                                {
+                                    // This devastated block is adjacent to a convertible block - add to frontier
+                                    long posKey = ((long)neighborPos.X << 40) | ((long)neighborPos.Y << 20) | (long)(neighborPos.Z & 0xFFFFF);
+                                    if (!addedFrontierPositions.Contains(posKey))
+                                    {
+                                        addedFrontierPositions.Add(posKey);
+                                        chunk.DevastationFrontier.Add(neighborPos.Copy());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (foundConvertible && chunk.DevastationFrontier.Count > 0)
+            {
+                sapi.Logger.Notification($"SpreadingDevastation: Rebuilt frontier for chunk ({chunk.ChunkX}, {chunk.ChunkZ}) with {chunk.DevastationFrontier.Count} blocks (found {convertibleCount} convertible)");
+            }
+            else if (foundConvertible)
+            {
+                sapi.Logger.Warning($"SpreadingDevastation: Found {convertibleCount} convertible blocks in chunk ({chunk.ChunkX}, {chunk.ChunkZ}) but couldn't find adjacent devastated blocks for frontier");
+            }
+            else
+            {
+                sapi.Logger.VerboseDebug($"SpreadingDevastation: Thorough scan of chunk ({chunk.ChunkX}, {chunk.ChunkZ}) found no convertible blocks - truly done");
+            }
+
+            return foundConvertible;
         }
 
         /// <summary>
