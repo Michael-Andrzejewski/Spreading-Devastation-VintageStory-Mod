@@ -198,6 +198,16 @@ namespace SpreadingDevastation
         [ProtoMember(11)]
         public bool RasterScanComplete = false; // Whether a full sphere scan has been completed
 
+        // Activation wave effect tracking
+        [ProtoMember(12)]
+        public bool ActivationWaveInProgress = false; // Whether the activation wave effect is currently playing
+
+        [ProtoMember(13)]
+        public int ActivationWaveRadius = 0; // Current radius of the expanding activation wave
+
+        [ProtoMember(14)]
+        public double LastActivationWaveTime = 0; // Game time when last wave was spawned
+
         // Cached active state (not serialized - recalculated on load)
         [ProtoIgnore]
         public bool CachedIsActive = false;
@@ -207,31 +217,32 @@ namespace SpreadingDevastation
 
         /// <summary>
         /// Checks if a position is within the protection radius of this rift ward.
+        /// Uses horizontal (2D) distance only - protection is a circle, not a sphere.
         /// </summary>
         public bool IsPositionProtected(BlockPos targetPos, int protectionRadius)
         {
             if (Pos == null || targetPos == null) return false;
 
-            // Use squared distance for efficiency (avoid sqrt)
+            // Use squared horizontal distance for efficiency (avoid sqrt)
+            // Protection is a 2D circle, not a 3D sphere
             int dx = targetPos.X - Pos.X;
-            int dy = targetPos.Y - Pos.Y;
             int dz = targetPos.Z - Pos.Z;
-            int distanceSquared = dx * dx + dy * dy + dz * dz;
+            int distanceSquared = dx * dx + dz * dz;
 
             return distanceSquared <= protectionRadius * protectionRadius;
         }
 
         /// <summary>
-        /// Gets the squared distance from this rift ward to a position.
+        /// Gets the squared horizontal distance from this rift ward to a position.
+        /// Uses 2D distance (X and Z only, ignoring Y).
         /// </summary>
         public int GetDistanceSquared(BlockPos targetPos)
         {
             if (Pos == null || targetPos == null) return int.MaxValue;
 
             int dx = targetPos.X - Pos.X;
-            int dy = targetPos.Y - Pos.Y;
             int dz = targetPos.Z - Pos.Z;
-            return dx * dx + dy * dy + dz * dz;
+            return dx * dx + dz * dz;
         }
     }
 

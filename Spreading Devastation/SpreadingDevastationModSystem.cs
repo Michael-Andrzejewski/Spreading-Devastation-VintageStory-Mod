@@ -50,7 +50,8 @@ namespace SpreadingDevastation
         // Rift Ward tracking
         private List<RiftWard> activeRiftWards = new List<RiftWard>();
         private double lastRiftWardScanTime = 0; // Track last scan for new rift wards
-        private HashSet<long> protectedChunkKeys = new HashSet<long>(); // Cache of chunk keys protected by rift wards
+        private HashSet<long> protectedChunkKeys = new HashSet<long>(); // Cache of chunk keys that touch rift ward protection radius (includes part-protected)
+        private HashSet<long> fullyProtectedChunkKeys = new HashSet<long>(); // Cache of chunk keys entirely within rift ward protection radius
         private bool initialRiftWardScanCompleted = false; // Whether initial world scan for rift wards has completed
         private double lastFullRiftWardScanTime = 0; // Track last full world scan for rift wards
 
@@ -3011,7 +3012,8 @@ namespace SpreadingDevastation
         }
 
         /// <summary>
-        /// Emits devastation particles from chunk border blocks where devastated chunks meet protected chunks.
+        /// Emits blue particles along the circular edge of rift ward protection radii.
+        /// Particles spawn at surface blocks on the circular boundary in part-protected chunks.
         /// Called from the main tick loop.
         /// </summary>
         private void ProcessChunkBorderParticles(double currentTime)
@@ -3019,8 +3021,7 @@ namespace SpreadingDevastation
             try
             {
                 if (sapi == null || config == null || !config.ChunkBorderParticlesEnabled) return;
-                if (devastatedChunks == null || devastatedChunks.Count == 0) return;
-                if (protectedChunkKeys == null || protectedChunkKeys.Count == 0) return;
+                if (activeRiftWards == null || activeRiftWards.Count == 0) return;
 
                 // Check interval
                 double intervalHours = config.ChunkBorderParticleIntervalSeconds / 3600.0;
@@ -3029,59 +3030,38 @@ namespace SpreadingDevastation
 
                 int particleCount = 0;
                 var random = sapi.World.Rand;
+                int maxParticles = config.MaxChunkBorderParticlesPerTick;
 
-                // Iterate through devastated chunks looking for those bordering protected chunks
-                foreach (var chunk in devastatedChunks.Values)
+                // Process each active rift ward
+                foreach (var ward in activeRiftWards)
                 {
-                    if (particleCount >= config.MaxChunkBorderParticlesPerTick) break;
+                    if (particleCount >= maxParticles) break;
+                    if (ward.Pos == null || !ward.CachedIsActive) continue;
 
-                    // Skip chunks that are themselves protected
-                    if (IsChunkProtectedByRiftWard(chunk.ChunkX, chunk.ChunkZ)) continue;
+                    int radius = config.RiftWardProtectionRadius;
 
-                    // Check each cardinal direction for protected neighbors
-                    int[] dxArr = { -1, 1, 0, 0 };
-                    int[] dzArr = { 0, 0, -1, 1 };
+                    // Sample points along the circular edge of the protection radius
+                    // Distribute particles evenly across all active wards
+                    int particlesPerWard = Math.Max(1, maxParticles / activeRiftWards.Count);
 
-                    for (int dir = 0; dir < 4; dir++)
+                    for (int i = 0; i < particlesPerWard && particleCount < maxParticles; i++)
                     {
-                        if (particleCount >= config.MaxChunkBorderParticlesPerTick) break;
+                        // Generate a random angle for a point on the circle edge
+                        double angle = random.NextDouble() * 2 * Math.PI;
 
-                        int neighborChunkX = chunk.ChunkX + dxArr[dir];
-                        int neighborChunkZ = chunk.ChunkZ + dzArr[dir];
+                        // Calculate the position at exactly the protection radius
+                        int edgeX = ward.Pos.X + (int)(radius * Math.Cos(angle));
+                        int edgeZ = ward.Pos.Z + (int)(radius * Math.Sin(angle));
 
-                        // Check if the neighboring chunk is protected
-                        if (!IsChunkProtectedByRiftWard(neighborChunkX, neighborChunkZ)) continue;
+                        // Check if this position is in a part-protected chunk (not fully protected)
+                        int chunkX = edgeX / CHUNK_SIZE;
+                        int chunkZ = edgeZ / CHUNK_SIZE;
 
-                        // This chunk borders a protected chunk in this direction
-                        // Find the edge blocks on this side and spawn particles
+                        // Only spawn particles in chunks that are part-protected
+                        // (chunks that overlap the radius but aren't fully inside it)
+                        if (!IsChunkPartProtectedByRiftWard(chunkX, chunkZ)) continue;
 
-                        // Calculate world coordinates for the edge
-                        int worldBaseX = chunk.ChunkX * CHUNK_SIZE;
-                        int worldBaseZ = chunk.ChunkZ * CHUNK_SIZE;
-
-                        // Determine the edge position based on direction
-                        // dir 0: -X (west edge, x=0 in chunk)
-                        // dir 1: +X (east edge, x=31 in chunk)
-                        // dir 2: -Z (north edge, z=0 in chunk)
-                        // dir 3: +Z (south edge, z=31 in chunk)
-
-                        int edgeX, edgeZ;
-                        bool isXEdge = (dir == 0 || dir == 1);
-
-                        if (isXEdge)
-                        {
-                            // X edge - pick random Z position along the edge
-                            edgeX = worldBaseX + (dir == 0 ? 0 : CHUNK_SIZE - 1);
-                            edgeZ = worldBaseZ + random.Next(CHUNK_SIZE);
-                        }
-                        else
-                        {
-                            // Z edge - pick random X position along the edge
-                            edgeX = worldBaseX + random.Next(CHUNK_SIZE);
-                            edgeZ = worldBaseZ + (dir == 2 ? 0 : CHUNK_SIZE - 1);
-                        }
-
-                        // Find a suitable Y position (surface block with air above)
+                        // Find the surface Y at this position
                         int surfaceY = FindSurfaceY(edgeX, edgeZ);
                         if (surfaceY < 0) continue;
 
@@ -3090,7 +3070,7 @@ namespace SpreadingDevastation
                         // Check if the block has air above
                         if (!HasAirAbove(edgePos)) continue;
 
-                        // Spawn devastation-style particles at this edge block
+                        // Spawn blue particles at the circular edge
                         SpawnChunkBorderParticles(edgePos);
                         particleCount++;
                     }
@@ -6136,6 +6116,106 @@ namespace SpreadingDevastation
             {
                 ProcessRiftWardHealing(dt);
             }
+
+            // Process activation wave particle effects
+            ProcessRiftWardActivationWaves(currentTime);
+        }
+
+        /// <summary>
+        /// Maximum particles to spawn per activation wave tick (150 as per user request).
+        /// </summary>
+        private const int MAX_ACTIVATION_WAVE_PARTICLES_PER_TICK = 150;
+
+        /// <summary>
+        /// Processes activation wave particle effects for rift wards that just became active.
+        /// Spawns blue particles from surface blocks in an expanding sphere.
+        /// Called every 500ms (matching ProcessRiftWards tick interval).
+        /// </summary>
+        private void ProcessRiftWardActivationWaves(double currentTime)
+        {
+            if (activeRiftWards == null || activeRiftWards.Count == 0) return;
+
+            int maxRadius = config.RiftWardProtectionRadius;
+            double waveIntervalHours = 0.5 / 3600.0; // 0.5 seconds in game hours
+
+            foreach (var ward in activeRiftWards)
+            {
+                if (!ward.ActivationWaveInProgress) continue;
+                if (ward.Pos == null) continue;
+
+                // Check if enough time has passed for the next wave (0.5 seconds)
+                if (currentTime - ward.LastActivationWaveTime < waveIntervalHours) continue;
+
+                ward.LastActivationWaveTime = currentTime;
+                ward.ActivationWaveRadius++;
+
+                // Check if wave is complete
+                if (ward.ActivationWaveRadius > maxRadius)
+                {
+                    ward.ActivationWaveInProgress = false;
+                    ward.ActivationWaveRadius = 0;
+                    continue;
+                }
+
+                // Spawn particles at the current wave radius (surface blocks only in a sphere shell)
+                SpawnActivationWaveParticles(ward, ward.ActivationWaveRadius);
+            }
+        }
+
+        /// <summary>
+        /// Spawns blue particles at surface blocks on a sphere shell at the given radius from the rift ward.
+        /// Only spawns on surface blocks (blocks with air above) for visual effect.
+        /// </summary>
+        private void SpawnActivationWaveParticles(RiftWard ward, int radius)
+        {
+            if (sapi == null || ward?.Pos == null) return;
+
+            int particlesSpawned = 0;
+            var random = sapi.World.Rand;
+
+            // For small radii, we can check every position on the sphere shell
+            // For larger radii, we sample positions to stay within particle limits
+            int circumference = (int)(2 * Math.PI * radius);
+            int maxPointsToCheck = Math.Max(circumference * 2, 50);
+
+            // Calculate how many points we need to sample from the sphere shell
+            // We want to spawn up to MAX_ACTIVATION_WAVE_PARTICLES_PER_TICK particles
+            // but only on surface blocks, so we need to check more points
+            int pointsToSample = Math.Min(maxPointsToCheck, MAX_ACTIVATION_WAVE_PARTICLES_PER_TICK * 3);
+
+            for (int i = 0; i < pointsToSample && particlesSpawned < MAX_ACTIVATION_WAVE_PARTICLES_PER_TICK; i++)
+            {
+                // Generate a random point on the sphere shell using uniform distribution
+                double theta = random.NextDouble() * 2 * Math.PI; // Azimuthal angle (0 to 2π)
+                double phi = Math.Acos(2 * random.NextDouble() - 1); // Polar angle (0 to π)
+
+                int dx = (int)(radius * Math.Sin(phi) * Math.Cos(theta));
+                int dy = (int)(radius * Math.Cos(phi));
+                int dz = (int)(radius * Math.Sin(phi) * Math.Sin(theta));
+
+                int worldX = ward.Pos.X + dx;
+                int worldZ = ward.Pos.Z + dz;
+
+                // Find the surface Y at this X,Z position
+                int surfaceY = FindSurfaceY(worldX, worldZ);
+                if (surfaceY < 0) continue;
+
+                // Check if this surface position is approximately at the right radius
+                // (within ±2 blocks of the target radius to account for terrain variation)
+                int actualDy = surfaceY - ward.Pos.Y;
+                double actualDistance = Math.Sqrt(dx * dx + actualDy * actualDy + dz * dz);
+                if (Math.Abs(actualDistance - radius) > 2) continue;
+
+                BlockPos particlePos = new BlockPos(worldX, surfaceY, worldZ);
+
+                // Check if block has air above (surface block)
+                if (!HasAirAbove(particlePos)) continue;
+
+                // Spawn healing (blue) particles at this position
+                var particles = CreateHealingParticles(particlePos);
+                sapi.World.SpawnParticles(particles);
+                particlesSpawned++;
+            }
         }
 
         /// <summary>
@@ -6194,6 +6274,11 @@ namespace SpreadingDevastation
                     {
                         BroadcastMessage($"Rift ward restored temporal stability to {clearedChunks} chunk(s)!");
                     }
+
+                    // Start the activation wave particle effect
+                    ward.ActivationWaveInProgress = true;
+                    ward.ActivationWaveRadius = 0;
+                    ward.LastActivationWaveTime = sapi.World.Calendar.TotalHours;
 
                     anyBecameActive = true;
                 }
@@ -6874,18 +6959,23 @@ namespace SpreadingDevastation
 
         /// <summary>
         /// Rebuilds the cache of chunk keys that are protected by rift wards.
+        /// Uses horizontal (2D) distance for protection radius.
+        /// - protectedChunkKeys: All chunks that touch the protection radius (includes partially protected)
+        /// - fullyProtectedChunkKeys: Chunks entirely within the protection radius
         /// </summary>
         private void RebuildProtectedChunkCache()
         {
             protectedChunkKeys.Clear();
+            fullyProtectedChunkKeys.Clear();
 
             foreach (var ward in activeRiftWards)
             {
                 if (ward.Pos == null) continue;
 
                 int radius = config.RiftWardProtectionRadius;
+                int radiusSquared = radius * radius;
 
-                // Calculate which chunks are covered by this rift ward
+                // Calculate which chunks could be covered by this rift ward
                 int minChunkX = (ward.Pos.X - radius) / CHUNK_SIZE;
                 int maxChunkX = (ward.Pos.X + radius) / CHUNK_SIZE;
                 int minChunkZ = (ward.Pos.Z - radius) / CHUNK_SIZE;
@@ -6895,7 +6985,48 @@ namespace SpreadingDevastation
                 {
                     for (int cz = minChunkZ; cz <= maxChunkZ; cz++)
                     {
-                        protectedChunkKeys.Add(DevastatedChunk.MakeChunkKey(cx, cz));
+                        // Calculate chunk world bounds
+                        int chunkMinX = cx * CHUNK_SIZE;
+                        int chunkMaxX = chunkMinX + CHUNK_SIZE - 1;
+                        int chunkMinZ = cz * CHUNK_SIZE;
+                        int chunkMaxZ = chunkMinZ + CHUNK_SIZE - 1;
+
+                        // Check if any part of the chunk is within the protection radius
+                        // Use the closest point on the chunk to the ward for this check
+                        int closestX = Math.Max(chunkMinX, Math.Min(ward.Pos.X, chunkMaxX));
+                        int closestZ = Math.Max(chunkMinZ, Math.Min(ward.Pos.Z, chunkMaxZ));
+                        int dxClosest = closestX - ward.Pos.X;
+                        int dzClosest = closestZ - ward.Pos.Z;
+                        int closestDistSquared = dxClosest * dxClosest + dzClosest * dzClosest;
+
+                        if (closestDistSquared <= radiusSquared)
+                        {
+                            // At least part of the chunk is within the radius
+                            protectedChunkKeys.Add(DevastatedChunk.MakeChunkKey(cx, cz));
+
+                            // Check if the ENTIRE chunk is within the protection radius
+                            // by checking all four corners (using 2D horizontal distance)
+                            int[] cornerXs = { chunkMinX, chunkMaxX, chunkMinX, chunkMaxX };
+                            int[] cornerZs = { chunkMinZ, chunkMinZ, chunkMaxZ, chunkMaxZ };
+                            bool allCornersProtected = true;
+
+                            for (int i = 0; i < 4; i++)
+                            {
+                                int dx = cornerXs[i] - ward.Pos.X;
+                                int dz = cornerZs[i] - ward.Pos.Z;
+                                int distSquared = dx * dx + dz * dz;
+                                if (distSquared > radiusSquared)
+                                {
+                                    allCornersProtected = false;
+                                    break;
+                                }
+                            }
+
+                            if (allCornersProtected)
+                            {
+                                fullyProtectedChunkKeys.Add(DevastatedChunk.MakeChunkKey(cx, cz));
+                            }
+                        }
                     }
                 }
             }
@@ -6903,6 +7034,7 @@ namespace SpreadingDevastation
 
         /// <summary>
         /// Removes all devastation sources within a rift ward's protection radius.
+        /// Uses horizontal (2D) distance - protection is a circle, not a sphere.
         /// This prevents temporal instability and mob spawning in protected areas.
         /// </summary>
         private int RemoveSourcesInRiftWardRadius(RiftWard ward)
@@ -6916,10 +7048,10 @@ namespace SpreadingDevastation
             {
                 if (source.Pos == null) return false;
 
+                // Use horizontal distance only (X and Z, ignoring Y)
                 int dx = source.Pos.X - ward.Pos.X;
-                int dy = source.Pos.Y - ward.Pos.Y;
                 int dz = source.Pos.Z - ward.Pos.Z;
-                int distanceSquared = dx * dx + dy * dy + dz * dz;
+                int distanceSquared = dx * dx + dz * dz;
 
                 return distanceSquared <= radiusSquared;
             });
@@ -6934,6 +7066,7 @@ namespace SpreadingDevastation
 
         /// <summary>
         /// Removes devastation sources within all active rift ward protection radii.
+        /// Uses horizontal (2D) distance - protection is a circle, not a sphere.
         /// Called periodically to catch newly spawned sources (e.g., from rifts).
         /// Optimized to use a single pass through sources instead of per-ward RemoveAll calls.
         /// </summary>
@@ -6962,10 +7095,10 @@ namespace SpreadingDevastation
 
                 foreach (var ward in activeWards)
                 {
+                    // Use horizontal distance only (X and Z, ignoring Y)
                     int dx = source.Pos.X - ward.Pos.X;
-                    int dy = source.Pos.Y - ward.Pos.Y;
                     int dz = source.Pos.Z - ward.Pos.Z;
-                    int distanceSquared = dx * dx + dy * dy + dz * dz;
+                    int distanceSquared = dx * dx + dz * dz;
 
                     if (distanceSquared <= radiusSquared)
                     {
@@ -7296,6 +7429,7 @@ namespace SpreadingDevastation
 
         /// <summary>
         /// Checks if a block position is protected by any active rift ward.
+        /// Uses horizontal (2D) distance only - protection is a circle, not a sphere.
         /// </summary>
         private bool IsBlockProtectedByRiftWard(BlockPos pos)
         {
@@ -7308,17 +7442,17 @@ namespace SpreadingDevastation
 
             if (!protectedChunkKeys.Contains(chunkKey)) return false;
 
-            // Detailed per-ward check
+            // Detailed per-ward check using horizontal (2D) distance
             int radiusSquared = config.RiftWardProtectionRadius * config.RiftWardProtectionRadius;
 
             foreach (var ward in activeRiftWards)
             {
                 if (ward.Pos == null) continue;
 
+                // Use horizontal distance only (X and Z, ignoring Y)
                 int dx = pos.X - ward.Pos.X;
-                int dy = pos.Y - ward.Pos.Y;
                 int dz = pos.Z - ward.Pos.Z;
-                int distanceSquared = dx * dx + dy * dy + dz * dz;
+                int distanceSquared = dx * dx + dz * dz;
 
                 if (distanceSquared <= radiusSquared)
                 {
@@ -7330,10 +7464,31 @@ namespace SpreadingDevastation
         }
 
         /// <summary>
-        /// Checks if a chunk is protected by any active rift ward.
-        /// This is a quick check that only looks at chunk-level protection.
+        /// Checks if a chunk is FULLY protected by any active rift ward.
+        /// Fully protected chunks are entirely within the protection radius and no devastation can occur.
         /// </summary>
         private bool IsChunkProtectedByRiftWard(int chunkX, int chunkZ)
+        {
+            long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
+            return fullyProtectedChunkKeys.Contains(chunkKey);
+        }
+
+        /// <summary>
+        /// Checks if a chunk is PARTIALLY protected by any active rift ward.
+        /// Part-protected chunks overlap with the protection radius but are not entirely within it.
+        /// Devastation can occur in the parts outside the radius.
+        /// </summary>
+        private bool IsChunkPartProtectedByRiftWard(int chunkX, int chunkZ)
+        {
+            long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
+            return protectedChunkKeys.Contains(chunkKey) && !fullyProtectedChunkKeys.Contains(chunkKey);
+        }
+
+        /// <summary>
+        /// Checks if a chunk has ANY protection from a rift ward (fully or partially).
+        /// Used for quick lookups before doing detailed block-level checks.
+        /// </summary>
+        private bool IsChunkAnyProtectedByRiftWard(int chunkX, int chunkZ)
         {
             long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
             return protectedChunkKeys.Contains(chunkKey);
@@ -7381,6 +7536,7 @@ namespace SpreadingDevastation
 
         /// <summary>
         /// Checks if a block position has been cleansed by a rift ward's expanding shell.
+        /// Uses horizontal (2D) distance - protection is a circle, not a sphere.
         /// In raster mode, this respects the current shell radius.
         /// Used for determining if mob spawning and other effects should be blocked.
         /// </summary>
@@ -7394,10 +7550,10 @@ namespace SpreadingDevastation
             {
                 if (ward.Pos == null || !ward.CachedIsActive) continue;
 
+                // Use horizontal distance only (X and Z, ignoring Y)
                 int dx = pos.X - ward.Pos.X;
-                int dy = pos.Y - ward.Pos.Y;
                 int dz = pos.Z - ward.Pos.Z;
-                int distanceSquared = dx * dx + dy * dy + dz * dz;
+                int distanceSquared = dx * dx + dz * dz;
 
                 // Determine the effective cleansed radius for this ward
                 int cleansedRadius;
