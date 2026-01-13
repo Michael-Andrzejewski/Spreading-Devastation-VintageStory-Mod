@@ -276,10 +276,11 @@ namespace SpreadingDevastation
         public bool RiftWardHealingEnabled { get; set; } = true;
 
         /// <summary>
-        /// Interval in seconds between rift ward scans for new/removed rift wards (default: 30.0).
-        /// Lower values detect rift wards faster but use more CPU.
+        /// Interval in seconds between rift ward fuel state checks (default: 120.0).
+        /// This only needs to check if rift wards have run out of fuel.
+        /// Placement and removal are detected via events, so this can be infrequent.
         /// </summary>
-        public double RiftWardScanIntervalSeconds { get; set; } = 30.0;
+        public double RiftWardScanIntervalSeconds { get; set; } = 120.0;
 
         /// <summary>
         /// Rift ward cleaning mode: "raster", "radial", or "random" (default: "raster").
@@ -573,10 +574,11 @@ namespace SpreadingDevastation
         public bool WeatherEffectsEnabled { get; set; } = true;
 
         /// <summary>
-        /// Interval in seconds between weather updates (default: 30.0).
+        /// Interval in seconds between weather updates (default: 25.0).
         /// Lower values respond faster to devastation changes but may cause more frequent weather transitions.
+        /// Staggered from rift ward scans to avoid simultaneous processing.
         /// </summary>
-        public double WeatherUpdateIntervalSeconds { get; set; } = 30.0;
+        public double WeatherUpdateIntervalSeconds { get; set; } = 25.0;
 
         /// <summary>
         /// Minimum devastation intensity (0.0-1.0) to trigger any weather effects (default: 0.15).

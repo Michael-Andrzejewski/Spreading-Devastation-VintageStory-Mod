@@ -107,6 +107,8 @@ namespace SpreadingDevastation
         private double lastWeatherUpdateTime = 0;
         private Dictionary<long, (float intensity, string pattern, string weatherEvent, string windPattern)> activeWeatherRegions
             = new Dictionary<long, (float, string, string, string)>();
+        private Dictionary<long, float> cachedRegionIntensities = null; // Cached region intensities to avoid recalculating every tick
+        private bool regionIntensitiesDirty = true; // Flag to indicate region intensities need recalculation
 
         // Edge spawning tracking (per-player: last time they saw devastation, last check time)
         private Dictionary<string, (long lastDevastationSeenMs, long lastCheckMs)> playerEdgeSpawnTracking
@@ -2140,11 +2142,14 @@ namespace SpreadingDevastation
         /// </summary>
         private bool IsValidMetastasisPosition(BlockPos pos)
         {
+            // Check if protected by rift ward first (cheap check using cached chunk keys)
+            if (IsBlockProtectedByRiftWard(pos)) return false;
+
             Block block = sapi.World.BlockAccessor.GetBlock(pos);
-            
+
             // Must be a solid block (not air, not water, etc.)
             if (block == null || block.Id == 0) return false;
-            
+
             // Can be any solid block - we're not restricting what gets devastated
             // Just checking that there's something there to spread from
             return true;
@@ -2286,13 +2291,16 @@ namespace SpreadingDevastation
                     
                     // Check min Y level
                     if (candidatePos.Y < config.MinYLevel) continue;
-                    
+
+                    // Check if protected by rift ward
+                    if (IsBlockProtectedByRiftWard(candidatePos)) continue;
+
                     // Check air contact requirement
                     if (config.RequireSourceAirContact && !IsAdjacentToAir(candidatePos)) continue;
-                    
+
                     // Check if there's viable land here (need more blocks for long-range to be worth it)
                     int nonDevastatedNearby = CountNonDevastatedNearby(candidatePos, 6);
-                    
+
                     if (nonDevastatedNearby > 10) // Higher threshold for long-range jumps
                     {
                         candidates.Add(candidatePos);
@@ -3768,9 +3776,16 @@ namespace SpreadingDevastation
 
         /// <summary>
         /// Calculates devastation intensity for each weather region based on devastated chunks within it.
+        /// Uses caching to avoid recalculating on every weather update - only recalculates when chunks change.
         /// </summary>
         private Dictionary<long, float> CalculateRegionIntensities()
         {
+            // Return cached results if available and not dirty
+            if (!regionIntensitiesDirty && cachedRegionIntensities != null)
+            {
+                return cachedRegionIntensities;
+            }
+
             var result = new Dictionary<long, float>();
 
             if (weatherSystem == null) return result;
@@ -3812,6 +3827,10 @@ namespace SpreadingDevastation
                 float intensity = avgLevel * Math.Min(coverage * 2f, 1f);
                 result[regionKey] = intensity;
             }
+
+            // Cache the results and clear the dirty flag
+            cachedRegionIntensities = result;
+            regionIntensitiesDirty = false;
 
             return result;
         }
@@ -4185,6 +4204,7 @@ namespace SpreadingDevastation
                 };
 
                 devastatedChunks[chunkKey] = newChunk;
+                regionIntensitiesDirty = true; // Mark weather cache as dirty
 
                 // Frontier will be initialized automatically in ProcessDevastatedChunks
                 return true;
@@ -4417,6 +4437,7 @@ namespace SpreadingDevastation
                         };
 
                         devastatedChunks[chunkKey] = newChunk;
+                        regionIntensitiesDirty = true; // Mark weather cache as dirty
                         sapi.Logger.VerboseDebug($"SpreadingDevastation: Temporal storm created new devastated chunk at ({chunkX}, {chunkZ})");
                     }
 
@@ -4579,6 +4600,7 @@ namespace SpreadingDevastation
                 devastatedChunks[newChunk.ChunkKey] = newChunk;
                 sapi.Logger.VerboseDebug($"SpreadingDevastation: Chunk ({newChunk.ChunkX}, {newChunk.ChunkZ}) became devastated from spread");
             }
+            if (chunksToAdd.Count > 0) regionIntensitiesDirty = true; // Mark weather cache as dirty
         }
 
         /// <summary>
@@ -6476,6 +6498,7 @@ namespace SpreadingDevastation
             {
                 devastatedChunks.Remove(chunkKey);
             }
+            if (chunksToRemove.Count > 0) regionIntensitiesDirty = true; // Mark weather cache as dirty
         }
 
         /// <summary>
@@ -6929,21 +6952,52 @@ namespace SpreadingDevastation
         /// <summary>
         /// Removes devastation sources within all active rift ward protection radii.
         /// Called periodically to catch newly spawned sources (e.g., from rifts).
+        /// Optimized to use a single pass through sources instead of per-ward RemoveAll calls.
         /// </summary>
         private int RemoveSourcesInAllRiftWardRadii()
         {
             if (activeRiftWards == null || activeRiftWards.Count == 0)
                 return 0;
+            if (devastationSources == null || devastationSources.Count == 0)
+                return 0;
 
-            int totalRemoved = 0;
+            // Collect active wards with valid positions
+            var activeWards = new List<RiftWard>();
             foreach (var ward in activeRiftWards)
             {
-                if (ward.CachedIsActive)
-                {
-                    totalRemoved += RemoveSourcesInRiftWardRadius(ward);
-                }
+                if (ward.CachedIsActive && ward.Pos != null)
+                    activeWards.Add(ward);
             }
-            return totalRemoved;
+            if (activeWards.Count == 0) return 0;
+
+            int radiusSquared = config.RiftWardProtectionRadius * config.RiftWardProtectionRadius;
+
+            // Single pass: remove sources that are within ANY active ward's radius
+            int removed = devastationSources.RemoveAll(source =>
+            {
+                if (source.Pos == null) return false;
+
+                foreach (var ward in activeWards)
+                {
+                    int dx = source.Pos.X - ward.Pos.X;
+                    int dy = source.Pos.Y - ward.Pos.Y;
+                    int dz = source.Pos.Z - ward.Pos.Z;
+                    int distanceSquared = dx * dx + dy * dy + dz * dz;
+
+                    if (distanceSquared <= radiusSquared)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            });
+
+            if (removed > 0)
+            {
+                sapi.Logger.Notification($"SpreadingDevastation: Rift wards removed {removed} devastation source(s)");
+            }
+
+            return removed;
         }
 
         /// <summary>
@@ -7172,6 +7226,7 @@ namespace SpreadingDevastation
 
             if (chunksToRemove.Count > 0)
             {
+                regionIntensitiesDirty = true; // Mark weather cache as dirty
                 sapi.Logger.Notification($"SpreadingDevastation: Rift ward at {ward.Pos} cleared {chunksToRemove.Count} devastated chunk(s) - temporal stability restored");
             }
 
@@ -7181,21 +7236,81 @@ namespace SpreadingDevastation
         /// <summary>
         /// Removes devastated chunks within all active rift ward protection radii.
         /// Called periodically to maintain temporal stability in protected areas.
+        /// Optimized to use a single pass through chunks instead of per-ward iteration.
         /// </summary>
         private int RemoveDevastatedChunksInAllRiftWardRadii()
         {
             if (activeRiftWards == null || activeRiftWards.Count == 0)
                 return 0;
+            if (devastatedChunks == null || devastatedChunks.Count == 0)
+                return 0;
 
-            int totalRemoved = 0;
+            // Collect active wards with valid positions and their effective radii
+            var activeWardsWithRadii = new List<(RiftWard ward, int radiusSquared)>();
+            string mode = GetEffectiveCleanMode();
+
             foreach (var ward in activeRiftWards)
             {
-                if (ward.CachedIsActive)
+                if (!ward.CachedIsActive || ward.Pos == null) continue;
+
+                int radius;
+                if (mode == "raster")
                 {
-                    totalRemoved += RemoveDevastatedChunksInRiftWardRadius(ward);
+                    radius = ward.RasterScanComplete ? config.RiftWardProtectionRadius : ward.CurrentCleanRadius;
+                }
+                else if (mode == "radial")
+                {
+                    radius = ward.MaxCleanRadiusReached;
+                }
+                else
+                {
+                    radius = config.RiftWardProtectionRadius;
+                }
+
+                if (radius < 1) continue;
+                activeWardsWithRadii.Add((ward, radius * radius));
+            }
+
+            if (activeWardsWithRadii.Count == 0) return 0;
+
+            // Single pass: find chunks that are within ANY active ward's radius
+            var chunksToRemove = new List<long>();
+
+            foreach (var kvp in devastatedChunks)
+            {
+                long chunkKey = kvp.Key;
+                var chunk = kvp.Value;
+
+                int chunkCenterX = chunk.ChunkX * CHUNK_SIZE + CHUNK_SIZE / 2;
+                int chunkCenterZ = chunk.ChunkZ * CHUNK_SIZE + CHUNK_SIZE / 2;
+
+                foreach (var (ward, radiusSquared) in activeWardsWithRadii)
+                {
+                    int dx = chunkCenterX - ward.Pos.X;
+                    int dz = chunkCenterZ - ward.Pos.Z;
+                    int distanceSquared = dx * dx + dz * dz;
+
+                    if (distanceSquared <= radiusSquared)
+                    {
+                        chunksToRemove.Add(chunkKey);
+                        break; // No need to check other wards
+                    }
                 }
             }
-            return totalRemoved;
+
+            // Remove the chunks
+            foreach (long chunkKey in chunksToRemove)
+            {
+                devastatedChunks.Remove(chunkKey);
+            }
+
+            if (chunksToRemove.Count > 0)
+            {
+                regionIntensitiesDirty = true; // Mark weather cache as dirty
+                sapi.Logger.Notification($"SpreadingDevastation: Rift wards cleared {chunksToRemove.Count} devastated chunk(s) - temporal stability restored");
+            }
+
+            return chunksToRemove.Count;
         }
 
         /// <summary>
