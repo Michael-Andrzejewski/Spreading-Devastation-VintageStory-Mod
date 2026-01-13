@@ -7,22 +7,6 @@ using Vintagestory.API.Server;
 namespace SpreadingDevastation
 {
     /// <summary>
-    /// Tracks a devastated block that will eventually regenerate back to its original form.
-    /// </summary>
-    [ProtoContract]
-    public class RegrowingBlocks
-    {
-        [ProtoMember(1)]
-        public BlockPos Pos;
-
-        [ProtoMember(2)]
-        public string Out;
-
-        [ProtoMember(3)]
-        public double LastTime;
-    }
-
-    /// <summary>
     /// Represents a point source of devastation or healing that spreads outward.
     /// </summary>
     [ProtoContract]

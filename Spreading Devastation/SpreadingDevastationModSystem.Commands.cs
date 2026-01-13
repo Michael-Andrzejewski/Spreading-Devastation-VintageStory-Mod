@@ -1966,7 +1966,6 @@ namespace SpreadingDevastation
                 $"Speed multiplier: {config.SpeedMultiplier:F2}x" + (stormActive ? $" (STORM ACTIVE: {effectiveSpeed:F1}x effective)" : ""),
                 $"Temporal storm effects: {(config.TemporalStormEffectsEnabled ? "ON" : "OFF")} (storm boost: {config.TemporalStormSpeedMultiplier:F1}x)",
                 $"Active sources: {devastationSources.Count}/{config.MaxSources}",
-                $"Tracked blocks for regen: {regrowingBlocks?.Count ?? 0}",
                 $"Surface spreading: {(config.RequireSourceAirContact ? "ON" : "OFF")}",
                 $"Diagonal spreading: {(config.DiagonalSpreadingEnabled ? "ON (26 dirs)" : "OFF (6 dirs)")}",
                 $"Min Y level: {config.MinYLevel}",
@@ -2637,18 +2636,12 @@ namespace SpreadingDevastation
             Block startBlock = sapi.World.BlockAccessor.GetBlock(pos);
             if (startBlock != null && startBlock.Id != 0 && !IsAlreadyDevastated(startBlock))
             {
-                if (TryGetDevastatedForm(startBlock, out string devastatedBlock, out string regeneratesTo))
+                if (TryGetDevastatedForm(startBlock, out string devastatedBlock, out string _))
                 {
                     Block newBlock = sapi.World.GetBlock(new AssetLocation("game", devastatedBlock));
                     if (newBlock != null)
                     {
                         sapi.World.BlockAccessor.SetBlock(newBlock.Id, pos);
-                        regrowingBlocks.Add(new RegrowingBlocks
-                        {
-                            Pos = pos,
-                            Out = regeneratesTo,
-                            LastTime = sapi.World.Calendar.TotalHours
-                        });
                         newChunk.BlocksDevastated++;
                     }
                 }

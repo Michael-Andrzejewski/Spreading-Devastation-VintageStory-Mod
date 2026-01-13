@@ -21,11 +21,10 @@ namespace SpreadingDevastation
     public partial class SpreadingDevastationModSystem : ModSystem
     {
         // Data classes moved to DataClasses.cs:
-        // RegrowingBlocks, DevastationSource, DevastatedChunk, BleedBlock, RiftWard,
+        // DevastationSource, DevastatedChunk, BleedBlock, RiftWard,
         // DevastatedChunkSyncPacket, FogConfigPacket, TestStatus, TestResult, TestContext
 
         private ICoreServerAPI sapi;
-        private List<RegrowingBlocks> regrowingBlocks;
         private List<DevastationSource> devastationSources;
         private Dictionary<long, DevastatedChunk> devastatedChunks; // Chunk-based devastation tracking
         private SpreadingDevastationConfig config;
@@ -117,6 +116,17 @@ namespace SpreadingDevastation
         // Temporal storm devastation tracking
         private double lastStormSpawnTime = 0; // Last game time when storm spawning occurred
         private bool wasStormActiveLastTick = false; // Track storm state transitions
+
+        // Performance optimization: Terrain height cache to avoid expensive GetTerrainMapheightAt calls
+        private Dictionary<long, int> terrainHeightCache = new Dictionary<long, int>();
+        private const int TERRAIN_CACHE_MAX_SIZE = 10000; // Max entries before clearing
+        private int terrainCacheHits = 0;
+        private int terrainCacheMisses = 0;
+
+        // Performance optimization: Batched particle spawning
+        private List<BlockPos> pendingDevastationParticles = new List<BlockPos>();
+        private List<BlockPos> pendingHealingParticles = new List<BlockPos>();
+        private const int MAX_PARTICLES_PER_TICK = 10; // Cap particles spawned per tick
 
         public override void Start(ICoreAPI api)
         {
@@ -872,9 +882,6 @@ namespace SpreadingDevastation
         {
             try
             {
-                byte[] data = sapi.WorldManager.SaveGame.GetData("regrowingBlocks");
-                regrowingBlocks = data == null ? new List<RegrowingBlocks>() : SerializerUtil.Deserialize<List<RegrowingBlocks>>(data);
-
                 byte[] sourcesData = sapi.WorldManager.SaveGame.GetData("devastationSources");
                 devastationSources = sourcesData == null ? new List<DevastationSource>() : SerializerUtil.Deserialize<List<DevastationSource>>(sourcesData);
 
@@ -911,13 +918,12 @@ namespace SpreadingDevastation
                 // Restore rift ward active states and apply their effects
                 InitializeRiftWardsOnLoad();
 
-                sapi.Logger.Notification($"SpreadingDevastation: Loaded {devastationSources?.Count ?? 0} sources, {regrowingBlocks?.Count ?? 0} regrowing blocks, {devastatedChunks?.Count ?? 0} devastated chunks, {activeRiftWards?.Count ?? 0} rift wards");
+                sapi.Logger.Notification($"SpreadingDevastation: Loaded {devastationSources?.Count ?? 0} sources, {devastatedChunks?.Count ?? 0} devastated chunks, {activeRiftWards?.Count ?? 0} rift wards");
             }
             catch (Exception ex)
             {
                 sapi.Logger.Error($"SpreadingDevastation: Error loading save data: {ex.Message}");
                 // Initialize empty collections if loading failed
-                regrowingBlocks = regrowingBlocks ?? new List<RegrowingBlocks>();
                 devastationSources = devastationSources ?? new List<DevastationSource>();
                 devastatedChunks = devastatedChunks ?? new Dictionary<long, DevastatedChunk>();
                 activeRiftWards = activeRiftWards ?? new List<RiftWard>();
@@ -928,7 +934,6 @@ namespace SpreadingDevastation
         {
             try
             {
-                sapi.WorldManager.SaveGame.StoreData("regrowingBlocks", SerializerUtil.Serialize(regrowingBlocks ?? new List<RegrowingBlocks>()));
                 sapi.WorldManager.SaveGame.StoreData("devastationSources", SerializerUtil.Serialize(devastationSources ?? new List<DevastationSource>()));
                 sapi.WorldManager.SaveGame.StoreData("devastationPaused", SerializerUtil.Serialize(isPaused));
                 sapi.WorldManager.SaveGame.StoreData("devastationNextSourceId", SerializerUtil.Serialize(nextSourceId));
@@ -940,7 +945,7 @@ namespace SpreadingDevastation
                 // Save rift wards
                 sapi.WorldManager.SaveGame.StoreData("riftWards", SerializerUtil.Serialize(activeRiftWards ?? new List<RiftWard>()));
 
-                sapi.Logger.VerboseDebug($"SpreadingDevastation: Saved {devastationSources?.Count ?? 0} sources, {regrowingBlocks?.Count ?? 0} regrowing blocks, {devastatedChunks?.Count ?? 0} devastated chunks, {activeRiftWards?.Count ?? 0} rift wards");
+                sapi.Logger.VerboseDebug($"SpreadingDevastation: Saved {devastationSources?.Count ?? 0} sources, {devastatedChunks?.Count ?? 0} devastated chunks, {activeRiftWards?.Count ?? 0} rift wards");
             }
             catch (Exception ex)
             {
@@ -1001,7 +1006,7 @@ namespace SpreadingDevastation
                 {
                     for (int z = startZ; z < endZ; z += 2)
                     {
-                        int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(x, 0, z));
+                        int surfaceY = GetCachedTerrainHeight(x, z);
                         if (surfaceY <= 0) surfaceY = 100;
 
                         // Wide vertical range
@@ -1113,7 +1118,7 @@ namespace SpreadingDevastation
             {
                 for (int z = startZ; z < endZ; z += 2)
                 {
-                    int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(x, 0, z));
+                    int surfaceY = GetCachedTerrainHeight(x, z);
                     if (surfaceY <= 0) surfaceY = 100;
 
                     int minY = Math.Max(1, surfaceY - 20);
@@ -1445,14 +1450,6 @@ namespace SpreadingDevastation
                     // Spawn smoke particles for devastation effect
                     SpawnDevastationParticles(targetPos);
 
-                    // Track this block for regeneration
-                    regrowingBlocks.Add(new RegrowingBlocks
-                    {
-                        Pos = targetPos,
-                        Out = regeneratesTo,
-                        LastTime = sapi.World.Calendar.TotalHours
-                    });
-
                     devastatedCount++;
 
                     // Track for metastasis system
@@ -1533,9 +1530,6 @@ namespace SpreadingDevastation
 
                     // Spawn healing particles
                     SpawnHealingParticles(targetPos);
-
-                    // Note: We don't remove from regrowingBlocks here to avoid O(n) overhead
-                    // Healed blocks will simply be skipped when regeneration runs
 
                     healedCount++;
                 }
@@ -2784,7 +2778,8 @@ namespace SpreadingDevastation
         // Debug: log a sample of particle spawns to verify positions
         private int debugParticleSpawnCount = 0;
 
-        /// Spawns smoke particles at a block position when it is converted to devastated form.
+        /// Queues smoke particles at a block position when it is converted to devastated form.
+        /// Particles are batched and spawned at the end of each tick to reduce overhead.
         /// </summary>
         private void SpawnDevastationParticles(BlockPos pos)
         {
@@ -2798,27 +2793,8 @@ namespace SpreadingDevastation
                 // Check particle rate limit
                 if (!CanSpawnParticle(pos)) return;
 
-                // Create fresh particle properties with position baked in
-                var particles = CreateDevastationParticles(pos);
-
-                // Debug: log every 100th particle spawn with full position info
-                debugParticleSpawnCount++;
-                if (debugParticleSpawnCount % 100 == 0)
-                {
-                    var player = sapi.World.AllOnlinePlayers.FirstOrDefault();
-                    if (player?.Entity != null)
-                    {
-                        double dist = Math.Sqrt(
-                            Math.Pow(player.Entity.Pos.X - pos.X, 2) +
-                            Math.Pow(player.Entity.Pos.Y - pos.Y, 2) +
-                            Math.Pow(player.Entity.Pos.Z - pos.Z, 2));
-                        sapi.Logger.Debug($"[ParticleSpawn] Devastation at ({pos.X}, {pos.Y}, {pos.Z}), Player at ({player.Entity.Pos.X:F1}, {player.Entity.Pos.Y:F1}, {player.Entity.Pos.Z:F1}), Dist: {dist:F1}");
-                    }
-                }
-
-                // Spawn particles directly (let VS handle broadcasting to clients)
-                sapi.World.SpawnParticles(particles);
-                // Note: Counter is now incremented in CanSpawnParticle for FAR particles only
+                // Queue particle for batched spawning (copy position to avoid mutation issues)
+                pendingDevastationParticles.Add(pos.Copy());
             }
             catch
             {
@@ -2826,11 +2802,80 @@ namespace SpreadingDevastation
             }
         }
 
+        /// <summary>
+        /// Flushes all pending particles, spawning them in a single batch.
+        /// Call this at the end of tick processing to reduce per-particle overhead.
+        /// </summary>
+        private void FlushPendingParticles()
+        {
+            try
+            {
+                if (sapi == null) return;
+
+                // Spawn devastation particles (limited per tick)
+                int devastationCount = Math.Min(pendingDevastationParticles.Count, MAX_PARTICLES_PER_TICK);
+                for (int i = 0; i < devastationCount; i++)
+                {
+                    var pos = pendingDevastationParticles[i];
+                    var particles = CreateDevastationParticles(pos);
+                    sapi.World.SpawnParticles(particles);
+
+                    // Debug: log every 100th particle spawn
+                    debugParticleSpawnCount++;
+                    if (debugParticleSpawnCount % 100 == 0)
+                    {
+                        var player = sapi.World.AllOnlinePlayers.FirstOrDefault();
+                        if (player?.Entity != null)
+                        {
+                            double dist = Math.Sqrt(
+                                Math.Pow(player.Entity.Pos.X - pos.X, 2) +
+                                Math.Pow(player.Entity.Pos.Y - pos.Y, 2) +
+                                Math.Pow(player.Entity.Pos.Z - pos.Z, 2));
+                            sapi.Logger.Debug($"[ParticleSpawn] Devastation at ({pos.X}, {pos.Y}, {pos.Z}), Dist: {dist:F1}");
+                        }
+                    }
+                }
+                pendingDevastationParticles.Clear();
+
+                // Spawn healing particles (limited per tick)
+                int healingCount = Math.Min(pendingHealingParticles.Count, MAX_PARTICLES_PER_TICK);
+                for (int i = 0; i < healingCount; i++)
+                {
+                    var pos = pendingHealingParticles[i];
+                    var particles = CreateHealingParticles(pos);
+                    sapi.World.SpawnParticles(particles);
+
+                    // Debug: log every 10th healing particle spawn
+                    debugHealingSpawnCount++;
+                    if (debugHealingSpawnCount % 10 == 0)
+                    {
+                        var firstPlayer = sapi.World.AllOnlinePlayers.FirstOrDefault();
+                        if (firstPlayer?.Entity != null)
+                        {
+                            double dist = Math.Sqrt(
+                                Math.Pow(firstPlayer.Entity.Pos.X - pos.X, 2) +
+                                Math.Pow(firstPlayer.Entity.Pos.Y - pos.Y, 2) +
+                                Math.Pow(firstPlayer.Entity.Pos.Z - pos.Z, 2));
+                            sapi.Logger.Debug($"[HealingSpawn] Healing at ({pos.X}, {pos.Y}, {pos.Z}), Dist: {dist:F1}");
+                        }
+                    }
+                }
+                pendingHealingParticles.Clear();
+            }
+            catch (Exception ex)
+            {
+                sapi?.Logger.Error($"[ParticleFlush] Error: {ex.Message}");
+                pendingDevastationParticles.Clear();
+                pendingHealingParticles.Clear();
+            }
+        }
+
         // Debug: count healing particle spawns
         private int debugHealingSpawnCount = 0;
 
         /// <summary>
-        /// Spawns blue healing particles at a block position when it is cleansed/healed.
+        /// Queues blue healing particles at a block position when it is cleansed/healed.
+        /// Particles are batched and spawned at the end of each tick to reduce overhead.
         /// </summary>
         private void SpawnHealingParticles(BlockPos pos)
         {
@@ -2844,27 +2889,8 @@ namespace SpreadingDevastation
                 // Check particle rate limit
                 if (!CanSpawnParticle(pos)) return;
 
-                // Create fresh particle properties with position baked in
-                var particles = CreateHealingParticles(pos);
-
-                // Debug: log every 10th healing particle spawn with full position info
-                debugHealingSpawnCount++;
-                if (debugHealingSpawnCount % 10 == 0)
-                {
-                    var firstPlayer = sapi.World.AllOnlinePlayers.FirstOrDefault();
-                    if (firstPlayer?.Entity != null)
-                    {
-                        double dist = Math.Sqrt(
-                            Math.Pow(firstPlayer.Entity.Pos.X - pos.X, 2) +
-                            Math.Pow(firstPlayer.Entity.Pos.Y - pos.Y, 2) +
-                            Math.Pow(firstPlayer.Entity.Pos.Z - pos.Z, 2));
-                        sapi.Logger.Debug($"[HealingSpawn] Healing at ({pos.X}, {pos.Y}, {pos.Z}), Player at ({firstPlayer.Entity.Pos.X:F1}, {firstPlayer.Entity.Pos.Y:F1}, {firstPlayer.Entity.Pos.Z:F1}), Dist: {dist:F1}");
-                    }
-                }
-
-                // Spawn particles directly (not player-targeted, let VS handle broadcasting)
-                sapi.World.SpawnParticles(particles);
-                // Note: Counter is now incremented in CanSpawnParticle for FAR particles only
+                // Queue particle for batched spawning (copy position to avoid mutation issues)
+                pendingHealingParticles.Add(pos.Copy());
             }
             catch (Exception ex)
             {
@@ -3280,6 +3306,9 @@ namespace SpreadingDevastation
             }
             finally
             {
+                // Flush any pending particles that were queued during this tick
+                FlushPendingParticles();
+
                 perfStopwatch.Stop();
                 RecordTickPerformance(perfStopwatch.Elapsed.TotalMilliseconds);
             }
@@ -4227,8 +4256,8 @@ namespace SpreadingDevastation
                     int blockX = chunkX * CHUNK_SIZE + localX;
                     int blockZ = chunkZ * CHUNK_SIZE + localZ;
 
-                    // Get surface height at this position
-                    int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(blockX, 0, blockZ, 0));
+                    // Get surface height at this position (cached for performance)
+                    int surfaceY = GetCachedTerrainHeight(blockX, blockZ);
                     if (surfaceY <= 0) continue;
 
                     // Check blocks at surface level ±2
@@ -4627,7 +4656,7 @@ namespace SpreadingDevastation
                     edgeZ = offsetZ > 0 ? startZ + CHUNK_SIZE - 1 : startZ;
                 }
 
-                int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(edgeX, 0, edgeZ));
+                int surfaceY = GetCachedTerrainHeight(edgeX, edgeZ);
                 if (surfaceY <= 0) continue;
 
                 // Check a vertical range around surface
@@ -4891,8 +4920,8 @@ namespace SpreadingDevastation
                 int x = (int)(playerX + Math.Cos(angle) * distance);
                 int z = (int)(playerZ + Math.Sin(angle) * distance);
 
-                // Find the surface Y
-                int y = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(x, 0, z));
+                // Find the surface Y (cached for performance)
+                int y = GetCachedTerrainHeight(x, z);
                 if (y <= 0) continue;
 
                 BlockPos pos = new BlockPos(x, y, z);
@@ -4923,8 +4952,8 @@ namespace SpreadingDevastation
                 int x = startX + sapi.World.Rand.Next(CHUNK_SIZE);
                 int z = startZ + sapi.World.Rand.Next(CHUNK_SIZE);
 
-                // Find the surface Y
-                int y = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(x, 0, z));
+                // Find the surface Y (cached for performance)
+                int y = GetCachedTerrainHeight(x, z);
                 if (y <= 0) continue;
 
                 BlockPos pos = new BlockPos(x, y, z);
@@ -5168,7 +5197,7 @@ namespace SpreadingDevastation
                     // Check depth below surface constraint (when aircontact is enabled)
                     if (config.RequireSourceAirContact && config.ChunkMaxDepthBelowSurface >= 0)
                     {
-                        int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(targetPos);
+                        int surfaceY = GetCachedTerrainHeight(targetPos.X, targetPos.Z);
                         if (surfaceY > 0 && targetPos.Y < surfaceY - config.ChunkMaxDepthBelowSurface)
                         {
                             continue; // Too deep below surface
@@ -5205,14 +5234,6 @@ namespace SpreadingDevastation
 
                             // Spawn smoke particles for devastation effect
                             SpawnDevastationParticles(targetPos);
-
-                            // Track for regeneration
-                            regrowingBlocks.Add(new RegrowingBlocks
-                            {
-                                Pos = targetPos,
-                                Out = regeneratesTo,
-                                LastTime = sapi.World.Calendar.TotalHours
-                            });
 
                             // Add this newly devastated block to the frontier
                             newFrontierBlocks.Add(targetPos.Copy());
@@ -5258,7 +5279,7 @@ namespace SpreadingDevastation
                         // Check depth below surface constraint (when aircontact is enabled)
                         if (config.RequireSourceAirContact && config.ChunkMaxDepthBelowSurface >= 0)
                         {
-                            int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(neighborPos);
+                            int surfaceY = GetCachedTerrainHeight(neighborPos.X, neighborPos.Z);
                             if (surfaceY > 0 && neighborPos.Y < surfaceY - config.ChunkMaxDepthBelowSurface)
                             {
                                 continue; // Too deep below surface
@@ -5378,7 +5399,7 @@ namespace SpreadingDevastation
                 // Pick a random position in the chunk
                 int x = startX + sapi.World.Rand.Next(CHUNK_SIZE);
                 int z = startZ + sapi.World.Rand.Next(CHUNK_SIZE);
-                int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(x, 0, z));
+                int surfaceY = GetCachedTerrainHeight(x, z);
                 if (surfaceY <= 0) continue;
 
                 // Check a vertical range around surface
@@ -5429,12 +5450,6 @@ namespace SpreadingDevastation
                             // Spawn smoke particles for devastation effect
                             SpawnDevastationParticles(pos);
 
-                            regrowingBlocks.Add(new RegrowingBlocks
-                            {
-                                Pos = pos.Copy(),
-                                Out = regeneratesTo,
-                                LastTime = sapi.World.Calendar.TotalHours
-                            });
                             chunk.BlocksDevastated++;
                             blocksFound++;
 
@@ -5527,13 +5542,6 @@ namespace SpreadingDevastation
                     // Spawn smoke particles for devastation effect
                     SpawnDevastationParticles(adjacentPos);
 
-                    regrowingBlocks.Add(new RegrowingBlocks
-                    {
-                        Pos = adjacentPos.Copy(),
-                        Out = regeneratesTo,
-                        LastTime = sapi.World.Calendar.TotalHours
-                    });
-
                     // Add to bleed frontier with remaining spread budget
                     chunk.BleedFrontier.Add(new BleedBlock
                     {
@@ -5605,7 +5613,7 @@ namespace SpreadingDevastation
                     // Check depth constraint
                     if (config.RequireSourceAirContact && config.ChunkMaxDepthBelowSurface >= 0)
                     {
-                        int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(targetPos);
+                        int surfaceY = GetCachedTerrainHeight(targetPos.X, targetPos.Z);
                         if (surfaceY > 0 && targetPos.Y < surfaceY - config.ChunkMaxDepthBelowSurface)
                         {
                             continue;
@@ -5643,13 +5651,6 @@ namespace SpreadingDevastation
 
                         // Spawn smoke particles for devastation effect
                         SpawnDevastationParticles(targetPos);
-
-                        regrowingBlocks.Add(new RegrowingBlocks
-                        {
-                            Pos = targetPos.Copy(),
-                            Out = regeneratesTo,
-                            LastTime = sapi.World.Calendar.TotalHours
-                        });
 
                         // Add new bleed block with decremented spread budget
                         if (newBleedBlocks == null) newBleedBlocks = new List<BleedBlock>();
@@ -5721,7 +5722,7 @@ namespace SpreadingDevastation
             {
                 int x = startX + sapi.World.Rand.Next(CHUNK_SIZE);
                 int z = startZ + sapi.World.Rand.Next(CHUNK_SIZE);
-                int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(x, 0, z));
+                int surfaceY = GetCachedTerrainHeight(x, z);
                 if (surfaceY <= 0) continue;
 
                 // Check a vertical range around surface
@@ -5768,7 +5769,7 @@ namespace SpreadingDevastation
             {
                 int x = startX + CHUNK_SIZE / 2;
                 int z = startZ + CHUNK_SIZE / 2;
-                int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(x, 0, z));
+                int surfaceY = GetCachedTerrainHeight(x, z);
                 if (surfaceY > 0)
                 {
                     BlockPos startPos = new BlockPos(x, surfaceY, z);
@@ -5790,12 +5791,6 @@ namespace SpreadingDevastation
                                 // Spawn smoke particles for devastation effect
                                 SpawnDevastationParticles(startPos);
 
-                                regrowingBlocks.Add(new RegrowingBlocks
-                                {
-                                    Pos = startPos.Copy(),
-                                    Out = regeneratesTo,
-                                    LastTime = sapi.World.Calendar.TotalHours
-                                });
                                 chunk.BlocksDevastated++;
                                 chunk.DevastationFrontier.Add(startPos);
                             }
@@ -5821,12 +5816,6 @@ namespace SpreadingDevastation
                                             // Play conversion sound for the original block type
                                             PlayBlockConversionSound(nearbyBlock, nearbyPos);
 
-                                            regrowingBlocks.Add(new RegrowingBlocks
-                                            {
-                                                Pos = nearbyPos.Copy(),
-                                                Out = regenTo,
-                                                LastTime = sapi.World.Calendar.TotalHours
-                                            });
                                             chunk.BlocksDevastated++;
                                             chunk.DevastationFrontier.Add(nearbyPos);
                                             break;
@@ -5880,7 +5869,7 @@ namespace SpreadingDevastation
             {
                 for (int z = startZ; z < endZ; z += 2)
                 {
-                    int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(x, 0, z));
+                    int surfaceY = GetCachedTerrainHeight(x, z);
                     if (surfaceY <= 0) surfaceY = 100; // Fallback if terrain height fails
 
                     // Wide vertical range around surface - NO depth or MinY constraints
@@ -5982,7 +5971,7 @@ namespace SpreadingDevastation
                     sourceEdgeZ = offsetZ > 0 ? sourceStartZ + CHUNK_SIZE - 1 : sourceStartZ;
                 }
 
-                int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(sourceEdgeX, 0, sourceEdgeZ));
+                int surfaceY = GetCachedTerrainHeight(sourceEdgeX, sourceEdgeZ);
                 if (surfaceY <= 0) continue;
 
                 // Check a vertical range around surface level for devastated blocks in source chunk
@@ -6737,9 +6726,6 @@ namespace SpreadingDevastation
                     // Spawn healing particles
                     SpawnHealingParticles(targetPos);
 
-                    // Note: We don't remove from regrowingBlocks here to avoid O(n) overhead
-                    // The regrowingBlocks list is for tracking purposes; healed blocks will simply
-                    // be skipped when regeneration runs since they're no longer devastated
                     healedCount++;
                 }
             }
@@ -7101,8 +7087,8 @@ namespace SpreadingDevastation
                                 int x = startX + dx;
                                 int z = startZ + dz;
 
-                                // Get surface Y at this position
-                                int surfaceY = sapi.World.BlockAccessor.GetTerrainMapheightAt(checkPos.Set(x, 0, z));
+                                // Get surface Y at this position (cached for performance)
+                                int surfaceY = GetCachedTerrainHeight(x, z);
                                 if (surfaceY <= 0) continue;
 
                                 // Scan 10 blocks above and 5 blocks below surface (rift wards are usually at ground level)
@@ -7297,6 +7283,46 @@ namespace SpreadingDevastation
         {
             long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
             return protectedChunkKeys.Contains(chunkKey);
+        }
+
+        /// <summary>
+        /// Gets the terrain height at a position, using a cache to avoid expensive repeated lookups.
+        /// This is a major performance optimization for the spreading loop.
+        /// </summary>
+        private int GetCachedTerrainHeight(int x, int z)
+        {
+            // Create cache key from X,Z coordinates (Y is irrelevant for terrain height)
+            long cacheKey = ((long)x << 32) | (uint)z;
+
+            if (terrainHeightCache.TryGetValue(cacheKey, out int cachedHeight))
+            {
+                terrainCacheHits++;
+                return cachedHeight;
+            }
+
+            terrainCacheMisses++;
+
+            // Clear cache if it gets too large (simple eviction strategy)
+            if (terrainHeightCache.Count >= TERRAIN_CACHE_MAX_SIZE)
+            {
+                terrainHeightCache.Clear();
+            }
+
+            // Perform the actual expensive lookup
+            int height = sapi.World.BlockAccessor.GetTerrainMapheightAt(new BlockPos(x, 0, z, 0));
+            terrainHeightCache[cacheKey] = height;
+            return height;
+        }
+
+        /// <summary>
+        /// Clears the terrain height cache. Call this when chunks are loaded/unloaded
+        /// or periodically to prevent stale data.
+        /// </summary>
+        private void ClearTerrainHeightCache()
+        {
+            terrainHeightCache.Clear();
+            terrainCacheHits = 0;
+            terrainCacheMisses = 0;
         }
 
         /// <summary>

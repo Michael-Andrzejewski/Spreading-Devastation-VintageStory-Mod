@@ -55,8 +55,7 @@ namespace SpreadingDevastation
                     "10. riftwardheal - Verify rift ward healing",
                     "11. fog - Manual fog verification",
                     "12. edgebleed - Verify edge bleeding",
-                    "13. regeneration - Verify regen tracking",
-                    "14. chunkrepair - Verify stuck chunk repair",
+                    "13. chunkrepair - Verify stuck chunk repair",
                     "",
                     "Usage: /dv testsuite [testname] or /dv testsuite (all)"
                 }, "Test list sent to chat");
@@ -131,7 +130,6 @@ namespace SpreadingDevastation
             testResults.Add(RunTest("Rift Ward Healing", Test_RiftWardHealing));
             testResults.Add(RunTest("Fog Effect", Test_FogEffect));
             testResults.Add(RunTest("Edge Bleeding", Test_EdgeBleeding));
-            testResults.Add(RunTest("Regeneration Tracking", Test_RegenerationTracking));
             testResults.Add(RunTest("Chunk Repair", Test_ChunkRepair));
         }
 
@@ -151,7 +149,6 @@ namespace SpreadingDevastation
                 { "riftwardheal", Test_RiftWardHealing },
                 { "fog", Test_FogEffect },
                 { "edgebleed", Test_EdgeBleeding },
-                { "regeneration", Test_RegenerationTracking },
                 { "chunkrepair", Test_ChunkRepair }
             };
 
@@ -915,52 +912,6 @@ namespace SpreadingDevastation
                 result.Fail("Edge bleed frontier not at chunk boundary");
             }
 
-            return result;
-        }
-
-        private TestResult Test_RegenerationTracking(TestContext ctx)
-        {
-            var result = new TestResult("Regeneration Tracking");
-
-            BlockPos testPos = ctx.StartPosition.Copy();
-            SnapshotBlock(testPos);
-
-            int beforeCount = regrowingBlocks.Count;
-
-            // Place and devastate a block
-            Block soilBlock = sapi.World.GetBlock(new AssetLocation("game", "soil-medium-none"));
-            if (soilBlock != null)
-            {
-                sapi.World.BlockAccessor.SetBlock(soilBlock.Id, testPos);
-
-                if (TryGetDevastatedForm(soilBlock, out string devForm, out string regenTo))
-                {
-                    Block devBlock = sapi.World.GetBlock(new AssetLocation("game", devForm));
-                    if (devBlock != null)
-                    {
-                        sapi.World.BlockAccessor.SetBlock(devBlock.Id, testPos);
-
-                        // Add to regrowing blocks
-                        regrowingBlocks.Add(new RegrowingBlocks
-                        {
-                            Pos = testPos.Copy(),
-                            Out = regenTo,
-                            LastTime = sapi.World.Calendar.TotalHours
-                        });
-
-                        int afterCount = regrowingBlocks.Count;
-
-                        if (afterCount > beforeCount)
-                        {
-                            var entry = regrowingBlocks.Last();
-                            result.Pass($"Tracked: {testPos} to {entry.Out}");
-                            return result;
-                        }
-                    }
-                }
-            }
-
-            result.Fail("Failed to track regeneration");
             return result;
         }
 
