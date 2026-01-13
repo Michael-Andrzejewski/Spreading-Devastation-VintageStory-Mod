@@ -107,8 +107,6 @@ namespace SpreadingDevastation
         private double lastWeatherUpdateTime = 0;
         private Dictionary<long, (float intensity, string pattern, string weatherEvent, string windPattern)> activeWeatherRegions
             = new Dictionary<long, (float, string, string, string)>();
-        private Dictionary<long, float> cachedRegionIntensities = null; // Cached region intensities to avoid recalculating every tick
-        private bool regionIntensitiesDirty = true; // Flag to indicate region intensities need recalculation
 
         // Edge spawning tracking (per-player: last time they saw devastation, last check time)
         private Dictionary<string, (long lastDevastationSeenMs, long lastCheckMs)> playerEdgeSpawnTracking
@@ -3776,16 +3774,9 @@ namespace SpreadingDevastation
 
         /// <summary>
         /// Calculates devastation intensity for each weather region based on devastated chunks within it.
-        /// Uses caching to avoid recalculating on every weather update - only recalculates when chunks change.
         /// </summary>
         private Dictionary<long, float> CalculateRegionIntensities()
         {
-            // Return cached results if available and not dirty
-            if (!regionIntensitiesDirty && cachedRegionIntensities != null)
-            {
-                return cachedRegionIntensities;
-            }
-
             var result = new Dictionary<long, float>();
 
             if (weatherSystem == null) return result;
@@ -3827,10 +3818,6 @@ namespace SpreadingDevastation
                 float intensity = avgLevel * Math.Min(coverage * 2f, 1f);
                 result[regionKey] = intensity;
             }
-
-            // Cache the results and clear the dirty flag
-            cachedRegionIntensities = result;
-            regionIntensitiesDirty = false;
 
             return result;
         }
@@ -4204,7 +4191,6 @@ namespace SpreadingDevastation
                 };
 
                 devastatedChunks[chunkKey] = newChunk;
-                regionIntensitiesDirty = true; // Mark weather cache as dirty
 
                 // Frontier will be initialized automatically in ProcessDevastatedChunks
                 return true;
@@ -4437,7 +4423,6 @@ namespace SpreadingDevastation
                         };
 
                         devastatedChunks[chunkKey] = newChunk;
-                        regionIntensitiesDirty = true; // Mark weather cache as dirty
                         sapi.Logger.VerboseDebug($"SpreadingDevastation: Temporal storm created new devastated chunk at ({chunkX}, {chunkZ})");
                     }
 
@@ -4600,7 +4585,6 @@ namespace SpreadingDevastation
                 devastatedChunks[newChunk.ChunkKey] = newChunk;
                 sapi.Logger.VerboseDebug($"SpreadingDevastation: Chunk ({newChunk.ChunkX}, {newChunk.ChunkZ}) became devastated from spread");
             }
-            if (chunksToAdd.Count > 0) regionIntensitiesDirty = true; // Mark weather cache as dirty
         }
 
         /// <summary>
@@ -6498,7 +6482,6 @@ namespace SpreadingDevastation
             {
                 devastatedChunks.Remove(chunkKey);
             }
-            if (chunksToRemove.Count > 0) regionIntensitiesDirty = true; // Mark weather cache as dirty
         }
 
         /// <summary>
@@ -7226,7 +7209,6 @@ namespace SpreadingDevastation
 
             if (chunksToRemove.Count > 0)
             {
-                regionIntensitiesDirty = true; // Mark weather cache as dirty
                 sapi.Logger.Notification($"SpreadingDevastation: Rift ward at {ward.Pos} cleared {chunksToRemove.Count} devastated chunk(s) - temporal stability restored");
             }
 
@@ -7306,7 +7288,6 @@ namespace SpreadingDevastation
 
             if (chunksToRemove.Count > 0)
             {
-                regionIntensitiesDirty = true; // Mark weather cache as dirty
                 sapi.Logger.Notification($"SpreadingDevastation: Rift wards cleared {chunksToRemove.Count} devastated chunk(s) - temporal stability restored");
             }
 

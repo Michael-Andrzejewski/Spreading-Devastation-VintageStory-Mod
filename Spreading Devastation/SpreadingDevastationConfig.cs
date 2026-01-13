@@ -276,11 +276,10 @@ namespace SpreadingDevastation
         public bool RiftWardHealingEnabled { get; set; } = true;
 
         /// <summary>
-        /// Interval in seconds between rift ward fuel state checks (default: 120.0).
-        /// This only needs to check if rift wards have run out of fuel.
-        /// Placement and removal are detected via events, so this can be infrequent.
+        /// Interval in seconds between rift ward state checks (default: 45.0).
+        /// Staggered from weather updates (25s) to avoid simultaneous processing.
         /// </summary>
-        public double RiftWardScanIntervalSeconds { get; set; } = 120.0;
+        public double RiftWardScanIntervalSeconds { get; set; } = 45.0;
 
         /// <summary>
         /// Rift ward cleaning mode: "raster", "radial", or "random" (default: "raster").
