@@ -1514,8 +1514,8 @@ namespace SpreadingDevastation
 
                 // Heal the block
                 string healedBlock = "";
-                
-                if (TryGetHealedForm(block, out healedBlock))
+
+                if (TryGetHealedForm(block, targetPos, out healedBlock))
                 {
                     if (healedBlock == "none")
                     {
@@ -1546,20 +1546,23 @@ namespace SpreadingDevastation
 
         private bool TryGetHealedForm(Block block, out string healedBlock)
         {
+            // Non-position-aware version - uses default healing
+            return TryGetHealedForm(block, null, out healedBlock);
+        }
+
+        private bool TryGetHealedForm(Block block, BlockPos pos, out string healedBlock)
+        {
             healedBlock = "";
             string path = block.Code.Path;
-            
+
             if (path.StartsWith("devastatedsoil-0"))
             {
                 healedBlock = "soil-verylow-none";
             }
-            else if (path.StartsWith("devastatedsoil-1"))
+            else if (path.StartsWith("devastatedsoil-1") || path.StartsWith("devastatedsoil-2"))
             {
-                healedBlock = "sludgygravel";
-            }
-            else if (path.StartsWith("devastatedsoil-2"))
-            {
-                healedBlock = "sludgygravel";
+                // Gravel/Sand - check for sand first, then gravel, then derive from rock type
+                healedBlock = GetSandOrGravelType(pos);
             }
             else if (path.StartsWith("devastatedsoil-3"))
             {
@@ -1567,11 +1570,12 @@ namespace SpreadingDevastation
             }
             else if (path.StartsWith("drock"))
             {
-                healedBlock = "rock-obsidian";
+                // Rock - try to match type from block beneath
+                healedBlock = GetRockTypeFromBeneath(pos) ?? "rock-obsidian";
             }
-            else if (path.StartsWith("devastationgrowth-") || 
-                     path.StartsWith("devgrowth-shrike") || 
-                     path.StartsWith("devgrowth-shard") || 
+            else if (path.StartsWith("devastationgrowth-") ||
+                     path.StartsWith("devgrowth-shrike") ||
+                     path.StartsWith("devgrowth-shard") ||
                      path.StartsWith("devgrowth-bush"))
             {
                 healedBlock = "none"; // Remove these growths
@@ -1582,6 +1586,273 @@ namespace SpreadingDevastation
             }
 
             return healedBlock != "";
+        }
+
+        /// <summary>
+        /// Looks at blocks beneath and around the given position to find a rock type to restore to.
+        /// Searches deep below (skipping devastated blocks) and horizontally if needed.
+        /// </summary>
+        private string GetRockTypeFromBeneath(BlockPos pos)
+        {
+            if (pos == null || sapi == null) return null;
+
+            // First, search deep below (up to 30 blocks), skipping devastated blocks
+            for (int yOffset = 1; yOffset <= 30; yOffset++)
+            {
+                BlockPos checkPos = new BlockPos(pos.X, pos.Y - yOffset, pos.Z);
+                if (checkPos.Y < 1) break;
+
+                Block blockBeneath = sapi.World.BlockAccessor.GetBlock(checkPos);
+                if (blockBeneath == null || blockBeneath.Id == 0) continue;
+
+                string belowPath = blockBeneath.Code.Path;
+
+                // Skip devastated blocks and keep searching deeper
+                if (belowPath.StartsWith("drock") || belowPath.StartsWith("devastatedsoil-"))
+                {
+                    continue;
+                }
+
+                // If it's a non-devastated rock, use that type
+                if (belowPath.StartsWith("rock-") && !belowPath.StartsWith("rock-looseores"))
+                {
+                    return belowPath;
+                }
+
+                // Found a non-devastated, non-rock block - stop searching down
+                break;
+            }
+
+            // If nothing found below, search horizontally (check all 4 cardinal directions)
+            int[] offsets = { -1, 1 };
+            foreach (int dx in offsets)
+            {
+                for (int dist = 1; dist <= 10; dist++)
+                {
+                    BlockPos checkPos = new BlockPos(pos.X + dx * dist, pos.Y, pos.Z);
+                    Block block = sapi.World.BlockAccessor.GetBlock(checkPos);
+                    if (block == null || block.Id == 0) continue;
+
+                    string path = block.Code.Path;
+                    if (path.StartsWith("rock-") && !path.StartsWith("rock-looseores"))
+                    {
+                        return path;
+                    }
+                    // Stop if we hit a non-devastated, non-rock block
+                    if (!path.StartsWith("drock")) break;
+                }
+            }
+            foreach (int dz in offsets)
+            {
+                for (int dist = 1; dist <= 10; dist++)
+                {
+                    BlockPos checkPos = new BlockPos(pos.X, pos.Y, pos.Z + dz * dist);
+                    Block block = sapi.World.BlockAccessor.GetBlock(checkPos);
+                    if (block == null || block.Id == 0) continue;
+
+                    string path = block.Code.Path;
+                    if (path.StartsWith("rock-") && !path.StartsWith("rock-looseores"))
+                    {
+                        return path;
+                    }
+                    // Stop if we hit a non-devastated, non-rock block
+                    if (!path.StartsWith("drock")) break;
+                }
+            }
+
+            return null; // No rock found, use default
+        }
+
+        /// <summary>
+        /// Looks at blocks beneath and around the given position to find a gravel type to restore to.
+        /// Searches deep below (skipping devastated blocks) and horizontally if needed.
+        /// </summary>
+        private string GetGravelTypeFromBeneath(BlockPos pos)
+        {
+            if (pos == null || sapi == null) return null;
+
+            // First, search deep below (up to 20 blocks), skipping devastated blocks
+            for (int yOffset = 1; yOffset <= 20; yOffset++)
+            {
+                BlockPos checkPos = new BlockPos(pos.X, pos.Y - yOffset, pos.Z);
+                if (checkPos.Y < 1) break;
+
+                Block blockBeneath = sapi.World.BlockAccessor.GetBlock(checkPos);
+                if (blockBeneath == null || blockBeneath.Id == 0) continue;
+
+                string belowPath = blockBeneath.Code.Path;
+
+                // Skip devastated blocks and keep searching deeper
+                if (belowPath.StartsWith("drock") || belowPath.StartsWith("devastatedsoil-"))
+                {
+                    continue;
+                }
+
+                // If it's gravel, use that type
+                if (belowPath.StartsWith("gravel-"))
+                {
+                    return belowPath;
+                }
+
+                // Found a non-devastated, non-gravel block - stop searching down
+                break;
+            }
+
+            // If nothing found below, search horizontally
+            int[] offsets = { -1, 1 };
+            foreach (int dx in offsets)
+            {
+                for (int dist = 1; dist <= 10; dist++)
+                {
+                    BlockPos checkPos = new BlockPos(pos.X + dx * dist, pos.Y, pos.Z);
+                    Block block = sapi.World.BlockAccessor.GetBlock(checkPos);
+                    if (block == null || block.Id == 0) continue;
+
+                    string path = block.Code.Path;
+                    if (path.StartsWith("gravel-"))
+                    {
+                        return path;
+                    }
+                    // Stop if we hit a non-devastated block
+                    if (!path.StartsWith("devastatedsoil-")) break;
+                }
+            }
+            foreach (int dz in offsets)
+            {
+                for (int dist = 1; dist <= 10; dist++)
+                {
+                    BlockPos checkPos = new BlockPos(pos.X, pos.Y, pos.Z + dz * dist);
+                    Block block = sapi.World.BlockAccessor.GetBlock(checkPos);
+                    if (block == null || block.Id == 0) continue;
+
+                    string path = block.Code.Path;
+                    if (path.StartsWith("gravel-"))
+                    {
+                        return path;
+                    }
+                    // Stop if we hit a non-devastated block
+                    if (!path.StartsWith("devastatedsoil-")) break;
+                }
+            }
+
+            return null; // No gravel found, use default
+        }
+
+        /// <summary>
+        /// Looks at blocks beneath and around the given position to find a sand type to restore to.
+        /// Searches deep below (skipping devastated blocks) and horizontally if needed.
+        /// </summary>
+        private string GetSandTypeFromBeneath(BlockPos pos)
+        {
+            if (pos == null || sapi == null) return null;
+
+            // First, search deep below (up to 20 blocks), skipping devastated blocks
+            for (int yOffset = 1; yOffset <= 20; yOffset++)
+            {
+                BlockPos checkPos = new BlockPos(pos.X, pos.Y - yOffset, pos.Z);
+                if (checkPos.Y < 1) break;
+
+                Block blockBeneath = sapi.World.BlockAccessor.GetBlock(checkPos);
+                if (blockBeneath == null || blockBeneath.Id == 0) continue;
+
+                string belowPath = blockBeneath.Code.Path;
+
+                // Skip devastated blocks and keep searching deeper
+                if (belowPath.StartsWith("drock") || belowPath.StartsWith("devastatedsoil-"))
+                {
+                    continue;
+                }
+
+                // If it's sand, use that type
+                if (belowPath.StartsWith("sand-"))
+                {
+                    return belowPath;
+                }
+
+                // Found a non-devastated, non-sand block - stop searching down
+                break;
+            }
+
+            // If nothing found below, search horizontally
+            int[] offsets = { -1, 1 };
+            foreach (int dx in offsets)
+            {
+                for (int dist = 1; dist <= 10; dist++)
+                {
+                    BlockPos checkPos = new BlockPos(pos.X + dx * dist, pos.Y, pos.Z);
+                    Block block = sapi.World.BlockAccessor.GetBlock(checkPos);
+                    if (block == null || block.Id == 0) continue;
+
+                    string path = block.Code.Path;
+                    if (path.StartsWith("sand-"))
+                    {
+                        return path;
+                    }
+                    // Stop if we hit a non-devastated block
+                    if (!path.StartsWith("devastatedsoil-")) break;
+                }
+            }
+            foreach (int dz in offsets)
+            {
+                for (int dist = 1; dist <= 10; dist++)
+                {
+                    BlockPos checkPos = new BlockPos(pos.X, pos.Y, pos.Z + dz * dist);
+                    Block block = sapi.World.BlockAccessor.GetBlock(checkPos);
+                    if (block == null || block.Id == 0) continue;
+
+                    string path = block.Code.Path;
+                    if (path.StartsWith("sand-"))
+                    {
+                        return path;
+                    }
+                    // Stop if we hit a non-devastated block
+                    if (!path.StartsWith("devastatedsoil-")) break;
+                }
+            }
+
+            return null; // No sand found, use default
+        }
+
+        /// <summary>
+        /// Determines the appropriate sand or gravel type for healing devastatedsoil-1/2.
+        /// Priority: 1) Sand if found nearby, 2) Gravel if found nearby, 3) Gravel derived from rock type.
+        /// </summary>
+        private string GetSandOrGravelType(BlockPos pos)
+        {
+            if (pos == null || sapi == null) return "gravel-andesite"; // Safe default
+
+            // First, check for sand nearby (prioritize sand if it exists)
+            string sandType = GetSandTypeFromBeneath(pos);
+            if (sandType != null)
+            {
+                return sandType;
+            }
+
+            // Second, check for existing gravel nearby
+            string gravelType = GetGravelTypeFromBeneath(pos);
+            if (gravelType != null)
+            {
+                return gravelType;
+            }
+
+            // Third, derive gravel type from nearby rock
+            string rockType = GetRockTypeFromBeneath(pos);
+            if (rockType != null && rockType.StartsWith("rock-"))
+            {
+                // Convert rock-granite to gravel-granite, rock-andesite to gravel-andesite, etc.
+                string rockName = rockType.Substring(5); // Remove "rock-" prefix
+                string derivedGravel = "gravel-" + rockName;
+
+                // Verify this gravel type exists in the game
+                Block gravelBlock = sapi.World.GetBlock(new AssetLocation("game", derivedGravel));
+                if (gravelBlock != null && gravelBlock.Id != 0)
+                {
+                    return derivedGravel;
+                }
+            }
+
+            // Fallback to andesite gravel (common rock type)
+            return "gravel-andesite";
         }
 
         private bool IsAlreadyDevastated(Block block)
@@ -6386,7 +6657,7 @@ namespace SpreadingDevastation
                 }
 
                 // Found a devastated block - heal it
-                if (TryGetHealedForm(block, out string healedBlock))
+                if (TryGetHealedForm(block, targetPos, out string healedBlock))
                 {
                     if (healedBlock == "none")
                     {
@@ -6448,7 +6719,7 @@ namespace SpreadingDevastation
                 if (!IsAlreadyDevastated(block)) continue;
 
                 // Heal the block
-                if (TryGetHealedForm(block, out string healedBlock))
+                if (TryGetHealedForm(block, targetPos, out string healedBlock))
                 {
                     if (healedBlock == "none")
                     {
@@ -6575,7 +6846,7 @@ namespace SpreadingDevastation
                 }
 
                 // Found a devastated block - heal it
-                if (TryGetHealedForm(block, out string healedBlock))
+                if (TryGetHealedForm(block, targetPos, out string healedBlock))
                 {
                     if (healedBlock == "none")
                     {

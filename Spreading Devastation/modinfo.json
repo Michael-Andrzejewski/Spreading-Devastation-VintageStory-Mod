@@ -6,8 +6,12 @@
     "authors": [
         "Soareverix"
     ],
+    "contributors": [
+        "prototype464 (Sounds)",
+        "Auto_Yoba (Models)"
+    ],
     "description": "Manually marked blocks spread or heal devastation with customizable range and amount. Use /devastate add or /devastate heal to mark blocks. Use /devastate remove all to clear all sources.",
-    "version": "1.0.7",
+    "version": "1.0.8",
     "dependencies": {
         "game": "1.21.5"
     }
