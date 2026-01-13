@@ -20,7 +20,8 @@
       "WebFetch(domain:api.github.com)",
       "Bash(findstr:*)",
       "WebFetch(domain:www.vintagestory.at)",
-      "WebFetch(domain:spearandfang.github.io)"
+      "WebFetch(domain:spearandfang.github.io)",
+      "Bash(git log:*)"
     ]
   }
 }

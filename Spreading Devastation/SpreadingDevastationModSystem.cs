@@ -123,11 +123,6 @@ namespace SpreadingDevastation
         private int terrainCacheHits = 0;
         private int terrainCacheMisses = 0;
 
-        // Performance optimization: Batched particle spawning
-        private List<BlockPos> pendingDevastationParticles = new List<BlockPos>();
-        private List<BlockPos> pendingHealingParticles = new List<BlockPos>();
-        private const int MAX_PARTICLES_PER_TICK = 10; // Cap particles spawned per tick
-
         public override void Start(ICoreAPI api)
         {
             base.Start(api);
@@ -2778,8 +2773,7 @@ namespace SpreadingDevastation
         // Debug: log a sample of particle spawns to verify positions
         private int debugParticleSpawnCount = 0;
 
-        /// Queues smoke particles at a block position when it is converted to devastated form.
-        /// Particles are batched and spawned at the end of each tick to reduce overhead.
+        /// Spawns smoke particles at a block position when it is converted to devastated form.
         /// </summary>
         private void SpawnDevastationParticles(BlockPos pos)
         {
@@ -2793,8 +2787,26 @@ namespace SpreadingDevastation
                 // Check particle rate limit
                 if (!CanSpawnParticle(pos)) return;
 
-                // Queue particle for batched spawning (copy position to avoid mutation issues)
-                pendingDevastationParticles.Add(pos.Copy());
+                // Create and spawn particles directly
+                var particles = CreateDevastationParticles(pos);
+
+                // Debug: log every 100th particle spawn
+                debugParticleSpawnCount++;
+                if (debugParticleSpawnCount % 100 == 0)
+                {
+                    var player = sapi.World.AllOnlinePlayers.FirstOrDefault();
+                    if (player?.Entity != null)
+                    {
+                        double dist = Math.Sqrt(
+                            Math.Pow(player.Entity.Pos.X - pos.X, 2) +
+                            Math.Pow(player.Entity.Pos.Y - pos.Y, 2) +
+                            Math.Pow(player.Entity.Pos.Z - pos.Z, 2));
+                        sapi.Logger.Debug($"[ParticleSpawn] Devastation at ({pos.X}, {pos.Y}, {pos.Z}), Dist: {dist:F1}");
+                    }
+                }
+
+                // Spawn particles directly (let VS handle broadcasting to clients)
+                sapi.World.SpawnParticles(particles);
             }
             catch
             {
@@ -2802,80 +2814,11 @@ namespace SpreadingDevastation
             }
         }
 
-        /// <summary>
-        /// Flushes all pending particles, spawning them in a single batch.
-        /// Call this at the end of tick processing to reduce per-particle overhead.
-        /// </summary>
-        private void FlushPendingParticles()
-        {
-            try
-            {
-                if (sapi == null) return;
-
-                // Spawn devastation particles (limited per tick)
-                int devastationCount = Math.Min(pendingDevastationParticles.Count, MAX_PARTICLES_PER_TICK);
-                for (int i = 0; i < devastationCount; i++)
-                {
-                    var pos = pendingDevastationParticles[i];
-                    var particles = CreateDevastationParticles(pos);
-                    sapi.World.SpawnParticles(particles);
-
-                    // Debug: log every 100th particle spawn
-                    debugParticleSpawnCount++;
-                    if (debugParticleSpawnCount % 100 == 0)
-                    {
-                        var player = sapi.World.AllOnlinePlayers.FirstOrDefault();
-                        if (player?.Entity != null)
-                        {
-                            double dist = Math.Sqrt(
-                                Math.Pow(player.Entity.Pos.X - pos.X, 2) +
-                                Math.Pow(player.Entity.Pos.Y - pos.Y, 2) +
-                                Math.Pow(player.Entity.Pos.Z - pos.Z, 2));
-                            sapi.Logger.Debug($"[ParticleSpawn] Devastation at ({pos.X}, {pos.Y}, {pos.Z}), Dist: {dist:F1}");
-                        }
-                    }
-                }
-                pendingDevastationParticles.Clear();
-
-                // Spawn healing particles (limited per tick)
-                int healingCount = Math.Min(pendingHealingParticles.Count, MAX_PARTICLES_PER_TICK);
-                for (int i = 0; i < healingCount; i++)
-                {
-                    var pos = pendingHealingParticles[i];
-                    var particles = CreateHealingParticles(pos);
-                    sapi.World.SpawnParticles(particles);
-
-                    // Debug: log every 10th healing particle spawn
-                    debugHealingSpawnCount++;
-                    if (debugHealingSpawnCount % 10 == 0)
-                    {
-                        var firstPlayer = sapi.World.AllOnlinePlayers.FirstOrDefault();
-                        if (firstPlayer?.Entity != null)
-                        {
-                            double dist = Math.Sqrt(
-                                Math.Pow(firstPlayer.Entity.Pos.X - pos.X, 2) +
-                                Math.Pow(firstPlayer.Entity.Pos.Y - pos.Y, 2) +
-                                Math.Pow(firstPlayer.Entity.Pos.Z - pos.Z, 2));
-                            sapi.Logger.Debug($"[HealingSpawn] Healing at ({pos.X}, {pos.Y}, {pos.Z}), Dist: {dist:F1}");
-                        }
-                    }
-                }
-                pendingHealingParticles.Clear();
-            }
-            catch (Exception ex)
-            {
-                sapi?.Logger.Error($"[ParticleFlush] Error: {ex.Message}");
-                pendingDevastationParticles.Clear();
-                pendingHealingParticles.Clear();
-            }
-        }
-
         // Debug: count healing particle spawns
         private int debugHealingSpawnCount = 0;
 
         /// <summary>
-        /// Queues blue healing particles at a block position when it is cleansed/healed.
-        /// Particles are batched and spawned at the end of each tick to reduce overhead.
+        /// Spawns blue healing particles at a block position when it is cleansed/healed.
         /// </summary>
         private void SpawnHealingParticles(BlockPos pos)
         {
@@ -2889,8 +2832,26 @@ namespace SpreadingDevastation
                 // Check particle rate limit
                 if (!CanSpawnParticle(pos)) return;
 
-                // Queue particle for batched spawning (copy position to avoid mutation issues)
-                pendingHealingParticles.Add(pos.Copy());
+                // Create and spawn particles directly
+                var particles = CreateHealingParticles(pos);
+
+                // Debug: log every 10th healing particle spawn
+                debugHealingSpawnCount++;
+                if (debugHealingSpawnCount % 10 == 0)
+                {
+                    var firstPlayer = sapi.World.AllOnlinePlayers.FirstOrDefault();
+                    if (firstPlayer?.Entity != null)
+                    {
+                        double dist = Math.Sqrt(
+                            Math.Pow(firstPlayer.Entity.Pos.X - pos.X, 2) +
+                            Math.Pow(firstPlayer.Entity.Pos.Y - pos.Y, 2) +
+                            Math.Pow(firstPlayer.Entity.Pos.Z - pos.Z, 2));
+                        sapi.Logger.Debug($"[HealingSpawn] Healing at ({pos.X}, {pos.Y}, {pos.Z}), Dist: {dist:F1}");
+                    }
+                }
+
+                // Spawn particles directly (let VS handle broadcasting to clients)
+                sapi.World.SpawnParticles(particles);
             }
             catch (Exception ex)
             {
@@ -3306,9 +3267,6 @@ namespace SpreadingDevastation
             }
             finally
             {
-                // Flush any pending particles that were queued during this tick
-                FlushPendingParticles();
-
                 perfStopwatch.Stop();
                 RecordTickPerformance(perfStopwatch.Elapsed.TotalMilliseconds);
             }
