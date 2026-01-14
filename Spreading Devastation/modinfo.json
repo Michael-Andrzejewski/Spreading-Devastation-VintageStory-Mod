@@ -11,7 +11,7 @@
         "Auto_Yoba (Models)"
     ],
     "description": "Manually marked blocks spread or heal devastation with customizable range and amount. Use /devastate add or /devastate heal to mark blocks. Use /devastate remove all to clear all sources.",
-    "version": "1.0.8",
+    "version": "1.0.9",
     "dependencies": {
         "game": "1.21.5"
     }

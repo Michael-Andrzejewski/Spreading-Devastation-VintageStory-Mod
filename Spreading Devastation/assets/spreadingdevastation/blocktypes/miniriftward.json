@@ -1,0 +1,51 @@
+{
+    "code": "miniriftward",
+    "class": "Block",
+    "creativeinventory": { "general": ["*"] },
+    "attributes": {
+        "handbook": {
+            "groupBy": ["miniriftward-*"]
+        }
+    },
+    "behaviors": [
+        { "name": "Unstable" }
+    ],
+    "variantgroups": [
+        { "code": "type", "states": ["copper"] }
+    ],
+    "shape": { "base": "block/miniriftward" },
+    "drawtype": "JSON",
+    "blockmaterial": "Metal",
+    "replaceable": 900,
+    "lightAbsorption": 0,
+    "resistance": 6.0,
+    "requiredMiningTier": 2,
+    "sideopaque": {
+        "all": false
+    },
+    "sideao": {
+        "all": false
+    },
+    "selectionBox": { "x1": 0.25, "y1": 0, "z1": 0.25, "x2": 0.75, "y2": 1.875, "z2": 0.75 },
+    "collisionBox": { "x1": 0.25, "y1": 0, "z1": 0.25, "x2": 0.75, "y2": 1.875, "z2": 0.75 },
+    "sounds": {
+        "place": "game:block/metal",
+        "break": "game:block/metal",
+        "walk": "game:walk/stone"
+    },
+    "guiTransform": {
+        "origin": { "x": 0.5, "y": 0.3, "z": 0.5 },
+        "scale": 0.7
+    },
+    "tpHandTransform": {
+        "translation": { "x": -0.9, "y": -0.5, "z": -0.5 },
+        "rotation": { "x": 0, "y": 45, "z": 0 },
+        "scale": 0.4
+    },
+    "groundTransform": {
+        "translation": { "x": 0, "y": 0, "z": 0 },
+        "rotation": { "x": 0, "y": 0, "z": 0 },
+        "origin": { "x": 0.5, "y": 0, "z": 0.5 },
+        "scale": 0.4
+    }
+}

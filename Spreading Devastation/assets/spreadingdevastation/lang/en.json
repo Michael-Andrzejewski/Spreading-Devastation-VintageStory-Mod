@@ -1,0 +1,6 @@
+{
+    "block-miniriftward-copper": "Mini Rift Ward",
+    "block-miniriftward-*": "Mini Rift Ward",
+    "blockdesc-miniriftward-copper": "A smaller, makeshift rift ward constructed from copper and temporal components. Provides 1/4 the protection radius of a full rift ward. Does not require fuel - always active when placed.",
+    "blockhelp-miniriftward-copper": "Place to create a protective zone against temporal devastation. Protection radius: 32 blocks (1/4 of a standard rift ward)."
+}

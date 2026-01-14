@@ -21,7 +21,10 @@
       "Bash(findstr:*)",
       "WebFetch(domain:www.vintagestory.at)",
       "WebFetch(domain:spearandfang.github.io)",
-      "Bash(git log:*)"
+      "Bash(git log:*)",
+      "Bash(cat:*)",
+      "Bash(find:*)",
+      "Bash(python:*)"
     ]
   }
 }

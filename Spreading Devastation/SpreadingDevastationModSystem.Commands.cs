@@ -170,6 +170,12 @@ namespace SpreadingDevastation
                               api.ChatCommands.Parsers.OptionalAll("value"))
                     .HandleWith(HandleEdgeCommand)
                 .EndSubCommand()
+                .BeginSubCommand("initial")
+                    .WithDescription("Configure initial devastation spawn (one-time, game calendar based)")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("setting"),
+                              api.ChatCommands.Parsers.OptionalAll("value"))
+                    .HandleWith(HandleInitialCommand)
+                .EndSubCommand()
                 .BeginSubCommand("spawnpool")
                     .WithDescription("Manage entity spawn pool for devastated chunks")
                     .WithArgs(api.ChatCommands.Parsers.OptionalWord("action"),
@@ -1236,6 +1242,135 @@ namespace SpreadingDevastation
                         "  /dv edge interval [seconds] - Set check interval"
                     };
                     return SendChatLines(args, lines, "Edge spawning settings sent to chat");
+            }
+        }
+
+        private TextCommandResult HandleInitialCommand(TextCommandCallingArgs args)
+        {
+            string setting = (args.Parsers[0].GetValue() as string ?? "").ToLowerInvariant();
+            string value = args.Parsers[1].GetValue() as string ?? "";
+
+            switch (setting)
+            {
+                case "enable":
+                case "on":
+                    // Enable with default 5 days if currently disabled
+                    if (config.InitialSpawnDelayDays < 0)
+                    {
+                        config.InitialSpawnDelayDays = 5.0;
+                    }
+                    SaveConfig();
+                    return TextCommandResult.Success($"Initial spawn ENABLED - devastation will spawn after {config.InitialSpawnDelayDays:F1} in-game days");
+
+                case "disable":
+                case "off":
+                    config.InitialSpawnDelayDays = -1.0;
+                    SaveConfig();
+                    return TextCommandResult.Success("Initial spawn DISABLED - no automatic spawning will occur");
+
+                case "delay":
+                case "days":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        if (config.InitialSpawnDelayDays < 0)
+                        {
+                            return TextCommandResult.Success("Initial spawn delay: DISABLED (set to -1)");
+                        }
+                        return TextCommandResult.Success($"Current initial spawn delay: {config.InitialSpawnDelayDays:F1} in-game days");
+                    }
+                    if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double delayDays))
+                    {
+                        if (delayDays < 0)
+                        {
+                            config.InitialSpawnDelayDays = -1.0;
+                            SaveConfig();
+                            return TextCommandResult.Success("Initial spawn DISABLED (delay set to -1)");
+                        }
+                        config.InitialSpawnDelayDays = delayDays;
+                        SaveConfig();
+                        return TextCommandResult.Success($"Initial spawn delay set to {config.InitialSpawnDelayDays:F1} in-game days");
+                    }
+                    return TextCommandResult.Error("Invalid number. Usage: /dv initial delay [days] (use -1 to disable)");
+
+                case "reset":
+                    // Reset the completed flag to allow the spawn to happen again
+                    initialSpawnCompleted = false;
+                    return TextCommandResult.Success("Initial spawn reset - the spawn will occur again when the time is reached");
+
+                case "trigger":
+                case "spawn":
+                    // Manually trigger the initial spawn immediately
+                    if (initialSpawnCompleted)
+                    {
+                        return TextCommandResult.Error("Initial spawn has already occurred. Use '/dv initial reset' first to allow re-triggering.");
+                    }
+
+                    var allPlayers = sapi.World.AllOnlinePlayers;
+                    if (allPlayers == null || allPlayers.Length == 0)
+                    {
+                        return TextCommandResult.Error("No players online to spawn devastation near");
+                    }
+
+                    // Use the calling player if they're in-game, otherwise pick random
+                    IServerPlayer targetPlayer = args.Caller.Player as IServerPlayer;
+                    if (targetPlayer?.Entity == null)
+                    {
+                        targetPlayer = allPlayers[sapi.World.Rand.Next(allPlayers.Length)] as IServerPlayer;
+                    }
+                    if (targetPlayer?.Entity == null)
+                    {
+                        return TextCommandResult.Error("Could not find a valid player to spawn devastation near");
+                    }
+
+                    int playerChunkX = (int)targetPlayer.Entity.Pos.X / CHUNK_SIZE;
+                    int playerChunkZ = (int)targetPlayer.Entity.Pos.Z / CHUNK_SIZE;
+
+                    if (TrySpawnEdgeDevastation(targetPlayer, playerChunkX, playerChunkZ))
+                    {
+                        initialSpawnCompleted = true;
+                        return TextCommandResult.Success($"Initial devastation manually spawned at render distance edge (near {targetPlayer.PlayerName})");
+                    }
+                    return TextCommandResult.Error("Failed to spawn devastation - no valid location found at render distance edge");
+
+                case "":
+                case "status":
+                case "info":
+                default:
+                    double currentDays = sapi.World.Calendar.TotalDays;
+                    string statusText;
+                    if (config.InitialSpawnDelayDays < 0)
+                    {
+                        statusText = "DISABLED";
+                    }
+                    else if (initialSpawnCompleted)
+                    {
+                        statusText = "COMPLETED";
+                    }
+                    else if (currentDays >= config.InitialSpawnDelayDays)
+                    {
+                        statusText = "PENDING (waiting for valid spawn location)";
+                    }
+                    else
+                    {
+                        double daysRemaining = config.InitialSpawnDelayDays - currentDays;
+                        statusText = $"WAITING ({daysRemaining:F1} days remaining)";
+                    }
+
+                    var lines = new List<string>
+                    {
+                        "=== Initial Spawn (Game Calendar) ===",
+                        $"Status: {statusText}",
+                        $"Delay: {(config.InitialSpawnDelayDays < 0 ? "Disabled" : $"{config.InitialSpawnDelayDays:F1} in-game days")}",
+                        $"Current game time: {currentDays:F1} days",
+                        $"Completed: {(initialSpawnCompleted ? "Yes" : "No")}",
+                        "",
+                        "Commands:",
+                        "  /dv initial [on|off] - Enable or disable initial spawn",
+                        "  /dv initial delay [days] - Set delay in in-game days (-1 to disable)",
+                        "  /dv initial reset - Reset completed flag to allow re-spawn",
+                        "  /dv initial trigger - Manually trigger the spawn now"
+                    };
+                    return SendChatLines(args, lines, "Initial spawn settings sent to chat");
             }
         }
 

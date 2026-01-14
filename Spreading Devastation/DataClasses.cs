@@ -216,6 +216,29 @@ namespace SpreadingDevastation
         public double LastActiveCheck = 0; // Last time we checked if this ward is active
 
         /// <summary>
+        /// Whether this is a mini rift ward (1/4 protection radius, always active).
+        /// </summary>
+        [ProtoMember(15)]
+        public bool IsMiniRiftWard = false;
+
+        /// <summary>
+        /// Custom protection radius for this specific ward.
+        /// If 0 or negative, uses the global RiftWardProtectionRadius config.
+        /// Mini rift wards default to 1/4 of the normal radius (32 blocks vs 128).
+        /// </summary>
+        [ProtoMember(16)]
+        public int CustomProtectionRadius = 0;
+
+        /// <summary>
+        /// Gets the effective protection radius for this ward.
+        /// Returns CustomProtectionRadius if set, otherwise the provided default.
+        /// </summary>
+        public int GetEffectiveRadius(int defaultRadius)
+        {
+            return CustomProtectionRadius > 0 ? CustomProtectionRadius : defaultRadius;
+        }
+
+        /// <summary>
         /// Checks if a position is within the protection radius of this rift ward.
         /// Uses horizontal (2D) distance only - protection is a circle, not a sphere.
         /// </summary>

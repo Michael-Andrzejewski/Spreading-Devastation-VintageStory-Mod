@@ -114,6 +114,9 @@ namespace SpreadingDevastation
             = new Dictionary<string, (long, long)>();
         private BlockPos lastKnownDevastationPos = null; // Track last known devastation position for direction calculation
 
+        // Initial spawn tracking (game calendar based, happens once per world)
+        private bool initialSpawnCompleted = false; // Whether the initial timed spawn has occurred
+
         // Temporal storm devastation tracking
         private double lastStormSpawnTime = 0; // Last game time when storm spawning occurred
         private bool wasStormActiveLastTick = false; // Track storm state transitions
@@ -527,6 +530,9 @@ namespace SpreadingDevastation
             // Process edge spawning every 1 second (actual interval controlled by config)
             api.Event.RegisterGameTickListener(ProcessEdgeSpawning, 1000);
 
+            // Process initial spawn check every 5 seconds (game calendar based, one-time event)
+            api.Event.RegisterGameTickListener(ProcessInitialSpawn, 5000);
+
             // Process temporal storm devastation every 1 second (actual interval controlled by config)
             api.Event.RegisterGameTickListener(ProcessTemporalStormDevastation, 1000);
 
@@ -908,6 +914,10 @@ namespace SpreadingDevastation
                 byte[] riftWardsData = sapi.WorldManager.SaveGame.GetData("riftWards");
                 activeRiftWards = riftWardsData == null ? new List<RiftWard>() : SerializerUtil.Deserialize<List<RiftWard>>(riftWardsData);
 
+                // Load initial spawn completed flag
+                byte[] initialSpawnData = sapi.WorldManager.SaveGame.GetData("initialSpawnCompleted");
+                initialSpawnCompleted = initialSpawnData == null ? false : SerializerUtil.Deserialize<bool>(initialSpawnData);
+
                 // Rebuild protected chunk cache
                 RebuildProtectedChunkCache();
 
@@ -940,6 +950,9 @@ namespace SpreadingDevastation
 
                 // Save rift wards
                 sapi.WorldManager.SaveGame.StoreData("riftWards", SerializerUtil.Serialize(activeRiftWards ?? new List<RiftWard>()));
+
+                // Save initial spawn completed flag
+                sapi.WorldManager.SaveGame.StoreData("initialSpawnCompleted", SerializerUtil.Serialize(initialSpawnCompleted));
 
                 sapi.Logger.VerboseDebug($"SpreadingDevastation: Saved {devastationSources?.Count ?? 0} sources, {devastatedChunks?.Count ?? 0} devastated chunks, {activeRiftWards?.Count ?? 0} rift wards");
             }
@@ -3038,7 +3051,8 @@ namespace SpreadingDevastation
                     if (particleCount >= maxParticles) break;
                     if (ward.Pos == null || !ward.CachedIsActive) continue;
 
-                    int radius = config.RiftWardProtectionRadius;
+                    // Use per-ward radius (mini rift wards have smaller radius)
+                    int radius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
 
                     // Sample points along the circular edge of the protection radius
                     // Distribute particles evenly across all active wards
@@ -4244,6 +4258,64 @@ namespace SpreadingDevastation
             {
                 playerEdgeSpawnTracking.Remove(uid);
             }
+        }
+
+        // ==================== Initial Spawn System ====================
+        // One-time spawn of devastation based on game calendar time
+
+        /// <summary>
+        /// Processes the one-time initial spawn of devastation based on game calendar.
+        /// When InitialSpawnDelayDays is set to a positive value, devastation will spawn
+        /// at a random player's render distance edge after that many in-game days.
+        /// This only happens once per world.
+        /// </summary>
+        private void ProcessInitialSpawn(float dt)
+        {
+            // Skip if disabled (negative value means infinity/disabled)
+            if (config.InitialSpawnDelayDays < 0) return;
+
+            // Skip if already completed
+            if (initialSpawnCompleted) return;
+
+            // Skip if paused or no sapi
+            if (isPaused || sapi == null) return;
+
+            // Skip if devastated chunks not initialized
+            if (devastatedChunks == null) return;
+
+            // Check if the game calendar has reached the configured time
+            double currentDays = sapi.World.Calendar.TotalDays;
+            if (currentDays < config.InitialSpawnDelayDays) return;
+
+            // Time has been reached - try to spawn devastation for a random online player
+            var allPlayers = sapi.World.AllOnlinePlayers;
+            if (allPlayers == null || allPlayers.Length == 0) return;
+
+            // Pick a random player
+            IServerPlayer player = allPlayers[sapi.World.Rand.Next(allPlayers.Length)] as IServerPlayer;
+            if (player?.Entity == null) return;
+
+            int playerChunkX = (int)player.Entity.Pos.X / CHUNK_SIZE;
+            int playerChunkZ = (int)player.Entity.Pos.Z / CHUNK_SIZE;
+
+            // Try to spawn devastation at the edge of render distance
+            if (TrySpawnEdgeDevastation(player, playerChunkX, playerChunkZ))
+            {
+                initialSpawnCompleted = true;
+                sapi.Logger.Notification($"SpreadingDevastation: Initial devastation spawned at render distance edge after {currentDays:F1} in-game days (player: {player.PlayerName})");
+
+                // Notify all players
+                foreach (var p in allPlayers)
+                {
+                    if (p is IServerPlayer sp)
+                    {
+                        sp.SendMessage(GlobalConstants.GeneralChatGroup,
+                            "Something stirs at the edge of your vision... Devastation has begun to spread.",
+                            EnumChatType.Notification);
+                    }
+                }
+            }
+            // If spawn failed, we'll try again on the next tick
         }
 
         // ==================== Temporal Storm Devastation System ====================
@@ -5995,12 +6067,24 @@ namespace SpreadingDevastation
                 }
                 if (!alreadyTracked)
                 {
-                    activeRiftWards.Add(new RiftWard
+                    bool isMini = IsMiniRiftWardBlock(block);
+                    // Mini rift wards get 1/4 the protection radius (32 vs 128 default)
+                    int customRadius = isMini ? config.RiftWardProtectionRadius / 4 : 0;
+
+                    var newWard = new RiftWard
                     {
                         Pos = blockSel.Position.Copy(),
-                        DiscoveredTime = sapi.World.Calendar.TotalHours
-                    });
-                    sapi.Logger.Notification($"SpreadingDevastation: Rift ward placed at {blockSel.Position}");
+                        DiscoveredTime = sapi.World.Calendar.TotalHours,
+                        IsMiniRiftWard = isMini,
+                        CustomProtectionRadius = customRadius,
+                        // Mini rift wards are always active (no fuel required)
+                        CachedIsActive = isMini
+                    };
+                    activeRiftWards.Add(newWard);
+
+                    string wardType = isMini ? "Mini rift ward" : "Rift ward";
+                    int effectiveRadius = newWard.GetEffectiveRadius(config.RiftWardProtectionRadius);
+                    sapi.Logger.Notification($"SpreadingDevastation: {wardType} placed at {blockSel.Position} (radius: {effectiveRadius})");
                     RebuildProtectedChunkCache();
                 }
             }
@@ -6056,6 +6140,7 @@ namespace SpreadingDevastation
 
         /// <summary>
         /// Called when a block is broken. Removes rift ward from tracking if applicable.
+        /// When a rift ward is broken, re-checks the area for devastated blocks that need tracking.
         /// </summary>
         private void OnBlockBroken(IServerPlayer byPlayer, int oldblockId, BlockSelection blockSel)
         {
@@ -6066,9 +6151,81 @@ namespace SpreadingDevastation
             var ward = activeRiftWards.FirstOrDefault(rw => GetPositionKey(rw.Pos) == posKey);
             if (ward != null)
             {
+                // Get the ward's protection radius before removing it
+                int wardRadius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+                BlockPos wardPos = ward.Pos.Copy();
+
                 activeRiftWards.Remove(ward);
                 sapi.Logger.Notification($"SpreadingDevastation: Rift ward at {blockSel.Position} was broken (healed {ward.BlocksHealed} blocks)");
                 RebuildProtectedChunkCache();
+
+                // Re-check the area that was protected - if there are adjacent devastated chunks,
+                // the area may need to be re-added to devastation tracking
+                ReactivateDevastationInBrokenWardArea(wardPos, wardRadius);
+            }
+        }
+
+        /// <summary>
+        /// When a rift ward is broken, checks adjacent chunks for devastation and re-initializes
+        /// tracking for chunks in the formerly protected area that border devastated chunks.
+        /// </summary>
+        private void ReactivateDevastationInBrokenWardArea(BlockPos wardPos, int wardRadius)
+        {
+            if (wardPos == null || devastatedChunks == null) return;
+
+            // Calculate the chunk range that was protected by this ward
+            int minChunkX = (wardPos.X - wardRadius) / CHUNK_SIZE;
+            int maxChunkX = (wardPos.X + wardRadius) / CHUNK_SIZE;
+            int minChunkZ = (wardPos.Z - wardRadius) / CHUNK_SIZE;
+            int maxChunkZ = (wardPos.Z + wardRadius) / CHUNK_SIZE;
+
+            // Find chunks just outside the protected area that have devastation
+            // These can now spread back into the formerly protected area
+            var adjacentDevastatedChunks = new List<DevastatedChunk>();
+
+            // Check a 1-chunk border around the protected area
+            for (int cx = minChunkX - 1; cx <= maxChunkX + 1; cx++)
+            {
+                for (int cz = minChunkZ - 1; cz <= maxChunkZ + 1; cz++)
+                {
+                    // Skip chunks that were inside the protection radius
+                    int chunkCenterX = cx * CHUNK_SIZE + CHUNK_SIZE / 2;
+                    int chunkCenterZ = cz * CHUNK_SIZE + CHUNK_SIZE / 2;
+                    int dx = chunkCenterX - wardPos.X;
+                    int dz = chunkCenterZ - wardPos.Z;
+                    if (dx * dx + dz * dz <= wardRadius * wardRadius) continue;
+
+                    // Check if this chunk is devastated
+                    long chunkKey = DevastatedChunk.MakeChunkKey(cx, cz);
+                    if (devastatedChunks.TryGetValue(chunkKey, out var chunk))
+                    {
+                        adjacentDevastatedChunks.Add(chunk);
+                    }
+                }
+            }
+
+            if (adjacentDevastatedChunks.Count == 0)
+            {
+                // No adjacent devastated chunks - check if there are any devastated blocks
+                // in the formerly protected area that need tracking
+                return;
+            }
+
+            // Re-initialize frontier for adjacent devastated chunks so they can spread into the unprotected area
+            int chunksReactivated = 0;
+            foreach (var chunk in adjacentDevastatedChunks)
+            {
+                if (chunk.IsFullyDevastated || chunk.IsUnrepairable) continue;
+
+                // Mark chunk as needing frontier rebuild
+                chunk.FrontierInitialized = false;
+                chunk.ConsecutiveEmptyFrontierChecks = 0;
+                chunksReactivated++;
+            }
+
+            if (chunksReactivated > 0)
+            {
+                sapi.Logger.Notification($"SpreadingDevastation: Reactivated {chunksReactivated} chunk(s) to spread into unprotected area after rift ward broken");
             }
         }
 
@@ -6135,7 +6292,6 @@ namespace SpreadingDevastation
         {
             if (activeRiftWards == null || activeRiftWards.Count == 0) return;
 
-            int maxRadius = config.RiftWardProtectionRadius;
             double waveIntervalHours = 0.5 / 3600.0; // 0.5 seconds in game hours
 
             foreach (var ward in activeRiftWards)
@@ -6148,6 +6304,9 @@ namespace SpreadingDevastation
 
                 ward.LastActivationWaveTime = currentTime;
                 ward.ActivationWaveRadius++;
+
+                // Use per-ward radius (mini rift wards have smaller radius)
+                int maxRadius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
 
                 // Check if wave is complete
                 if (ward.ActivationWaveRadius > maxRadius)
@@ -6253,11 +6412,14 @@ namespace SpreadingDevastation
                     continue;
                 }
 
-                // Check active state
+                // Check active state and detect transitions
+                bool wasActive = ward.CachedIsActive;
                 bool isActive = IsRiftWardActive(ward.Pos);
+                ward.CachedIsActive = isActive;
+                ward.LastActiveCheck = sapi.World.Calendar.TotalHours;
 
-                // If ward just became active, notify and apply protection effects
-                if (isActive && ward.BlocksHealed == 0 && ward.LastHealTime == 0)
+                // If ward just became active (transitioning from inactive to active)
+                if (isActive && !wasActive)
                 {
                     BroadcastMessage($"Rift ward at {ward.Pos} is now ACTIVE and protecting!");
 
@@ -6283,13 +6445,10 @@ namespace SpreadingDevastation
                     anyBecameActive = true;
                 }
 
-                // If ward ran out of fuel, remove from active tracking
-                // (but don't remove entirely - it might be refueled)
-                if (!isActive && ward.LastHealTime > 0)
+                // If ward just ran out of fuel (transitioning from active to inactive)
+                if (!isActive && wasActive)
                 {
                     sapi.Logger.Notification($"SpreadingDevastation: Rift ward at {ward.Pos} ran out of fuel (healed {ward.BlocksHealed} blocks)");
-                    // Reset heal time so we can detect when it becomes active again
-                    ward.LastHealTime = 0;
                 }
             }
 
@@ -6305,16 +6464,36 @@ namespace SpreadingDevastation
         }
 
         /// <summary>
-        /// Checks if a block is a rift ward block.
+        /// Checks if a block is a rift ward block (includes mini rift wards).
         /// </summary>
         private bool IsRiftWardBlock(Block block)
         {
             if (block == null || block.Code == null) return false;
 
             // Check for game:riftward block
-            return block.Code.Path == "riftward" ||
-                   block.Code.ToString() == "game:riftward" ||
-                   block.Code.Path.Contains("riftward");
+            if (block.Code.Path == "riftward" ||
+                block.Code.ToString() == "game:riftward" ||
+                block.Code.Path.Contains("riftward"))
+            {
+                return true;
+            }
+
+            // Check for mini rift ward from this mod
+            if (block.Code.Domain == "spreadingdevastation" && block.Code.Path.StartsWith("miniriftward"))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Checks if a block is specifically a mini rift ward.
+        /// </summary>
+        private bool IsMiniRiftWardBlock(Block block)
+        {
+            if (block == null || block.Code == null) return false;
+            return block.Code.Domain == "spreadingdevastation" && block.Code.Path.StartsWith("miniriftward");
         }
 
         /// <summary>
@@ -6337,6 +6516,7 @@ namespace SpreadingDevastation
         /// Uses cached reflection to access the BlockEntityRiftWard properties since it's in the game DLL.
         /// The ward has an "On" property (bool) that indicates if it's running, separate from fuel.
         /// Players can toggle the ward on/off by right-clicking even when it has fuel.
+        /// Mini rift wards are always active (no fuel required).
         /// </summary>
         private bool IsRiftWardActive(BlockPos pos)
         {
@@ -6344,7 +6524,14 @@ namespace SpreadingDevastation
 
             try
             {
-                // Get the block entity at this position
+                // First check if it's a mini rift ward block - these are always active
+                Block block = sapi.World.BlockAccessor.GetBlock(pos);
+                if (IsMiniRiftWardBlock(block))
+                {
+                    return true; // Mini rift wards don't need fuel - always active
+                }
+
+                // Get the block entity at this position (for regular rift wards)
                 var blockEntity = sapi.World.BlockAccessor.GetBlockEntity(pos);
                 if (blockEntity == null) return false;
 
@@ -6462,8 +6649,37 @@ namespace SpreadingDevastation
                 // Use cached active state, only check via reflection once per second
                 if (currentTime - ward.LastActiveCheck >= activeCheckIntervalHours)
                 {
+                    bool wasActive = ward.CachedIsActive;
                     ward.CachedIsActive = IsRiftWardActive(ward.Pos);
                     ward.LastActiveCheck = currentTime;
+
+                    // Detect transition from inactive to active and trigger activation wave
+                    if (ward.CachedIsActive && !wasActive && !ward.ActivationWaveInProgress)
+                    {
+                        BroadcastMessage($"Rift ward at {ward.Pos} is now ACTIVE and protecting!");
+
+                        // Remove devastation sources
+                        int removedSources = RemoveSourcesInRiftWardRadius(ward);
+                        if (removedSources > 0)
+                        {
+                            BroadcastMessage($"Rift ward neutralized {removedSources} devastation source(s)!");
+                        }
+
+                        // Clear devastated chunks (restores temporal stability)
+                        int clearedChunks = RemoveDevastatedChunksInRiftWardRadius(ward);
+                        if (clearedChunks > 0)
+                        {
+                            BroadcastMessage($"Rift ward restored temporal stability to {clearedChunks} chunk(s)!");
+                        }
+
+                        // Start the activation wave particle effect
+                        ward.ActivationWaveInProgress = true;
+                        ward.ActivationWaveRadius = 0;
+                        ward.LastActivationWaveTime = currentTime;
+
+                        // Rebuild protected chunk cache
+                        RebuildProtectedChunkCache();
+                    }
                 }
 
                 // Only heal if the rift ward is active (has fuel)
@@ -6509,6 +6725,9 @@ namespace SpreadingDevastation
             {
                 if (ward.Pos == null || !ward.CachedIsActive) continue;
 
+                // Use per-ward radius (mini rift wards have smaller radius)
+                int wardRadius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+
                 // Determine the clean radius based on mode
                 int cleanRadius;
                 if (mode == "raster")
@@ -6516,7 +6735,7 @@ namespace SpreadingDevastation
                     // For raster mode, use CurrentCleanRadius - the actual expanding shell position
                     // This ensures fog/effects only clear once the shell has actually reached that area
                     // If scan is complete, use the full protection radius
-                    cleanRadius = ward.RasterScanComplete ? config.RiftWardProtectionRadius : ward.CurrentCleanRadius;
+                    cleanRadius = ward.RasterScanComplete ? wardRadius : ward.CurrentCleanRadius;
                 }
                 else if (mode == "radial")
                 {
@@ -6526,7 +6745,7 @@ namespace SpreadingDevastation
                 else
                 {
                     // For random mode, use full protection radius since cleaning is random throughout
-                    cleanRadius = config.RiftWardProtectionRadius;
+                    cleanRadius = wardRadius;
                 }
 
                 // Need at least some radius to clear chunks
@@ -6597,7 +6816,8 @@ namespace SpreadingDevastation
         private int HealBlocksRadialClean(RiftWard ward, int blocksToHeal)
         {
             int healedCount = 0;
-            int maxRadius = config.RiftWardProtectionRadius;
+            // Use per-ward radius (mini rift wards have smaller radius)
+            int maxRadius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
             int maxFailuresPerRadius = 100; // How many failed attempts before advancing radius
 
             // Calculate Y bounds for scanning - scan full column within protection sphere
@@ -6728,7 +6948,8 @@ namespace SpreadingDevastation
         {
             int healedCount = 0;
             int maxAttempts = blocksToHeal * 10;
-            int radius = config.RiftWardProtectionRadius;
+            // Use per-ward radius (mini rift wards have smaller radius)
+            int radius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
 
             for (int attempt = 0; attempt < maxAttempts && healedCount < blocksToHeal; attempt++)
             {
@@ -6791,7 +7012,8 @@ namespace SpreadingDevastation
         private int HealBlocksRasterScan(RiftWard ward, int blocksToHeal)
         {
             int healedCount = 0;
-            int maxRadius = config.RiftWardProtectionRadius;
+            // Use per-ward radius (mini rift wards have smaller radius)
+            int maxRadius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
 
             // CurrentCleanRadius tracks which spherical shell we're currently processing
             // ScanX, ScanY, ScanZ track position within that shell
@@ -6960,7 +7182,7 @@ namespace SpreadingDevastation
         /// <summary>
         /// Rebuilds the cache of chunk keys that are protected by rift wards.
         /// Uses horizontal (2D) distance for protection radius.
-        /// - protectedChunkKeys: All chunks that touch the protection radius (includes partially protected)
+        /// - protectedChunkKeys: All chunks that touch the protection radius + buffer (includes partially protected)
         /// - fullyProtectedChunkKeys: Chunks entirely within the protection radius
         /// </summary>
         private void RebuildProtectedChunkCache()
@@ -6972,14 +7194,17 @@ namespace SpreadingDevastation
             {
                 if (ward.Pos == null) continue;
 
-                int radius = config.RiftWardProtectionRadius;
+                // Use per-ward radius (mini rift wards have smaller radius)
+                int radius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+                int radiusWithBuffer = radius + RIFT_WARD_PROTECTION_BUFFER;
                 int radiusSquared = radius * radius;
+                int radiusWithBufferSquared = radiusWithBuffer * radiusWithBuffer;
 
-                // Calculate which chunks could be covered by this rift ward
-                int minChunkX = (ward.Pos.X - radius) / CHUNK_SIZE;
-                int maxChunkX = (ward.Pos.X + radius) / CHUNK_SIZE;
-                int minChunkZ = (ward.Pos.Z - radius) / CHUNK_SIZE;
-                int maxChunkZ = (ward.Pos.Z + radius) / CHUNK_SIZE;
+                // Calculate which chunks could be covered by this rift ward (including buffer)
+                int minChunkX = (ward.Pos.X - radiusWithBuffer) / CHUNK_SIZE;
+                int maxChunkX = (ward.Pos.X + radiusWithBuffer) / CHUNK_SIZE;
+                int minChunkZ = (ward.Pos.Z - radiusWithBuffer) / CHUNK_SIZE;
+                int maxChunkZ = (ward.Pos.Z + radiusWithBuffer) / CHUNK_SIZE;
 
                 for (int cx = minChunkX; cx <= maxChunkX; cx++)
                 {
@@ -6991,7 +7216,7 @@ namespace SpreadingDevastation
                         int chunkMinZ = cz * CHUNK_SIZE;
                         int chunkMaxZ = chunkMinZ + CHUNK_SIZE - 1;
 
-                        // Check if any part of the chunk is within the protection radius
+                        // Check if any part of the chunk is within the protection radius + buffer
                         // Use the closest point on the chunk to the ward for this check
                         int closestX = Math.Max(chunkMinX, Math.Min(ward.Pos.X, chunkMaxX));
                         int closestZ = Math.Max(chunkMinZ, Math.Min(ward.Pos.Z, chunkMaxZ));
@@ -6999,12 +7224,12 @@ namespace SpreadingDevastation
                         int dzClosest = closestZ - ward.Pos.Z;
                         int closestDistSquared = dxClosest * dxClosest + dzClosest * dzClosest;
 
-                        if (closestDistSquared <= radiusSquared)
+                        if (closestDistSquared <= radiusWithBufferSquared)
                         {
-                            // At least part of the chunk is within the radius
+                            // At least part of the chunk is within the radius + buffer
                             protectedChunkKeys.Add(DevastatedChunk.MakeChunkKey(cx, cz));
 
-                            // Check if the ENTIRE chunk is within the protection radius
+                            // Check if the ENTIRE chunk is within the base protection radius (no buffer)
                             // by checking all four corners (using 2D horizontal distance)
                             int[] cornerXs = { chunkMinX, chunkMaxX, chunkMinX, chunkMaxX };
                             int[] cornerZs = { chunkMinZ, chunkMinZ, chunkMaxZ, chunkMaxZ };
@@ -7042,7 +7267,9 @@ namespace SpreadingDevastation
             if (ward?.Pos == null || devastationSources == null || devastationSources.Count == 0)
                 return 0;
 
-            int radiusSquared = config.RiftWardProtectionRadius * config.RiftWardProtectionRadius;
+            // Use per-ward radius (mini rift wards have smaller radius)
+            int radius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+            int radiusSquared = radius * radius;
 
             int removed = devastationSources.RemoveAll(source =>
             {
@@ -7077,7 +7304,7 @@ namespace SpreadingDevastation
             if (devastationSources == null || devastationSources.Count == 0)
                 return 0;
 
-            // Collect active wards with valid positions
+            // Collect active wards with valid positions and their radii
             var activeWards = new List<RiftWard>();
             foreach (var ward in activeRiftWards)
             {
@@ -7086,8 +7313,6 @@ namespace SpreadingDevastation
             }
             if (activeWards.Count == 0) return 0;
 
-            int radiusSquared = config.RiftWardProtectionRadius * config.RiftWardProtectionRadius;
-
             // Single pass: remove sources that are within ANY active ward's radius
             int removed = devastationSources.RemoveAll(source =>
             {
@@ -7095,6 +7320,10 @@ namespace SpreadingDevastation
 
                 foreach (var ward in activeWards)
                 {
+                    // Use per-ward radius (mini rift wards have smaller radius)
+                    int radius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+                    int radiusSquared = radius * radius;
+
                     // Use horizontal distance only (X and Z, ignoring Y)
                     int dx = source.Pos.X - ward.Pos.X;
                     int dz = source.Pos.Z - ward.Pos.Z;
@@ -7282,13 +7511,16 @@ namespace SpreadingDevastation
             if (ward?.Pos == null || devastatedChunks == null || devastatedChunks.Count == 0)
                 return 0;
 
+            // Use per-ward radius (mini rift wards have smaller radius)
+            int wardRadius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+
             // Determine the effective radius based on mode
             string mode = GetEffectiveCleanMode();
             int radius;
             if (mode == "raster")
             {
                 // In raster mode, only clear chunks within the current shell radius
-                radius = ward.RasterScanComplete ? config.RiftWardProtectionRadius : ward.CurrentCleanRadius;
+                radius = ward.RasterScanComplete ? wardRadius : ward.CurrentCleanRadius;
             }
             else if (mode == "radial")
             {
@@ -7296,7 +7528,7 @@ namespace SpreadingDevastation
             }
             else
             {
-                radius = config.RiftWardProtectionRadius;
+                radius = wardRadius;
             }
 
             // If radius is 0, nothing to clear yet
@@ -7368,10 +7600,13 @@ namespace SpreadingDevastation
             {
                 if (!ward.CachedIsActive || ward.Pos == null) continue;
 
+                // Use per-ward radius (mini rift wards have smaller radius)
+                int wardRadius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+
                 int radius;
                 if (mode == "raster")
                 {
-                    radius = ward.RasterScanComplete ? config.RiftWardProtectionRadius : ward.CurrentCleanRadius;
+                    radius = ward.RasterScanComplete ? wardRadius : ward.CurrentCleanRadius;
                 }
                 else if (mode == "radial")
                 {
@@ -7379,7 +7614,7 @@ namespace SpreadingDevastation
                 }
                 else
                 {
-                    radius = config.RiftWardProtectionRadius;
+                    radius = wardRadius;
                 }
 
                 if (radius < 1) continue;
@@ -7428,8 +7663,16 @@ namespace SpreadingDevastation
         }
 
         /// <summary>
+        /// Buffer zone in blocks beyond the protection radius where blocks won't be devastated.
+        /// This prevents flickering at the boundary where blocks would otherwise be
+        /// devastated and healed repeatedly.
+        /// </summary>
+        private const int RIFT_WARD_PROTECTION_BUFFER = 2;
+
+        /// <summary>
         /// Checks if a block position is protected by any active rift ward.
         /// Uses horizontal (2D) distance only - protection is a circle, not a sphere.
+        /// Includes a small buffer zone beyond the protection radius to prevent edge flickering.
         /// </summary>
         private bool IsBlockProtectedByRiftWard(BlockPos pos)
         {
@@ -7443,11 +7686,15 @@ namespace SpreadingDevastation
             if (!protectedChunkKeys.Contains(chunkKey)) return false;
 
             // Detailed per-ward check using horizontal (2D) distance
-            int radiusSquared = config.RiftWardProtectionRadius * config.RiftWardProtectionRadius;
-
+            // Add buffer to prevent flickering at the edge (devastate/heal loop)
             foreach (var ward in activeRiftWards)
             {
                 if (ward.Pos == null) continue;
+
+                // Use per-ward radius (mini rift wards have smaller radius)
+                int radius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+                int radiusPlusBuffer = radius + RIFT_WARD_PROTECTION_BUFFER;
+                int radiusSquared = radiusPlusBuffer * radiusPlusBuffer;
 
                 // Use horizontal distance only (X and Z, ignoring Y)
                 int dx = pos.X - ward.Pos.X;
@@ -7555,12 +7802,15 @@ namespace SpreadingDevastation
                 int dz = pos.Z - ward.Pos.Z;
                 int distanceSquared = dx * dx + dz * dz;
 
+                // Use per-ward radius (mini rift wards have smaller radius)
+                int wardRadius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+
                 // Determine the effective cleansed radius for this ward
                 int cleansedRadius;
                 if (mode == "raster")
                 {
                     // In raster mode, use the current shell radius
-                    cleansedRadius = ward.RasterScanComplete ? config.RiftWardProtectionRadius : ward.CurrentCleanRadius;
+                    cleansedRadius = ward.RasterScanComplete ? wardRadius : ward.CurrentCleanRadius;
                 }
                 else if (mode == "radial")
                 {
@@ -7569,7 +7819,7 @@ namespace SpreadingDevastation
                 else
                 {
                     // Random mode - use full radius
-                    cleansedRadius = config.RiftWardProtectionRadius;
+                    cleansedRadius = wardRadius;
                 }
 
                 if (distanceSquared <= cleansedRadius * cleansedRadius)
@@ -7602,11 +7852,14 @@ namespace SpreadingDevastation
                 int dz = chunkCenterZ - ward.Pos.Z;
                 int distanceSquared = dx * dx + dz * dz;
 
+                // Use per-ward radius (mini rift wards have smaller radius)
+                int wardRadius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+
                 // Determine the effective cleansed radius for this ward
                 int cleansedRadius;
                 if (mode == "raster")
                 {
-                    cleansedRadius = ward.RasterScanComplete ? config.RiftWardProtectionRadius : ward.CurrentCleanRadius;
+                    cleansedRadius = ward.RasterScanComplete ? wardRadius : ward.CurrentCleanRadius;
                 }
                 else if (mode == "radial")
                 {
@@ -7614,7 +7867,7 @@ namespace SpreadingDevastation
                 }
                 else
                 {
-                    cleansedRadius = config.RiftWardProtectionRadius;
+                    cleansedRadius = wardRadius;
                 }
 
                 if (distanceSquared <= cleansedRadius * cleansedRadius)

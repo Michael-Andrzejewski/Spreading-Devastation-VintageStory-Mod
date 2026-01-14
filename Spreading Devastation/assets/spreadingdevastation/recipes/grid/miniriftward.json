@@ -1,0 +1,15 @@
+[
+    {
+        "ingredientPattern": "_T_,CGC,RSR",
+        "ingredients": {
+            "T": { "type": "item", "code": "game:gear-temporal" },
+            "C": { "type": "item", "code": "game:rod-copper" },
+            "G": { "type": "block", "code": "game:glass-quartz" },
+            "R": { "type": "item", "code": "game:gear-rusty" },
+            "S": { "type": "item", "code": "game:stick" }
+        },
+        "width": 3,
+        "height": 3,
+        "output": { "type": "block", "code": "spreadingdevastation:miniriftward-copper", "quantity": 1 }
+    }
+]

@@ -724,6 +724,16 @@ namespace SpreadingDevastation
         /// </summary>
         public float StabilityOverrideValue { get; set; } = 0f;
 
+        // === Initial Devastation Spawn Settings ===
+
+        /// <summary>
+        /// Number of in-game days before initial devastation spawns at render distance edge (default: -1 = disabled).
+        /// When set to a positive value (e.g., 5.0), devastation will automatically spawn at a player's render
+        /// distance edge after that many in-game days have passed. This only happens once per world.
+        /// Uses the game calendar (not real time). Set to -1 to disable automatic initial spawning.
+        /// </summary>
+        public double InitialSpawnDelayDays { get; set; } = -1.0;
+
         // === Render Distance Edge Spawning Settings ===
 
         /// <summary>
