@@ -96,6 +96,11 @@ namespace SpreadingDevastation
                     .WithArgs(api.ChatCommands.Parsers.OptionalWord("multiplier"))
                     .HandleWith(HandleSpeedCommand)
                 .EndSubCommand()
+                .BeginSubCommand("maxspeed")
+                    .WithDescription("Set maximum devastation spread speed (cap)")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("multiplier"))
+                    .HandleWith(HandleMaxSpeedCommand)
+                .EndSubCommand()
                 .BeginSubCommand("chunk")
                     .WithDescription("Mark the chunk you're looking at as devastated, or configure chunk settings")
                     .WithArgs(api.ChatCommands.Parsers.OptionalWord("action"),
@@ -356,6 +361,30 @@ namespace SpreadingDevastation
             return TextCommandResult.Success($"Devastation speed set to {config.SpeedMultiplier:F2}x");
         }
 
+        private TextCommandResult HandleMaxSpeedCommand(TextCommandCallingArgs args)
+        {
+            string rawArg = args.Parsers[0].GetValue() as string;
+
+            if (string.IsNullOrWhiteSpace(rawArg))
+            {
+                return SendChatLines(args, new[]
+                {
+                    $"Current max devastation speed: {config.MaxSpeedMultiplier:F2}x",
+                    "Usage: /dv maxspeed [multiplier] (e.g., 20 to cap at 20x)"
+                }, "Max speed info sent to chat (scrollable)");
+            }
+
+            if (!double.TryParse(rawArg, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsedSpeed))
+            {
+                return TextCommandResult.Error("Invalid number. Usage: /dv maxspeed [multiplier] (e.g., 10, 20, 50)");
+            }
+
+            double newMaxSpeed = Math.Clamp(parsedSpeed, 0.1, 1000.0);
+            config.MaxSpeedMultiplier = newMaxSpeed;
+            SaveConfig();
+            return TextCommandResult.Success($"Maximum devastation speed set to {config.MaxSpeedMultiplier:F2}x");
+        }
+
         private TextCommandResult HandleRiftWardCommand(TextCommandCallingArgs args)
         {
             string action = args.Parsers[0].GetValue() as string ?? "";
@@ -389,16 +418,28 @@ namespace SpreadingDevastation
                     }
                     return TextCommandResult.Error("Invalid number for radius");
 
+                case "stormshrink":
+                    return HandleRiftWardStormShrinkCommand(value);
+
                 case "":
                 case "info":
                 case "status":
                     double effectiveSpeed = config.RiftWardSpeedMultiplier > 0 ? config.RiftWardSpeedMultiplier : config.SpeedMultiplier;
                     string speedSource = config.RiftWardSpeedMultiplier > 0 ? "custom" : "global";
                     string healingMode = GetEffectiveCleanMode();
+                    bool stormActive = IsTemporalStormActive();
+                    int currentRadius = GetRiftWardProtectionRadius();
+                    string radiusInfo = stormActive && config.RiftWardTemporalStormShrinkEnabled
+                        ? $"{config.RiftWardProtectionRadius} blocks (currently {currentRadius} during storm)"
+                        : $"{config.RiftWardProtectionRadius} blocks";
+                    string stormShrinkInfo = config.RiftWardTemporalStormShrinkEnabled
+                        ? $"ON ({config.RiftWardTemporalStormShrinkFraction * 100:F0}% shrink)"
+                        : "OFF";
                     return SendChatLines(args, new[]
                     {
                         "=== Rift Ward Settings ===",
-                        $"Protection radius: {config.RiftWardProtectionRadius} blocks",
+                        $"Protection radius: {radiusInfo}",
+                        $"Storm shrink: {stormShrinkInfo}",
                         $"Healing enabled: {config.RiftWardHealingEnabled}",
                         $"Healing mode: {healingMode} (raster=efficient scan, radial=outward, random=anywhere)",
                         $"Base healing rate: {config.RiftWardHealingRate:F1} blocks per sec",
@@ -408,6 +449,7 @@ namespace SpreadingDevastation
                         "",
                         "Commands:",
                         "  /dv riftward radius [blocks] - Set protection radius",
+                        "  /dv riftward stormshrink [on|off|fraction] - Storm shrink settings",
                         "  /dv riftward speed [multiplier] - Set healing speed (or 'global' to use /dv speed)",
                         "  /dv riftward rate [value] - Set base healing rate",
                         "  /dv riftward mode [raster|radial|random] - Set healing pattern mode",
@@ -415,7 +457,7 @@ namespace SpreadingDevastation
                     }, "Rift ward info sent to chat");
 
                 default:
-                    return TextCommandResult.Error($"Unknown riftward action: {action}. Use: radius, speed, rate, mode, list, or info");
+                    return TextCommandResult.Error($"Unknown riftward action: {action}. Use: radius, stormshrink, speed, rate, mode, list, or info");
             }
         }
 
@@ -463,6 +505,51 @@ namespace SpreadingDevastation
             SaveConfig();
             double effectiveSpeed = config.RiftWardSpeedMultiplier > 0 ? config.RiftWardSpeedMultiplier : config.SpeedMultiplier;
             return TextCommandResult.Success($"Rift ward base healing rate set to {config.RiftWardHealingRate:F1} blocks per sec (effective: {config.RiftWardHealingRate * effectiveSpeed:F1} blocks per sec)");
+        }
+
+        private TextCommandResult HandleRiftWardStormShrinkCommand(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                string status = config.RiftWardTemporalStormShrinkEnabled
+                    ? $"ON ({config.RiftWardTemporalStormShrinkFraction * 100:F0}% shrink)"
+                    : "OFF";
+                bool stormActive = IsTemporalStormActive();
+                string stormStatus = stormActive ? " (storm active)" : "";
+                return TextCommandResult.Success($"Rift ward storm shrink: {status}{stormStatus}. Use '/dv riftward stormshrink [on|off|0.0-1.0]' to set.");
+            }
+
+            string valueLower = value.ToLowerInvariant();
+
+            if (valueLower == "on" || valueLower == "enable" || valueLower == "true")
+            {
+                config.RiftWardTemporalStormShrinkEnabled = true;
+                SaveConfig();
+                RebuildProtectedChunkCache();
+                return TextCommandResult.Success($"Rift ward storm shrink ENABLED. Protection shrinks by {config.RiftWardTemporalStormShrinkFraction * 100:F0}% during temporal storms.");
+            }
+
+            if (valueLower == "off" || valueLower == "disable" || valueLower == "false")
+            {
+                config.RiftWardTemporalStormShrinkEnabled = false;
+                SaveConfig();
+                RebuildProtectedChunkCache();
+                return TextCommandResult.Success("Rift ward storm shrink DISABLED. Protection radius stays constant during storms.");
+            }
+
+            // Try to parse as a fraction (0.0 to 1.0)
+            if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double fraction))
+            {
+                config.RiftWardTemporalStormShrinkFraction = Math.Clamp(fraction, 0.0, 1.0);
+                config.RiftWardTemporalStormShrinkEnabled = true; // Enable when setting a value
+                SaveConfig();
+                RebuildProtectedChunkCache();
+                int normalRadius = config.RiftWardProtectionRadius;
+                int shrunkRadius = (int)(normalRadius * (1.0 - config.RiftWardTemporalStormShrinkFraction));
+                return TextCommandResult.Success($"Rift ward storm shrink set to {config.RiftWardTemporalStormShrinkFraction * 100:F0}%. During storms: {normalRadius} blocks becomes {shrunkRadius} blocks.");
+            }
+
+            return TextCommandResult.Error("Invalid value. Usage: /dv riftward stormshrink [on|off|0.0-1.0]");
         }
 
         private TextCommandResult HandleRiftWardModeCommand(string value)

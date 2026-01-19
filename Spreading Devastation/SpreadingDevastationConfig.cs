@@ -11,6 +11,9 @@ namespace SpreadingDevastation
         /// <summary>Global speed multiplier for all devastation spread (default: 1.0)</summary>
         public double SpeedMultiplier { get; set; } = 1.0;
 
+        /// <summary>Maximum effective speed multiplier for devastation spread (default: 20.0). Speed will never exceed this value even with storm boosts.</summary>
+        public double MaxSpeedMultiplier { get; set; } = 20.0;
+
         /// <summary>Maximum number of devastation sources (caps metastasis growth) (default: 20)</summary>
         public int MaxSources { get; set; } = 20;
 
@@ -306,6 +309,19 @@ namespace SpreadingDevastation
         /// This is approximately 0.1% per second, or about 10% per 100 seconds.
         /// </summary>
         public double RiftWardStabilityRestoreRate { get; set; } = 0.0005;
+
+        /// <summary>
+        /// Whether rift ward protection radius shrinks during temporal storms (default: true).
+        /// When enabled, rift ward protection is weakened during storms.
+        /// </summary>
+        public bool RiftWardTemporalStormShrinkEnabled { get; set; } = true;
+
+        /// <summary>
+        /// Fraction by which rift ward protection radius shrinks during temporal storms (default: 0.2 = 20%).
+        /// A value of 0.2 means a 100 block radius becomes 80 blocks during storms.
+        /// Range: 0.0 (no shrink) to 1.0 (complete loss of protection).
+        /// </summary>
+        public double RiftWardTemporalStormShrinkFraction { get; set; } = 0.2;
 
         // === Devastation Fog Effect Settings ===
 

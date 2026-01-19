@@ -3052,7 +3052,7 @@ namespace SpreadingDevastation
                     if (ward.Pos == null || !ward.CachedIsActive) continue;
 
                     // Use per-ward radius (mini rift wards have smaller radius)
-                    int radius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+                    int radius = ward.GetEffectiveRadius(GetRiftWardProtectionRadius());
 
                     // Sample points along the circular edge of the protection radius
                     // Distribute particles evenly across all active wards
@@ -4351,10 +4351,28 @@ namespace SpreadingDevastation
 
             if (config.TemporalStormEffectsEnabled && IsTemporalStormActive())
             {
-                return baseSpeed * config.TemporalStormSpeedMultiplier;
+                baseSpeed *= config.TemporalStormSpeedMultiplier;
             }
 
-            return baseSpeed;
+            // Cap at maximum speed
+            return Math.Min(baseSpeed, config.MaxSpeedMultiplier);
+        }
+
+        /// <summary>
+        /// Gets the effective rift ward protection radius, accounting for temporal storm shrink.
+        /// This should be used instead of directly accessing config.RiftWardProtectionRadius.
+        /// </summary>
+        private int GetRiftWardProtectionRadius()
+        {
+            int baseRadius = config.RiftWardProtectionRadius;
+
+            if (config.RiftWardTemporalStormShrinkEnabled && IsTemporalStormActive())
+            {
+                double shrinkFraction = Math.Clamp(config.RiftWardTemporalStormShrinkFraction, 0.0, 1.0);
+                baseRadius = (int)(baseRadius * (1.0 - shrinkFraction));
+            }
+
+            return Math.Max(baseRadius, 1); // Ensure at least 1 block radius
         }
 
         /// <summary>
@@ -6083,7 +6101,7 @@ namespace SpreadingDevastation
                     activeRiftWards.Add(newWard);
 
                     string wardType = isMini ? "Mini rift ward" : "Rift ward";
-                    int effectiveRadius = newWard.GetEffectiveRadius(config.RiftWardProtectionRadius);
+                    int effectiveRadius = newWard.GetEffectiveRadius(GetRiftWardProtectionRadius());
                     sapi.Logger.Notification($"SpreadingDevastation: {wardType} placed at {blockSel.Position} (radius: {effectiveRadius})");
                     RebuildProtectedChunkCache();
                 }
@@ -6152,7 +6170,7 @@ namespace SpreadingDevastation
             if (ward != null)
             {
                 // Get the ward's protection radius before removing it
-                int wardRadius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+                int wardRadius = ward.GetEffectiveRadius(GetRiftWardProtectionRadius());
                 BlockPos wardPos = ward.Pos.Copy();
 
                 activeRiftWards.Remove(ward);
@@ -6306,7 +6324,7 @@ namespace SpreadingDevastation
                 ward.ActivationWaveRadius++;
 
                 // Use per-ward radius (mini rift wards have smaller radius)
-                int maxRadius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+                int maxRadius = ward.GetEffectiveRadius(GetRiftWardProtectionRadius());
 
                 // Check if wave is complete
                 if (ward.ActivationWaveRadius > maxRadius)
@@ -6726,7 +6744,7 @@ namespace SpreadingDevastation
                 if (ward.Pos == null || !ward.CachedIsActive) continue;
 
                 // Use per-ward radius (mini rift wards have smaller radius)
-                int wardRadius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+                int wardRadius = ward.GetEffectiveRadius(GetRiftWardProtectionRadius());
 
                 // Determine the clean radius based on mode
                 int cleanRadius;
@@ -6817,7 +6835,7 @@ namespace SpreadingDevastation
         {
             int healedCount = 0;
             // Use per-ward radius (mini rift wards have smaller radius)
-            int maxRadius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+            int maxRadius = ward.GetEffectiveRadius(GetRiftWardProtectionRadius());
             int maxFailuresPerRadius = 100; // How many failed attempts before advancing radius
 
             // Calculate Y bounds for scanning - scan full column within protection sphere
@@ -6949,7 +6967,7 @@ namespace SpreadingDevastation
             int healedCount = 0;
             int maxAttempts = blocksToHeal * 10;
             // Use per-ward radius (mini rift wards have smaller radius)
-            int radius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+            int radius = ward.GetEffectiveRadius(GetRiftWardProtectionRadius());
 
             for (int attempt = 0; attempt < maxAttempts && healedCount < blocksToHeal; attempt++)
             {
@@ -7013,7 +7031,7 @@ namespace SpreadingDevastation
         {
             int healedCount = 0;
             // Use per-ward radius (mini rift wards have smaller radius)
-            int maxRadius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+            int maxRadius = ward.GetEffectiveRadius(GetRiftWardProtectionRadius());
 
             // CurrentCleanRadius tracks which spherical shell we're currently processing
             // ScanX, ScanY, ScanZ track position within that shell
@@ -7195,7 +7213,7 @@ namespace SpreadingDevastation
                 if (ward.Pos == null) continue;
 
                 // Use per-ward radius (mini rift wards have smaller radius)
-                int radius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+                int radius = ward.GetEffectiveRadius(GetRiftWardProtectionRadius());
                 int radiusWithBuffer = radius + RIFT_WARD_PROTECTION_BUFFER;
                 int radiusSquared = radius * radius;
                 int radiusWithBufferSquared = radiusWithBuffer * radiusWithBuffer;
@@ -7268,7 +7286,7 @@ namespace SpreadingDevastation
                 return 0;
 
             // Use per-ward radius (mini rift wards have smaller radius)
-            int radius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+            int radius = ward.GetEffectiveRadius(GetRiftWardProtectionRadius());
             int radiusSquared = radius * radius;
 
             int removed = devastationSources.RemoveAll(source =>
@@ -7321,7 +7339,7 @@ namespace SpreadingDevastation
                 foreach (var ward in activeWards)
                 {
                     // Use per-ward radius (mini rift wards have smaller radius)
-                    int radius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+                    int radius = ward.GetEffectiveRadius(GetRiftWardProtectionRadius());
                     int radiusSquared = radius * radius;
 
                     // Use horizontal distance only (X and Z, ignoring Y)
@@ -7512,7 +7530,7 @@ namespace SpreadingDevastation
                 return 0;
 
             // Use per-ward radius (mini rift wards have smaller radius)
-            int wardRadius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+            int wardRadius = ward.GetEffectiveRadius(GetRiftWardProtectionRadius());
 
             // Determine the effective radius based on mode
             string mode = GetEffectiveCleanMode();
@@ -7601,7 +7619,7 @@ namespace SpreadingDevastation
                 if (!ward.CachedIsActive || ward.Pos == null) continue;
 
                 // Use per-ward radius (mini rift wards have smaller radius)
-                int wardRadius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+                int wardRadius = ward.GetEffectiveRadius(GetRiftWardProtectionRadius());
 
                 int radius;
                 if (mode == "raster")
@@ -7692,7 +7710,7 @@ namespace SpreadingDevastation
                 if (ward.Pos == null) continue;
 
                 // Use per-ward radius (mini rift wards have smaller radius)
-                int radius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+                int radius = ward.GetEffectiveRadius(GetRiftWardProtectionRadius());
                 int radiusPlusBuffer = radius + RIFT_WARD_PROTECTION_BUFFER;
                 int radiusSquared = radiusPlusBuffer * radiusPlusBuffer;
 
@@ -7803,7 +7821,7 @@ namespace SpreadingDevastation
                 int distanceSquared = dx * dx + dz * dz;
 
                 // Use per-ward radius (mini rift wards have smaller radius)
-                int wardRadius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+                int wardRadius = ward.GetEffectiveRadius(GetRiftWardProtectionRadius());
 
                 // Determine the effective cleansed radius for this ward
                 int cleansedRadius;
@@ -7853,7 +7871,7 @@ namespace SpreadingDevastation
                 int distanceSquared = dx * dx + dz * dz;
 
                 // Use per-ward radius (mini rift wards have smaller radius)
-                int wardRadius = ward.GetEffectiveRadius(config.RiftWardProtectionRadius);
+                int wardRadius = ward.GetEffectiveRadius(GetRiftWardProtectionRadius());
 
                 // Determine the effective cleansed radius for this ward
                 int cleansedRadius;
