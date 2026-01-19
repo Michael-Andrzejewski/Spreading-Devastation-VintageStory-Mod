@@ -29,7 +29,8 @@ namespace SpreadingDevastation
         private double currentSilenceDuration = 0; // How long current silence should last
 
         // Configuration (synced from server)
-        private bool enabled = true;
+        // Default to false until we receive config from server - prevents music playing before config arrives
+        private bool enabled = false;
         private float volume = 0.6f;
         private float fadeInSpeed = 0.3f;
         private float fadeOutSpeed = 0.5f;

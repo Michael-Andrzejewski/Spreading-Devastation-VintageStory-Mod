@@ -364,8 +364,13 @@ namespace SpreadingDevastation
     public class MusicConfigPacket
     {
         /// <summary>Whether devastation music is enabled.</summary>
+        /// <remarks>
+        /// Default is false to match ProtoBuf's implicit bool default.
+        /// This ensures that when the server sends Enabled=false, it survives serialization.
+        /// The server always explicitly sets this value from config.MusicEnabled.
+        /// </remarks>
         [ProtoMember(1)]
-        public bool Enabled = true;
+        public bool Enabled = false;
 
         /// <summary>Base volume for devastation music (0.0-1.0).</summary>
         [ProtoMember(2)]

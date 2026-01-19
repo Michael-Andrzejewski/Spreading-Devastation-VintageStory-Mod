@@ -2371,7 +2371,9 @@ namespace SpreadingDevastation
 
             // Determine what this block should become when devastated
             string path = block.Code.Path;
-            
+
+            // ========== NATURAL TERRAIN ==========
+
             if (path.StartsWith("soil-"))
             {
                 devastatedBlock = "devastatedsoil-0";
@@ -2382,31 +2384,6 @@ namespace SpreadingDevastation
                 devastatedBlock = "drock";
                 regeneratesTo = "rock-obsidian";
             }
-            else if (path.StartsWith("tallgrass-"))
-            {
-                devastatedBlock = "devastationgrowth-normal";
-                regeneratesTo = "none";
-            }
-            else if (path.StartsWith("smallberrybush-") || path.StartsWith("largeberrybush-"))
-            {
-                devastatedBlock = "devgrowth-thorns";
-                regeneratesTo = "leavesbranchy-grown-oak";
-            }
-            else if (path.StartsWith("flower-") || path.StartsWith("fern-"))
-            {
-                devastatedBlock = "devgrowth-shrike";
-                regeneratesTo = "none";
-            }
-            else if (path.StartsWith("crop-"))
-            {
-                devastatedBlock = "devgrowth-shard";
-                regeneratesTo = "none";
-            }
-            else if (path.StartsWith("leavesbranchy-") || path.StartsWith("leaves-"))
-            {
-                devastatedBlock = "devgrowth-bush";
-                regeneratesTo = "none";
-            }
             else if (path.StartsWith("gravel-"))
             {
                 devastatedBlock = "devastatedsoil-1";
@@ -2416,11 +2393,6 @@ namespace SpreadingDevastation
             {
                 devastatedBlock = "devastatedsoil-2";
                 regeneratesTo = "sludgygravel";
-            }
-            else if (path.StartsWith("log-"))
-            {
-                devastatedBlock = "devastatedsoil-3";
-                regeneratesTo = "log-grown-aged-ud";
             }
             // Forest floor becomes devastated soil (forestfloor0, forestfloor1, etc - no hyphen)
             else if (path.StartsWith("forestfloor"))
@@ -2446,6 +2418,34 @@ namespace SpreadingDevastation
                 devastatedBlock = "devastatedsoil-0";
                 regeneratesTo = "rawclay-blue-none";
             }
+
+            // ========== PLANTS AND VEGETATION ==========
+
+            else if (path.StartsWith("tallgrass-"))
+            {
+                devastatedBlock = "devastationgrowth-normal";
+                regeneratesTo = "none";
+            }
+            else if (path.StartsWith("smallberrybush-") || path.StartsWith("largeberrybush-"))
+            {
+                devastatedBlock = "devgrowth-thorns";
+                regeneratesTo = "leavesbranchy-grown-oak";
+            }
+            else if (path.StartsWith("flower-") || path.StartsWith("fern-"))
+            {
+                devastatedBlock = "devgrowth-shrike";
+                regeneratesTo = "none";
+            }
+            else if (path.StartsWith("crop-"))
+            {
+                devastatedBlock = "devgrowth-shard";
+                regeneratesTo = "none";
+            }
+            else if (path.StartsWith("leavesbranchy-") || path.StartsWith("leaves-"))
+            {
+                devastatedBlock = "devgrowth-bush";
+                regeneratesTo = "none";
+            }
             // Tall plants (cattails/cooper's reed, etc) become devastated briars/thorns
             else if (path.StartsWith("tallplant-"))
             {
@@ -2470,57 +2470,11 @@ namespace SpreadingDevastation
                 devastatedBlock = "devgrowth-thorns";
                 regeneratesTo = "leavesbranchy-grown-oak";
             }
-            // Log sections (placed logs, branches, etc. - e.g., logsection-placed-redwood-ne-ud)
-            else if (path.StartsWith("logsection-"))
-            {
-                devastatedBlock = "devastatedsoil-3";
-                regeneratesTo = "log-grown-aged-ud";
-            }
-            // Wooden planks (all types: planks-*, plankstairs-*, plankfence-*, etc.)
-            else if (path.StartsWith("planks-") || path.StartsWith("plankstairs-") ||
-                     path.StartsWith("plankfence-") || path.StartsWith("plankslab-") ||
-                     path.StartsWith("plankpath-"))
-            {
-                devastatedBlock = "devastatedsoil-3";
-                regeneratesTo = "air"; // Planks are player-crafted, don't regenerate
-            }
-            // Wooden doors and trapdoors
-            else if (path.StartsWith("door-") || path.StartsWith("trapdoor-"))
-            {
-                devastatedBlock = "air"; // Doors just disappear
-                regeneratesTo = "air";
-            }
-            // Wooden furniture and structures (barrels, shelves, signs, ladders, chairs, tables)
-            else if (path.StartsWith("barrel-") || path.StartsWith("shelf-") ||
-                     path.StartsWith("sign-") || path.StartsWith("ladder-") ||
-                     path.StartsWith("chair-") || path.StartsWith("table-"))
-            {
-                devastatedBlock = "air"; // Furniture disappears
-                regeneratesTo = "air";
-            }
-            // Fences and fence gates (non-plank variants)
-            else if (path.StartsWith("fence-") || path.StartsWith("fencegate-"))
-            {
-                devastatedBlock = "air"; // Fences disappear
-                regeneratesTo = "air";
-            }
             // Fruit tree foliage (fruittree-foliage, fruittree-foliage-ripe, etc.)
             else if (path.StartsWith("fruittree-foliage"))
             {
                 devastatedBlock = "devgrowth-bush";
                 regeneratesTo = "none";
-            }
-            // Fruit tree branches (fruittree-branch-*, etc.)
-            else if (path.StartsWith("fruittree-branch"))
-            {
-                devastatedBlock = "devastatedsoil-3";
-                regeneratesTo = "log-grown-aged-ud";
-            }
-            // Fruit tree stems/trunks
-            else if (path.StartsWith("fruittree-stem") || path.StartsWith("fruittree-trunk"))
-            {
-                devastatedBlock = "devastatedsoil-3";
-                regeneratesTo = "log-grown-aged-ud";
             }
             // Mushrooms (mushroom-bolete-normal, mushroom-fieldmushroom-harvested, etc.)
             else if (path.StartsWith("mushroom-"))
@@ -2528,15 +2482,510 @@ namespace SpreadingDevastation
                 devastatedBlock = "devgrowth-shard";
                 regeneratesTo = "none";
             }
+
+            // ========== LOGS AND WOOD - AGING CONVERSIONS ==========
+            // Aged blocks don't regenerate - aging is permanent
+
+            // Logs: log-{grown|placed}-{wood}-{orientation} -> log-{grown|placed}-aged-{orientation}
+            // Skip already aged logs
+            else if (path.StartsWith("log-") && !path.Contains("-aged-"))
+            {
+                string aged = TryConvertToAgedBlock(path, "log-", new[] { "grown", "placed" }, WoodTypes, 2);
+                if (aged != null)
+                {
+                    devastatedBlock = aged;
+                    regeneratesTo = "none"; // Aging is permanent
+                }
+                else
+                {
+                    // Fallback for unrecognized log patterns
+                    devastatedBlock = "log-grown-aged-ud";
+                    regeneratesTo = "none";
+                }
+            }
+            // Debarked logs: debarkedlog-{wood}-{orientation} -> debarkedlog-aged-{orientation}
+            // Skip already aged variants
+            else if (path.StartsWith("debarkedlog-") && !path.Contains("aged"))
+            {
+                string aged = TryConvertToAgedBlockSimple(path, "debarkedlog-", WoodTypes);
+                if (aged != null)
+                {
+                    devastatedBlock = aged;
+                    regeneratesTo = "none";
+                }
+            }
+            // Log quads: logquad-{type}-{wood}-{orientation/direction} -> logquad-{type}-aged-{orientation/direction}
+            else if (path.StartsWith("logquad-") && !path.Contains("-aged-"))
+            {
+                string aged = TryConvertToAgedBlock(path, "logquad-", new[] { "barkedcorner", "debarkedcorner", "placed", "debarked" }, WoodTypes, 2);
+                if (aged != null)
+                {
+                    devastatedBlock = aged;
+                    regeneratesTo = "none";
+                }
+            }
+            // Log sections (placed logs, branches, etc.)
+            else if (path.StartsWith("logsection-"))
+            {
+                devastatedBlock = "log-grown-aged-ud";
+                regeneratesTo = "none";
+            }
+            // Fruit tree branches
+            else if (path.StartsWith("fruittree-branch"))
+            {
+                devastatedBlock = "log-grown-aged-ud";
+                regeneratesTo = "none";
+            }
+            // Fruit tree stems/trunks
+            else if (path.StartsWith("fruittree-stem") || path.StartsWith("fruittree-trunk"))
+            {
+                devastatedBlock = "log-grown-aged-ud";
+                regeneratesTo = "none";
+            }
+            // Support beams: supportbeam-{wood} -> supportbeam-aged (or veryaged)
+            else if (path.StartsWith("supportbeam-") && !path.Contains("aged") && !path.Contains("tarnishedmetal"))
+            {
+                // Random chance for veryaged vs aged
+                devastatedBlock = sapi?.World?.Rand?.NextDouble() < 0.3 ? "supportbeam-veryaged" : "supportbeam-aged";
+                regeneratesTo = "none";
+            }
+
+            // ========== PLANKS AND WOODEN BUILDING BLOCKS - AGING ==========
+
+            // Planks: planks-{wood}-{orientation} -> planks-aged-{orientation}
+            else if (path.StartsWith("planks-") && !path.Contains("aged"))
+            {
+                string aged = TryConvertToAgedBlockSimple(path, "planks-", WoodTypes);
+                if (aged != null)
+                {
+                    devastatedBlock = aged;
+                    regeneratesTo = "none";
+                }
+            }
+            // Plank slabs: plankslab-{wood}-{direction}-{state} -> plankslab-aged-{direction}-{state}
+            else if (path.StartsWith("plankslab-") && !path.Contains("aged"))
+            {
+                string aged = TryConvertToAgedBlockSimple(path, "plankslab-", WoodTypes);
+                if (aged != null)
+                {
+                    devastatedBlock = aged;
+                    regeneratesTo = "none";
+                }
+            }
+            // Plank stairs: plankstairs-{wood}-{up|down}-{direction}-{state} -> plankstairs-aged-...
+            else if (path.StartsWith("plankstairs-") && !path.Contains("aged"))
+            {
+                string aged = TryConvertToAgedBlockSimple(path, "plankstairs-", WoodTypes);
+                if (aged != null)
+                {
+                    devastatedBlock = aged;
+                    regeneratesTo = "none";
+                }
+            }
+            // Wooden paths: woodenpath-{wood}-{orientation} -> woodenpath-aged-{orientation}
+            else if (path.StartsWith("woodenpath-") && !path.Contains("aged"))
+            {
+                string aged = TryConvertToAgedBlockSimple(path, "woodenpath-", WoodTypes);
+                if (aged != null)
+                {
+                    devastatedBlock = aged;
+                    regeneratesTo = "none";
+                }
+            }
+            // Plank fences (no aged variant exists - convert to air)
+            else if (path.StartsWith("plankfence-") || path.StartsWith("plankpath-"))
+            {
+                devastatedBlock = "air";
+                regeneratesTo = "air";
+            }
+
+            // ========== FENCES AND GATES - AGING ==========
+
+            // Wooden fences: woodenfence-{wood}-{connections}-{state} -> woodenfence-aged-{connections}-{state}
+            else if (path.StartsWith("woodenfence-") && !path.Contains("aged"))
+            {
+                string aged = TryConvertToAgedBlockSimple(path, "woodenfence-", WoodTypes);
+                if (aged != null)
+                {
+                    devastatedBlock = aged;
+                    regeneratesTo = "none";
+                }
+            }
+            // Wooden fence gates: woodenfencegate-{wood}-... -> woodenfencegate-aged-...
+            else if (path.StartsWith("woodenfencegate-") && !path.Contains("aged"))
+            {
+                string aged = TryConvertToAgedBlockSimple(path, "woodenfencegate-", WoodTypes);
+                if (aged != null)
+                {
+                    devastatedBlock = aged;
+                    regeneratesTo = "none";
+                }
+            }
+            // Rough hewn fences: roughhewnfence-{wood}-{connections}-{state} -> roughhewnfence-aged-...
+            else if (path.StartsWith("roughhewnfence-") && !path.Contains("aged"))
+            {
+                string aged = TryConvertToAgedBlockSimple(path, "roughhewnfence-", WoodTypes);
+                if (aged != null)
+                {
+                    devastatedBlock = aged;
+                    regeneratesTo = "none";
+                }
+            }
+            // Rough hewn fence gates: roughhewnfencegate-{wood}-... -> roughhewnfencegate-aged-...
+            else if (path.StartsWith("roughhewnfencegate-") && !path.Contains("aged"))
+            {
+                string aged = TryConvertToAgedBlockSimple(path, "roughhewnfencegate-", WoodTypes);
+                if (aged != null)
+                {
+                    devastatedBlock = aged;
+                    regeneratesTo = "none";
+                }
+            }
+            // Other fence types without aged variants
+            else if (path.StartsWith("fence-") || path.StartsWith("fencegate-"))
+            {
+                devastatedBlock = "air";
+                regeneratesTo = "air";
+            }
+
+            // ========== DOORS AND TRAPDOORS - AGING ==========
+
+            // Solid doors: door-solid-{wood} -> door-solid-aged
+            else if (path.StartsWith("door-solid-") && !path.Contains("aged"))
+            {
+                devastatedBlock = "door-solid-aged";
+                regeneratesTo = "none";
+            }
+            // Sleek windowed doors: door-sleek-windowed-{wood} -> door-sleek-windowed-aged
+            else if (path.StartsWith("door-sleek-windowed-") && !path.Contains("aged"))
+            {
+                devastatedBlock = "door-sleek-windowed-aged";
+                regeneratesTo = "none";
+            }
+            // Gate doors: door-{size}gate-{wood} -> door-{size}gate-aged
+            else if (path.StartsWith("door-1x3gate-") && !path.Contains("aged"))
+            {
+                devastatedBlock = "door-1x3gate-aged";
+                regeneratesTo = "none";
+            }
+            else if (path.StartsWith("door-2x2gate-") && !path.Contains("aged"))
+            {
+                devastatedBlock = "door-2x2gate-aged";
+                regeneratesTo = "none";
+            }
+            else if (path.StartsWith("door-2x3gate-") && !path.Contains("aged"))
+            {
+                devastatedBlock = "door-2x3gate-aged";
+                regeneratesTo = "none";
+            }
+            else if (path.StartsWith("door-2x4gate-") && !path.Contains("aged"))
+            {
+                devastatedBlock = "door-2x4gate-aged";
+                regeneratesTo = "none";
+            }
+            // Other door types (plank, log, crude, iron, ruined) - just disappear
+            else if (path.StartsWith("door-"))
+            {
+                devastatedBlock = "air";
+                regeneratesTo = "air";
+            }
+            // Trapdoors: trapdoor-{solid|window}-{wood}-1 -> trapdoor-{solid|window}-aged-{1-4}
+            else if (path.StartsWith("trapdoor-solid-") && !path.Contains("aged") && !path.Contains("rusted") && !path.Contains("iron"))
+            {
+                int damageLevel = sapi?.World?.Rand?.Next(1, 5) ?? 1;
+                devastatedBlock = $"trapdoor-solid-aged-{damageLevel}";
+                regeneratesTo = "none";
+            }
+            else if (path.StartsWith("trapdoor-window-") && !path.Contains("aged"))
+            {
+                int damageLevel = sapi?.World?.Rand?.Next(1, 5) ?? 1;
+                devastatedBlock = $"trapdoor-window-aged-{damageLevel}";
+                regeneratesTo = "none";
+            }
+            // Other trapdoors (bars, plates, etc.) - disappear
+            else if (path.StartsWith("trapdoor-"))
+            {
+                devastatedBlock = "air";
+                regeneratesTo = "air";
+            }
+
+            // ========== FURNITURE - AGING ==========
+
+            // Beds: bed-wood-{part}-{direction} -> bed-woodaged-{part}-{direction}
+            else if (path.StartsWith("bed-wood-") && !path.Contains("woodaged"))
+            {
+                string suffix = path.Substring("bed-wood-".Length);
+                devastatedBlock = "bed-woodaged-" + suffix;
+                regeneratesTo = "none";
+            }
+            // Chairs: chair-{color|plain} -> chair-aged
+            else if (path.StartsWith("chair-") && path != "chair-aged")
+            {
+                devastatedBlock = "chair-aged";
+                regeneratesTo = "none";
+            }
+            // Tables: table-{normal|marble} -> table-aged
+            else if (path.StartsWith("table-") && path != "table-aged")
+            {
+                devastatedBlock = "table-aged";
+                regeneratesTo = "none";
+            }
+            // Display cases: displaycase-generic -> displaycase-aged{1-4}
+            else if (path == "displaycase-generic")
+            {
+                int variant = sapi?.World?.Rand?.Next(1, 5) ?? 1;
+                devastatedBlock = $"displaycase-aged{variant}";
+                regeneratesTo = "none";
+            }
+            // Tall display cases: talldisplaycase-generic -> talldisplaycase-aged{1-5}
+            else if (path == "talldisplaycase-generic")
+            {
+                int variant = sapi?.World?.Rand?.Next(1, 6) ?? 1;
+                devastatedBlock = $"talldisplaycase-aged{variant}";
+                regeneratesTo = "none";
+            }
+            // Other furniture (barrels, shelves, signs, ladders) - disappear
+            else if (path.StartsWith("barrel-") || path.StartsWith("shelf-") ||
+                     path.StartsWith("sign-") || path.StartsWith("ladder-"))
+            {
+                devastatedBlock = "air";
+                regeneratesTo = "air";
+            }
+
+            // ========== DECORATIVE BLOCKS - AGING ==========
+
+            // Torch holders: torchholder-brass-{state}-{direction} -> torchholder-aged-{state}-{direction}
+            else if (path.StartsWith("torchholder-brass-"))
+            {
+                string suffix = path.Substring("torchholder-brass-".Length);
+                devastatedBlock = "torchholder-aged-" + suffix;
+                regeneratesTo = "none";
+            }
+            // Leaded glass panes: glasspane-leaded-{wood}-{orientation} -> glasspane-leaded-aged-{orientation}
+            else if (path.StartsWith("glasspane-leaded-") && !path.Contains("aged"))
+            {
+                string aged = TryConvertToAgedBlockSimple(path, "glasspane-leaded-", WoodTypes);
+                if (aged != null)
+                {
+                    devastatedBlock = aged;
+                    regeneratesTo = "none";
+                }
+            }
+            // Hay: hay-normal-{orientation} -> hay-aged-{orientation}
+            else if (path.StartsWith("hay-normal-"))
+            {
+                string suffix = path.Substring("hay-normal-".Length);
+                devastatedBlock = "hay-aged-" + suffix;
+                regeneratesTo = "none";
+            }
+            // Diamond stone: diamond-stone-{style} -> diamond-stone-{style}-aged
+            else if (path.StartsWith("diamond-stone-") && !path.Contains("aged"))
+            {
+                devastatedBlock = path + "-aged";
+                regeneratesTo = "none";
+            }
+
+            // ========== STONE AND BRICK - AGING ==========
+
+            // Stone bricks: stonebricks-{stone} -> agedstonebricks-{stone}
+            else if (path.StartsWith("stonebricks-"))
+            {
+                string stoneType = path.Substring("stonebricks-".Length);
+                // Check if this stone type has an aged variant (suevite doesn't)
+                if (stoneType != "suevite")
+                {
+                    devastatedBlock = "agedstonebricks-" + stoneType;
+                    regeneratesTo = "none";
+                }
+            }
+
+            // ========== ROOFING - AGING ==========
+
+            // Beams: beam-{plane|ridge}-{material}-{state} -> beam-{plane|ridge}-aged-{state}
+            else if (path.StartsWith("beam-plane-") && !path.Contains("aged"))
+            {
+                string aged = TryConvertToAgedBlockSimple(path, "beam-plane-", RoofMaterials);
+                if (aged != null)
+                {
+                    devastatedBlock = aged;
+                    regeneratesTo = "none";
+                }
+            }
+            else if (path.StartsWith("beam-ridge-") && !path.Contains("aged"))
+            {
+                string aged = TryConvertToAgedBlockSimple(path, "beam-ridge-", RoofMaterials);
+                if (aged != null)
+                {
+                    devastatedBlock = aged;
+                    regeneratesTo = "none";
+                }
+            }
+            // Slanted roofing (all variants): convert material to aged or agedthatch
+            else if (TryConvertSlantedRoofingToAged(path, out string agedRoof))
+            {
+                devastatedBlock = agedRoof;
+                regeneratesTo = "none";
+            }
+
+            // ========== DEVASTATION PANELS ==========
+
+            // dpanel-*-new -> dpanel-*-aged
+            else if (path.StartsWith("dpanel-") && path.EndsWith("-new"))
+            {
+                devastatedBlock = path.Substring(0, path.Length - 4) + "-aged";
+                regeneratesTo = "none";
+            }
+
+            // ========== SKIP/PASS-THROUGH BLOCKS ==========
+
             // Loose stones, boulders, flints - skip these (they'll remain as-is, spreading passes through)
-            // Not converting them since they're decorative surface items
             else if (path.StartsWith("looseboulders-") || path.StartsWith("looseflints-") ||
                      path.StartsWith("loosestones-") || path.StartsWith("looseores-"))
             {
                 // Return false - don't convert these blocks, spreading will pass through them
             }
+            // Already aged blocks - skip
+            else if (path.Contains("aged"))
+            {
+                // Already aged, don't convert again
+            }
 
             return devastatedBlock != "";
+        }
+
+        // Wood types used in block codes
+        private static readonly string[] WoodTypes = new[]
+        {
+            "acacia", "baldcypress", "birch", "ebony", "kapok", "larch",
+            "maple", "oak", "pine", "purpleheart", "redwood", "walnut"
+        };
+
+        // Materials used in roofing blocks
+        private static readonly string[] RoofMaterials = new[]
+        {
+            "acacia", "baldcypress", "birch", "ebony", "kapok", "larch",
+            "maple", "oak", "pine", "purpleheart", "redwood", "walnut",
+            "bamboo", "slate", "copper", "sod", "thatch",
+            "blackclay", "brownclay", "creamclay", "fireclay", "grayclay",
+            "orangeclay", "redclay", "tanclay"
+        };
+
+        // Slanted roofing prefixes that have aged variants
+        private static readonly string[] SlantedRoofingPrefixes = new[]
+        {
+            "slantedroofing-",
+            "slantedroofingbottom-",
+            "slantedroofingcornerinner-",
+            "slantedroofingcornerouter-",
+            "slantedroofinghalfleft-",
+            "slantedroofinghalfright-",
+            "slantedroofingridge-",
+            "slantedroofingridgeend-",
+            "slantedroofingridgehalfleft-",
+            "slantedroofingridgehalfright-",
+            "slantedroofingtip-",
+            "slantedroofingtop-"
+        };
+
+        /// <summary>
+        /// Converts a block path to its aged version by replacing the wood type with "aged".
+        /// Pattern: {prefix}{woodtype}-{suffix} -> {prefix}aged-{suffix}
+        /// </summary>
+        private string TryConvertToAgedBlockSimple(string path, string prefix, string[] materialTypes)
+        {
+            if (!path.StartsWith(prefix)) return null;
+
+            string remainder = path.Substring(prefix.Length);
+
+            foreach (string material in materialTypes)
+            {
+                if (remainder.StartsWith(material + "-"))
+                {
+                    string suffix = remainder.Substring(material.Length + 1);
+                    return prefix + "aged-" + suffix;
+                }
+                else if (remainder == material)
+                {
+                    return prefix + "aged";
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Converts a block path with a secondary type to aged.
+        /// Pattern: {prefix}{type}-{woodtype}-{suffix} -> {prefix}{type}-aged-{suffix}
+        /// </summary>
+        private string TryConvertToAgedBlock(string path, string prefix, string[] secondaryTypes, string[] materialTypes, int materialPosition)
+        {
+            if (!path.StartsWith(prefix)) return null;
+
+            string remainder = path.Substring(prefix.Length);
+
+            foreach (string secondaryType in secondaryTypes)
+            {
+                if (remainder.StartsWith(secondaryType + "-"))
+                {
+                    string afterSecondary = remainder.Substring(secondaryType.Length + 1);
+
+                    foreach (string material in materialTypes)
+                    {
+                        if (afterSecondary.StartsWith(material + "-"))
+                        {
+                            string suffix = afterSecondary.Substring(material.Length + 1);
+                            return prefix + secondaryType + "-aged-" + suffix;
+                        }
+                        else if (afterSecondary == material)
+                        {
+                            return prefix + secondaryType + "-aged";
+                        }
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Handles slanted roofing conversion to aged variants.
+        /// Thatch becomes agedthatch, other materials become aged.
+        /// </summary>
+        private bool TryConvertSlantedRoofingToAged(string path, out string agedBlock)
+        {
+            agedBlock = null;
+
+            // Skip already aged roofing
+            if (path.Contains("aged")) return false;
+
+            foreach (string prefix in SlantedRoofingPrefixes)
+            {
+                if (path.StartsWith(prefix))
+                {
+                    string remainder = path.Substring(prefix.Length);
+
+                    // Special case: thatch becomes agedthatch
+                    if (remainder.StartsWith("thatch-"))
+                    {
+                        string suffix = remainder.Substring("thatch-".Length);
+                        agedBlock = prefix + "agedthatch-" + suffix;
+                        return true;
+                    }
+
+                    // All other materials convert to aged
+                    foreach (string material in RoofMaterials)
+                    {
+                        if (remainder.StartsWith(material + "-"))
+                        {
+                            string suffix = remainder.Substring(material.Length + 1);
+                            agedBlock = prefix + "aged-" + suffix;
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -2555,8 +3004,9 @@ namespace SpreadingDevastation
             {
                 return "soil";
             }
-            // Stone/rock blocks
-            else if (path.StartsWith("rock-"))
+            // Stone/rock blocks and stone bricks
+            else if (path.StartsWith("rock-") || path.StartsWith("stonebricks-") ||
+                     path.StartsWith("diamond-stone-"))
             {
                 return "stone";
             }
@@ -2570,8 +3020,10 @@ namespace SpreadingDevastation
             {
                 return "sand";
             }
-            // Wood/log blocks
+            // Wood/log blocks (including debarked logs, log quads, support beams)
             else if (path.StartsWith("log-") || path.StartsWith("logsection-") ||
+                     path.StartsWith("debarkedlog-") || path.StartsWith("logquad-") ||
+                     path.StartsWith("supportbeam-") ||
                      path.StartsWith("fruittree-branch") || path.StartsWith("fruittree-stem") ||
                      path.StartsWith("fruittree-trunk"))
             {
@@ -2580,7 +3032,13 @@ namespace SpreadingDevastation
             // Wooden planks and plank-based blocks
             else if (path.StartsWith("planks-") || path.StartsWith("plankstairs-") ||
                      path.StartsWith("plankfence-") || path.StartsWith("plankslab-") ||
-                     path.StartsWith("plankpath-"))
+                     path.StartsWith("plankpath-") || path.StartsWith("woodenpath-"))
+            {
+                return "wood";
+            }
+            // Wooden fences and gates
+            else if (path.StartsWith("woodenfence-") || path.StartsWith("woodenfencegate-") ||
+                     path.StartsWith("roughhewnfence-") || path.StartsWith("roughhewnfencegate-"))
             {
                 return "wood";
             }
@@ -2589,9 +3047,27 @@ namespace SpreadingDevastation
                      path.StartsWith("barrel-") || path.StartsWith("shelf-") ||
                      path.StartsWith("sign-") || path.StartsWith("ladder-") ||
                      path.StartsWith("chair-") || path.StartsWith("table-") ||
+                     path.StartsWith("bed-") ||
+                     path.StartsWith("displaycase-") || path.StartsWith("talldisplaycase-") ||
                      path.StartsWith("fence-") || path.StartsWith("fencegate-"))
             {
                 return "wood";
+            }
+            // Roofing (wooden or otherwise - use wood sound)
+            else if (path.StartsWith("beam-") || path.StartsWith("slantedroofing"))
+            {
+                return "wood";
+            }
+            // Metal/glass items (torch holders, glass panes, dpanels)
+            else if (path.StartsWith("torchholder-") || path.StartsWith("glasspane-") ||
+                     path.StartsWith("dpanel-"))
+            {
+                return "stone"; // Metallic sound closer to stone
+            }
+            // Hay
+            else if (path.StartsWith("hay-"))
+            {
+                return "plant";
             }
             // Leaves/foliage blocks
             else if (path.StartsWith("leavesbranchy-") || path.StartsWith("leaves-") ||
