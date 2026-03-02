@@ -24,7 +24,19 @@
       "Bash(git log:*)",
       "Bash(cat:*)",
       "Bash(find:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(unzip:*)",
+      "Bash(npm install:*)",
+      "Bash(npm run dev:*)",
+      "Bash(timeout:*)",
+      "Bash(curl:*)",
+      "Bash(netstat:*)",
+      "Bash(taskkill //F //PID 4772)",
+      "Bash(taskkill //F //PID 24768)",
+      "Bash(tree:*)",
+      "Bash(taskkill:*)",
+      "Bash(tasklist:*)",
+      "Bash(sqlite3:*)"
     ]
   }
 }

@@ -1292,7 +1292,7 @@ namespace SpreadingDevastation
                     }
                     if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double delayMin))
                     {
-                        config.EdgeSpawningDelayMinutes = Math.Clamp(delayMin, 0.5, 60.0);
+                        config.EdgeSpawningDelayMinutes = Math.Max(delayMin, 0.5);
                         SaveConfig();
                         return TextCommandResult.Success($"Edge spawn delay set to {config.EdgeSpawningDelayMinutes:F1} minutes");
                     }
