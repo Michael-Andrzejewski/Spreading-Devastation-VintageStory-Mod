@@ -832,7 +832,7 @@ namespace SpreadingDevastation
                         if (player == null) return TextCommandResult.Error("Player not found");
 
                         var blockSel = player.CurrentBlockSelection;
-                        BlockPos pos = blockSel?.Position ?? player.Entity.ServerPos.AsBlockPos;
+                        BlockPos pos = blockSel?.Position ?? player.Entity.Pos.AsBlockPos;
 
                         string[] parts = value.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
                         string pattern = parts.Length > 0 ? parts[0] : "cumulonimbusrf";

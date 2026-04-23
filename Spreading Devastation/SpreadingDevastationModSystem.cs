@@ -44,6 +44,12 @@ namespace SpreadingDevastation
         private int totalTicksProcessed = 0; // Total ticks processed this session
         private double peakProcessingTimeMs = 0; // Peak single-tick processing time
 
+        // Save diagnostics - track block modifications and save health
+        private long blockModificationsSinceLastSave = 0; // Count of SetBlock calls between saves
+        private int saveCount = 0; // Total saves this session
+        private double lastSaveDurationMs = 0; // How long the last save serialization took
+        private long lastSaveBytes = 0; // Total bytes written in last save
+
         // Stuck chunk repair queue
         private Queue<long> chunksNeedingRepair = new Queue<long>(); // Chunk keys that need repair (stuck chunks)
 
@@ -882,6 +888,8 @@ namespace SpreadingDevastation
 
         private void OnSaveGameLoading()
         {
+            var loadStopwatch = Stopwatch.StartNew();
+
             try
             {
                 byte[] sourcesData = sapi.WorldManager.SaveGame.GetData("devastationSources");
@@ -898,11 +906,36 @@ namespace SpreadingDevastation
                 devastatedChunks = new Dictionary<long, DevastatedChunk>();
                 if (chunksData != null)
                 {
+                    sapi.Logger.Notification($"SpreadingDevastation: Deserializing {chunksData.Length:N0} bytes of chunk data...");
+
                     var chunkList = SerializerUtil.Deserialize<List<DevastatedChunk>>(chunksData);
+
+                    // Validate deserialized data - check for null entries or corrupted chunks
+                    int nullChunks = 0;
+                    int nullFrontiers = 0;
                     foreach (var chunk in chunkList)
                     {
+                        if (chunk == null) { nullChunks++; continue; }
+
+                        // Ensure frontier lists are never null (defensive - could happen with corrupted data)
+                        if (chunk.DevastationFrontier == null)
+                        {
+                            chunk.DevastationFrontier = new List<BlockPos>();
+                            nullFrontiers++;
+                        }
+                        if (chunk.BleedFrontier == null)
+                        {
+                            chunk.BleedFrontier = new List<BleedBlock>();
+                            nullFrontiers++;
+                        }
+
                         devastatedChunks[chunk.ChunkKey] = chunk;
                     }
+
+                    if (nullChunks > 0)
+                        sapi.Logger.Warning($"SpreadingDevastation: Found {nullChunks} null chunk entries in save data - these were skipped");
+                    if (nullFrontiers > 0)
+                        sapi.Logger.Warning($"SpreadingDevastation: Repaired {nullFrontiers} null frontier lists in loaded chunks");
 
                     // Defer frontier rebuild until world is actually loaded
                     // SaveGameLoaded fires before chunks are loaded, so GetBlock() returns null
@@ -924,11 +957,16 @@ namespace SpreadingDevastation
                 // Restore rift ward active states and apply their effects
                 InitializeRiftWardsOnLoad();
 
-                sapi.Logger.Notification($"SpreadingDevastation: Loaded {devastationSources?.Count ?? 0} sources, {devastatedChunks?.Count ?? 0} devastated chunks, {activeRiftWards?.Count ?? 0} rift wards");
+                loadStopwatch.Stop();
+                long totalLoadBytes = (sourcesData?.Length ?? 0) + (chunksData?.Length ?? 0) + (riftWardsData?.Length ?? 0);
+                sapi.Logger.Notification($"SpreadingDevastation: Loaded {devastationSources?.Count ?? 0} sources, " +
+                    $"{devastatedChunks?.Count ?? 0} devastated chunks, {activeRiftWards?.Count ?? 0} rift wards " +
+                    $"({totalLoadBytes:N0} bytes in {loadStopwatch.Elapsed.TotalMilliseconds:F1}ms)");
             }
             catch (Exception ex)
             {
-                sapi.Logger.Error($"SpreadingDevastation: Error loading save data: {ex.Message}");
+                loadStopwatch.Stop();
+                sapi.Logger.Error($"SpreadingDevastation: Error loading save data after {loadStopwatch.Elapsed.TotalMilliseconds:F1}ms: {ex}");
                 // Initialize empty collections if loading failed
                 devastationSources = devastationSources ?? new List<DevastationSource>();
                 devastatedChunks = devastatedChunks ?? new Dictionary<long, DevastatedChunk>();
@@ -938,27 +976,103 @@ namespace SpreadingDevastation
 
         private void OnSaveGameSaving()
         {
+            var saveStopwatch = Stopwatch.StartNew();
+            long totalBytes = 0;
+            saveCount++;
+
             try
             {
-                sapi.WorldManager.SaveGame.StoreData("devastationSources", SerializerUtil.Serialize(devastationSources ?? new List<DevastationSource>()));
+                // Prune stale frontier lists before saving to reduce serialized data size.
+                // Safe because: chunks are only marked IsFullyDevastated when their frontier is
+                // already empty (see SpreadDevastationInChunk). If a player places a block in a
+                // fully devastated chunk, TryQueueBlockForRedevastation sets IsFullyDevastated=false
+                // and adds new frontier entries — so those chunks won't be pruned here.
+                // Any leftover bleed entries on fully devastated chunks are dead (never processed).
+                int prunedFrontierEntries = 0;
+                if (devastatedChunks != null)
+                {
+                    foreach (var chunk in devastatedChunks.Values)
+                    {
+                        if (chunk.IsFullyDevastated)
+                        {
+                            if (chunk.DevastationFrontier != null && chunk.DevastationFrontier.Count > 0)
+                            {
+                                prunedFrontierEntries += chunk.DevastationFrontier.Count;
+                                chunk.DevastationFrontier.Clear();
+                            }
+                            if (chunk.BleedFrontier != null && chunk.BleedFrontier.Count > 0)
+                            {
+                                prunedFrontierEntries += chunk.BleedFrontier.Count;
+                                chunk.BleedFrontier.Clear();
+                            }
+                        }
+                    }
+                }
+
+                // Serialize each data type separately and track sizes
+                byte[] sourcesBytes = SerializerUtil.Serialize(devastationSources ?? new List<DevastationSource>());
+                sapi.WorldManager.SaveGame.StoreData("devastationSources", sourcesBytes);
+                totalBytes += sourcesBytes.Length;
+
                 sapi.WorldManager.SaveGame.StoreData("devastationPaused", SerializerUtil.Serialize(isPaused));
                 sapi.WorldManager.SaveGame.StoreData("devastationNextSourceId", SerializerUtil.Serialize(nextSourceId));
 
                 // Save devastated chunks as a list
                 var chunkList = devastatedChunks?.Values.ToList() ?? new List<DevastatedChunk>();
-                sapi.WorldManager.SaveGame.StoreData("devastatedChunks", SerializerUtil.Serialize(chunkList));
+                byte[] chunksBytes = SerializerUtil.Serialize(chunkList);
+                sapi.WorldManager.SaveGame.StoreData("devastatedChunks", chunksBytes);
+                totalBytes += chunksBytes.Length;
 
                 // Save rift wards
-                sapi.WorldManager.SaveGame.StoreData("riftWards", SerializerUtil.Serialize(activeRiftWards ?? new List<RiftWard>()));
+                byte[] wardsBytes = SerializerUtil.Serialize(activeRiftWards ?? new List<RiftWard>());
+                sapi.WorldManager.SaveGame.StoreData("riftWards", wardsBytes);
+                totalBytes += wardsBytes.Length;
 
                 // Save initial spawn completed flag
                 sapi.WorldManager.SaveGame.StoreData("initialSpawnCompleted", SerializerUtil.Serialize(initialSpawnCompleted));
 
-                sapi.Logger.VerboseDebug($"SpreadingDevastation: Saved {devastationSources?.Count ?? 0} sources, {devastatedChunks?.Count ?? 0} devastated chunks, {activeRiftWards?.Count ?? 0} rift wards");
+                saveStopwatch.Stop();
+                lastSaveDurationMs = saveStopwatch.Elapsed.TotalMilliseconds;
+                lastSaveBytes = totalBytes;
+
+                // Verify the chunks data can be deserialized back (catch silent serialization corruption)
+                try
+                {
+                    var verifyList = SerializerUtil.Deserialize<List<DevastatedChunk>>(chunksBytes);
+                    if (verifyList.Count != chunkList.Count)
+                    {
+                        sapi.Logger.Error($"SpreadingDevastation: SAVE INTEGRITY FAILURE - Serialized {chunkList.Count} chunks but deserialized {verifyList.Count}! Data may be corrupted.");
+                    }
+                }
+                catch (Exception verifyEx)
+                {
+                    sapi.Logger.Error($"SpreadingDevastation: SAVE INTEGRITY FAILURE - Cannot deserialize chunk data that was just serialized: {verifyEx}");
+                }
+
+                // Count frontier entries for diagnostics
+                int totalFrontierEntries = 0;
+                int totalBleedEntries = 0;
+                int fullyDevastatedCount = 0;
+                foreach (var chunk in chunkList)
+                {
+                    if (chunk.IsFullyDevastated) fullyDevastatedCount++;
+                    totalFrontierEntries += chunk.DevastationFrontier?.Count ?? 0;
+                    totalBleedEntries += chunk.BleedFrontier?.Count ?? 0;
+                }
+
+                sapi.Logger.Notification($"SpreadingDevastation: Save #{saveCount} completed in {lastSaveDurationMs:F1}ms - " +
+                    $"{devastationSources?.Count ?? 0} sources, {chunkList.Count} chunks ({fullyDevastatedCount} done), {activeRiftWards?.Count ?? 0} wards - " +
+                    $"{totalBytes:N0} bytes ({chunksBytes.Length:N0} chunks, {sourcesBytes.Length:N0} sources, {wardsBytes.Length:N0} wards) - " +
+                    $"{totalFrontierEntries} frontier entries, {totalBleedEntries} bleed entries" +
+                    (prunedFrontierEntries > 0 ? $", pruned {prunedFrontierEntries} stale frontier entries" : "") +
+                    $" - {blockModificationsSinceLastSave} block modifications since last save");
+
+                blockModificationsSinceLastSave = 0;
             }
             catch (Exception ex)
             {
-                sapi.Logger.Error($"SpreadingDevastation: Error saving data: {ex.Message}");
+                saveStopwatch.Stop();
+                sapi.Logger.Error($"SpreadingDevastation: Error saving data after {saveStopwatch.Elapsed.TotalMilliseconds:F1}ms: {ex}");
             }
         }
 
@@ -1451,6 +1565,7 @@ namespace SpreadingDevastation
                 if (TryGetDevastatedForm(block, out devastatedBlock, out regeneratesTo))
                 {
                     Block newBlock = sapi.World.GetBlock(new AssetLocation("game", devastatedBlock));
+                    if (newBlock == null || newBlock.Id == 0) continue;
                     sapi.World.BlockAccessor.SetBlock(newBlock.Id, targetPos);
 
                     // Play conversion sound for the original block type
@@ -1460,6 +1575,7 @@ namespace SpreadingDevastation
                     SpawnDevastationParticles(targetPos);
 
                     devastatedCount++;
+                    blockModificationsSinceLastSave++;
 
                     // Track for metastasis system
                     source.BlocksDevastatedTotal++;
@@ -1541,6 +1657,7 @@ namespace SpreadingDevastation
                     SpawnHealingParticles(targetPos);
 
                     healedCount++;
+                    blockModificationsSinceLastSave++;
                 }
             }
 
@@ -3910,7 +4027,7 @@ namespace SpreadingDevastation
                 IServerPlayer player = allPlayers[i] as IServerPlayer;
                 if (player?.Entity == null) continue;
 
-                var playerPos = player.Entity.ServerPos.XYZ;
+                var playerPos = player.Entity.Pos.XYZ;
                 int searchRadius = config.AnimalInsanitySearchRadius;
 
                 // Get all entities around the player
@@ -3935,14 +4052,14 @@ namespace SpreadingDevastation
                     }
 
                     // Check if entity is in a devastated chunk
-                    int chunkX = (int)entity.ServerPos.X / CHUNK_SIZE;
-                    int chunkZ = (int)entity.ServerPos.Z / CHUNK_SIZE;
+                    int chunkX = (int)entity.Pos.X / CHUNK_SIZE;
+                    int chunkZ = (int)entity.Pos.Z / CHUNK_SIZE;
                     long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
 
                     if (!devastatedChunks.ContainsKey(chunkKey)) continue;
 
                     // Check if protected by rift ward
-                    if (IsBlockProtectedByRiftWard(entity.ServerPos.AsBlockPos)) continue;
+                    if (IsBlockProtectedByRiftWard(entity.Pos.AsBlockPos)) continue;
 
                     // Check if this entity type can go insane
                     if (!CanEntityGoInsane(entity)) continue;
@@ -4031,7 +4148,7 @@ namespace SpreadingDevastation
             // Also try to set the entity's target to nearest player for immediate aggression
             TrySetEntityTargetToNearestPlayer(entity);
 
-            sapi.Logger.Debug($"SpreadingDevastation: {entity.Code.Path} at ({entity.ServerPos.X:F0}, {entity.ServerPos.Y:F0}, {entity.ServerPos.Z:F0}) driven insane by devastation");
+            sapi.Logger.Debug($"SpreadingDevastation: {entity.Code.Path} at ({entity.Pos.X:F0}, {entity.Pos.Y:F0}, {entity.Pos.Z:F0}) driven insane by devastation");
         }
 
         /// <summary>
@@ -4051,9 +4168,9 @@ namespace SpreadingDevastation
                 IServerPlayer player = allPlayers[i] as IServerPlayer;
                 if (player?.Entity == null) continue;
 
-                double dx = player.Entity.ServerPos.X - entity.ServerPos.X;
-                double dy = player.Entity.ServerPos.Y - entity.ServerPos.Y;
-                double dz = player.Entity.ServerPos.Z - entity.ServerPos.Z;
+                double dx = player.Entity.Pos.X - entity.Pos.X;
+                double dy = player.Entity.Pos.Y - entity.Pos.Y;
+                double dz = player.Entity.Pos.Z - entity.Pos.Z;
                 double distSq = dx * dx + dy * dy + dz * dz;
 
                 if (distSq < nearestDistSq)
@@ -4137,14 +4254,14 @@ namespace SpreadingDevastation
                 if (!IsEntityTrader(entity)) continue;
 
                 // Check if entity is in a devastated chunk
-                int chunkX = (int)entity.ServerPos.X / CHUNK_SIZE;
-                int chunkZ = (int)entity.ServerPos.Z / CHUNK_SIZE;
+                int chunkX = (int)entity.Pos.X / CHUNK_SIZE;
+                int chunkZ = (int)entity.Pos.Z / CHUNK_SIZE;
                 long chunkKey = DevastatedChunk.MakeChunkKey(chunkX, chunkZ);
 
                 if (!devastatedChunks.ContainsKey(chunkKey)) continue;
 
                 // Check if protected by rift ward
-                if (IsBlockProtectedByRiftWard(entity.ServerPos.AsBlockPos)) continue;
+                if (IsBlockProtectedByRiftWard(entity.Pos.AsBlockPos)) continue;
 
                 // Mark for removal
                 entitiesToKill.Add(entity);
@@ -4153,7 +4270,7 @@ namespace SpreadingDevastation
             // Kill all marked traders
             foreach (var entity in entitiesToKill)
             {
-                sapi.Logger.Notification($"SpreadingDevastation: Killing trader {entity.Code.Path} at ({entity.ServerPos.X:F0}, {entity.ServerPos.Y:F0}, {entity.ServerPos.Z:F0}) - in devastated chunk");
+                sapi.Logger.Notification($"SpreadingDevastation: Killing trader {entity.Code.Path} at ({entity.Pos.X:F0}, {entity.Pos.Y:F0}, {entity.Pos.Z:F0}) - in devastated chunk");
                 entity.Die(EnumDespawnReason.Death, null);
             }
         }
@@ -4941,6 +5058,7 @@ namespace SpreadingDevastation
 
                 // Convert the block
                 sapi.World.BlockAccessor.SetBlock(devBlock.Id, targetPos);
+                blockModificationsSinceLastSave++;
 
                 // Spawn particles
                 if (config.DevastationParticlesEnabled)
@@ -5296,8 +5414,8 @@ namespace SpreadingDevastation
                 }
 
                 Entity entity = sapi.World.ClassRegistry.CreateEntity(entityType);
-                entity.ServerPos.SetPos(spawnPos.X + 0.5, spawnPos.Y + 1, spawnPos.Z + 0.5);
-                entity.Pos.SetFrom(entity.ServerPos);
+                entity.Pos.SetPos(spawnPos.X + 0.5, spawnPos.Y + 1, spawnPos.Z + 0.5);
+                entity.Pos.SetFrom(entity.Pos);
                 sapi.World.SpawnEntity(entity);
             }
             catch (Exception ex)
@@ -5750,6 +5868,7 @@ namespace SpreadingDevastation
 
                             successCount++;
                             chunk.BlocksDevastated++;
+                            blockModificationsSinceLastSave++;
                             foundCandidate = true;
 
                             break; // Move to next attempt
@@ -6045,6 +6164,7 @@ namespace SpreadingDevastation
                 if (newBlock != null)
                 {
                     sapi.World.BlockAccessor.SetBlock(newBlock.Id, adjacentPos);
+                    blockModificationsSinceLastSave++;
 
                     // Play conversion sound for the original block type
                     PlayBlockConversionSound(adjacentBlock, adjacentPos);
@@ -6155,6 +6275,7 @@ namespace SpreadingDevastation
                     if (newBlock != null)
                     {
                         sapi.World.BlockAccessor.SetBlock(newBlock.Id, targetPos);
+                        blockModificationsSinceLastSave++;
 
                         // Play conversion sound for the original block type
                         PlayBlockConversionSound(targetBlock, targetPos);
@@ -6705,11 +6826,19 @@ namespace SpreadingDevastation
                 return;
             }
 
-            // Re-initialize frontier for adjacent devastated chunks so they can spread into the unprotected area
+            // Re-initialize frontier for adjacent devastated chunks so they can spread into the unprotected area.
+            // Fully devastated chunks need to be un-flagged so they can rebuild frontiers toward the
+            // now-unprotected area — otherwise the healed area would never re-infect.
             int chunksReactivated = 0;
             foreach (var chunk in adjacentDevastatedChunks)
             {
-                if (chunk.IsFullyDevastated || chunk.IsUnrepairable) continue;
+                if (chunk.IsUnrepairable) continue;
+
+                // Un-flag fully devastated so the chunk re-scans for convertible neighbors
+                if (chunk.IsFullyDevastated)
+                {
+                    chunk.IsFullyDevastated = false;
+                }
 
                 // Mark chunk as needing frontier rebuild
                 chunk.FrontierInitialized = false;
@@ -7491,6 +7620,7 @@ namespace SpreadingDevastation
                     SpawnHealingParticles(targetPos);
 
                     healedCount++;
+                    blockModificationsSinceLastSave++;
                 }
             }
 
@@ -7616,6 +7746,7 @@ namespace SpreadingDevastation
                     SpawnHealingParticles(targetPos);
 
                     healedCount++;
+                    blockModificationsSinceLastSave++;
                 }
             }
 

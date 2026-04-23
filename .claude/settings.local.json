@@ -36,7 +36,11 @@
       "Bash(tree:*)",
       "Bash(taskkill:*)",
       "Bash(tasklist:*)",
-      "Bash(sqlite3:*)"
+      "Bash(sqlite3:*)",
+      "Bash(grep:*)",
+      "Bash(gh search:*)",
+      "Bash(gh api:*)",
+      "Bash(gh issue:*)"
     ]
   }
 }
