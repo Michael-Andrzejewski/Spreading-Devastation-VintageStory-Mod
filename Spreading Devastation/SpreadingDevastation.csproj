@@ -35,18 +35,34 @@
   </ItemGroup>
 
   <Target Name="Package" AfterTargets="PostBuildEvent">
+    <!-- Read the version from modinfo.json so the zip name always matches it
+         (it used to be hardcoded, which silently mislabeled the artifact on
+         every version bump). -->
+    <PropertyGroup>
+      <ModInfoContent>$([System.IO.File]::ReadAllText('$(ProjectDir)modinfo.json'))</ModInfoContent>
+      <ModVersion>$([System.Text.RegularExpressions.Regex]::Match($(ModInfoContent), '"version"\s*:\s*"([^"]+)"').Groups[1].Value)</ModVersion>
+      <ModZipName>SpreadingDevastation_v$(ModVersion).zip</ModZipName>
+      <ModOutDir>$(ProjectDir)bin\$(Configuration)\$(TargetFramework)</ModOutDir>
+    </PropertyGroup>
     <ItemGroup>
       <PackageFiles Include="$(TargetPath)" />
       <PackageFiles Include="modinfo.json" />
       <AssetFiles Include="assets\**\*" />
+      <!-- Clean up older versioned zips so only the current one remains -->
+      <OldZipsBin Include="$(ModOutDir)\SpreadingDevastation_v*.zip" />
+      <OldZipsDeploy Include="$(APPDATA)\VintagestoryData\Mods\SpreadingDevastation_v*.zip" />
     </ItemGroup>
-    <Copy SourceFiles="@(PackageFiles)" DestinationFolder="$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\mod\" />
+    <!-- Build the new zip in bin first (bin is never locked by the game) -->
+    <Delete Files="@(OldZipsBin)" />
+    <Copy SourceFiles="@(PackageFiles)" DestinationFolder="$(ModOutDir)\mod\" />
     <!-- Copy assets folder preserving directory structure -->
-    <Copy SourceFiles="@(AssetFiles)" DestinationFiles="@(AssetFiles->'$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\mod\%(Identity)')" />
-    <ZipDirectory SourceDirectory="$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\mod\" DestinationFile="$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\SpreadingDevastation_v1.1.0.zip" Overwrite="true" />
-    <!-- Auto-deploy to Vintagestory Mods folder -->
-    <Copy SourceFiles="$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\SpreadingDevastation_v1.1.0.zip" DestinationFolder="$(APPDATA)\VintagestoryData\Mods\" />
-    <Message Importance="high" Text="Deployed SpreadingDevastation_v1.1.0.zip to $(APPDATA)\VintagestoryData\Mods\" />
+    <Copy SourceFiles="@(AssetFiles)" DestinationFiles="@(AssetFiles->'$(ModOutDir)\mod\%(Identity)')" />
+    <ZipDirectory SourceDirectory="$(ModOutDir)\mod\" DestinationFile="$(ModOutDir)\$(ModZipName)" Overwrite="true" />
+    <!-- Remove stale deployed versions (best-effort; never fail the build if the
+         game is running and holds a lock), then deploy the freshly built zip. -->
+    <Delete Files="@(OldZipsDeploy)" ContinueOnError="true" />
+    <Copy SourceFiles="$(ModOutDir)\$(ModZipName)" DestinationFolder="$(APPDATA)\VintagestoryData\Mods\" />
+    <Message Importance="high" Text="Deployed $(ModZipName) to $(APPDATA)\VintagestoryData\Mods\" />
   </Target>
 
 </Project>

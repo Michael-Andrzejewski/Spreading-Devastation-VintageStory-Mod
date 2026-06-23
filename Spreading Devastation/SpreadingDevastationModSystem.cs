@@ -5740,6 +5740,11 @@ namespace SpreadingDevastation
         private void SpreadDevastationInChunk(DevastatedChunk chunk)
         {
             if (chunk.IsFullyDevastated) return;
+            // Abandoned after failing repair (5 attempts). Re-scanning it every cycle
+            // wastes work and, for a loaded stuck chunk, re-triggered a per-cycle
+            // Warning in the verification scan below. The stuck-chunk detector has
+            // already reported it, so stop processing it.
+            if (chunk.IsUnrepairable) return;
 
             // Initialize frontier if needed (for chunks from older saves without frontier data)
             if (!chunk.FrontierInitialized || chunk.DevastationFrontier == null || chunk.DevastationFrontier.Count == 0)
@@ -6563,7 +6568,11 @@ namespace SpreadingDevastation
             }
             else if (foundConvertible)
             {
-                sapi.Logger.Warning($"SpreadingDevastation: Found {convertibleCount} convertible blocks in chunk ({chunk.ChunkX}, {chunk.ChunkZ}) but couldn't find adjacent devastated blocks for frontier");
+                // Convertible blocks exist but none are adjacent to devastation, so the
+                // frontier cannot be rebuilt. Do NOT log here: this runs every processing
+                // cycle for such a chunk and spammed the server log. The stuck-chunk
+                // detector reports this condition once (bounded) and queues a repair, and
+                // unrepairable chunks are now skipped entirely in SpreadDevastationInChunk.
             }
             else
             {
