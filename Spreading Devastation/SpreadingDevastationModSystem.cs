@@ -4994,6 +4994,10 @@ namespace SpreadingDevastation
 
             if (!isStormActive) return;
 
+            // Spawning new devastation around players is opt-in via TemporalStormSpawnEnabled.
+            // The TemporalStormSpeedMultiplier boost (handled in GetEffectiveSpeedMultiplier) still applies.
+            if (!config.TemporalStormSpawnEnabled) return;
+
             double currentTime = sapi.World.Calendar.TotalHours;
 
             // Convert spawn interval from seconds to hours
@@ -6478,7 +6482,12 @@ namespace SpreadingDevastation
             var worldChunk = sapi.World.BlockAccessor.GetChunk(chunk.ChunkX, 0, chunk.ChunkZ);
             if (worldChunk == null)
             {
-                sapi.Logger.VerboseDebug($"SpreadingDevastation: Chunk ({chunk.ChunkX}, {chunk.ChunkZ}) not loaded, skipping verification scan");
+                // Chunk isn't loaded, so we can't verify it. Return true so it is NOT
+                // marked fully devastated and gets re-checked once it loads again.
+                // IMPORTANT: do NOT log here. This path runs every processing cycle for
+                // every devastated-but-unloaded chunk, so logging spammed VerboseDebug
+                // and filled server debug logs with 50MB+ files over time (a long-running
+                // server can accumulate thousands of such chunks).
                 return true; // Assume there could be convertible blocks - don't mark as done
             }
 

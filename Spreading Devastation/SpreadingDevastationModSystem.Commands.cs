@@ -1178,6 +1178,25 @@ namespace SpreadingDevastation
                     SaveConfig();
                     return TextCommandResult.Success("Temporal storm devastation effects DISABLED");
 
+                case "spawn":
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        return TextCommandResult.Success($"Storm spawns devastation around players: {(config.TemporalStormSpawnEnabled ? "ON" : "OFF")}");
+                    }
+                    if (value.ToLowerInvariant() == "on" || value.ToLowerInvariant() == "true")
+                    {
+                        config.TemporalStormSpawnEnabled = true;
+                        SaveConfig();
+                        return TextCommandResult.Success("Temporal storms will now spawn devastation around players (speed boost still applies regardless).");
+                    }
+                    else if (value.ToLowerInvariant() == "off" || value.ToLowerInvariant() == "false")
+                    {
+                        config.TemporalStormSpawnEnabled = false;
+                        SaveConfig();
+                        return TextCommandResult.Success("Temporal storms will no longer spawn devastation around players. The speed boost during storms still applies.");
+                    }
+                    return TextCommandResult.Error("Usage: /dv storm spawn [on|off]");
+
                 case "speed":
                 case "multiplier":
                     if (string.IsNullOrWhiteSpace(value))
@@ -1247,7 +1266,8 @@ namespace SpreadingDevastation
                     var lines = new List<string>
                     {
                         "=== Temporal Storm Devastation ===",
-                        $"Enabled: {(config.TemporalStormEffectsEnabled ? "ON" : "OFF")}",
+                        $"Enabled (master): {(config.TemporalStormEffectsEnabled ? "ON" : "OFF")}",
+                        $"Spawn around players: {(config.TemporalStormSpawnEnabled ? "ON" : "OFF")}",
                         $"Storm active: {(stormActive ? "YES" : "NO")}",
                         $"Speed multiplier: {config.TemporalStormSpeedMultiplier:F1}x" + (stormActive ? $" (current effective: {effectiveSpeed:F1}x)" : ""),
                         $"Spawn radius: {config.TemporalStormSpawnRadius} blocks",
@@ -1255,7 +1275,8 @@ namespace SpreadingDevastation
                         $"Creates chunks: {(config.TemporalStormCreatesChunks ? "ON" : "OFF")}",
                         "",
                         "Commands:",
-                        "  /dv storm [on|off] - Enable or disable storm effects",
+                        "  /dv storm [on|off] - Enable or disable storm effects (master)",
+                        "  /dv storm spawn [on|off] - Whether storms spawn devastation around players",
                         "  /dv storm speed [multiplier] - Set speed boost during storms",
                         "  /dv storm radius [blocks] - Set spawn radius around players",
                         "  /dv storm interval [seconds] - Set spawn interval",
@@ -2186,7 +2207,7 @@ namespace SpreadingDevastation
             {
                 $"Devastation status: {statusText}",
                 $"Speed multiplier: {config.SpeedMultiplier:F2}x" + (stormActive ? $" (STORM ACTIVE: {effectiveSpeed:F1}x effective)" : ""),
-                $"Temporal storm effects: {(config.TemporalStormEffectsEnabled ? "ON" : "OFF")} (storm boost: {config.TemporalStormSpeedMultiplier:F1}x)",
+                $"Temporal storm effects: {(config.TemporalStormEffectsEnabled ? "ON" : "OFF")} (storm boost: {config.TemporalStormSpeedMultiplier:F1}x, spawn: {(config.TemporalStormSpawnEnabled ? "ON" : "OFF")})",
                 $"Active sources: {devastationSources.Count}/{config.MaxSources}",
                 $"Surface spreading: {(config.RequireSourceAirContact ? "ON" : "OFF")}",
                 $"Diagonal spreading: {(config.DiagonalSpreadingEnabled ? "ON (26 dirs)" : "OFF (6 dirs)")}",

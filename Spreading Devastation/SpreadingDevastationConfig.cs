@@ -775,9 +775,18 @@ namespace SpreadingDevastation
 
         /// <summary>
         /// Whether temporal storm effects on devastation are enabled (default: true).
-        /// When enabled, temporal storms will spawn devastation near players and speed up spread.
+        /// Master toggle for storm-related effects. When enabled, temporal storms can speed up devastation spread,
+        /// and (if TemporalStormSpawnEnabled is also true) spawn new devastation around players.
         /// </summary>
         public bool TemporalStormEffectsEnabled { get; set; } = true;
+
+        /// <summary>
+        /// Whether temporal storms spawn new devastated blocks around players (default: false).
+        /// This is the disruptive "storm seeds devastation" behavior. The TemporalStormSpeedMultiplier
+        /// boost to existing devastation still applies independently of this flag.
+        /// Requires TemporalStormEffectsEnabled to also be true.
+        /// </summary>
+        public bool TemporalStormSpawnEnabled { get; set; } = false;
 
         /// <summary>
         /// Speed multiplier for devastation spread during temporal storms (default: 5.0).
@@ -789,6 +798,7 @@ namespace SpreadingDevastation
         /// <summary>
         /// Radius in blocks around each player where new devastated blocks can spawn during storms (default: 64).
         /// Devastation spawns at random positions within this radius.
+        /// Only used when TemporalStormSpawnEnabled is true.
         /// </summary>
         public int TemporalStormSpawnRadius { get; set; } = 64;
 
