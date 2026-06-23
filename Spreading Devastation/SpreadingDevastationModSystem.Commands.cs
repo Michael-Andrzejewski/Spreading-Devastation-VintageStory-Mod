@@ -69,6 +69,11 @@ namespace SpreadingDevastation
                     .WithArgs(api.ChatCommands.Parsers.OptionalWord("onoff"))
                     .HandleWith(HandleMarkersCommand)
                 .EndSubCommand()
+                .BeginSubCommand("debug")
+                    .WithDescription("Toggle verbose diagnostic logging (off by default; only for troubleshooting)")
+                    .WithArgs(api.ChatCommands.Parsers.OptionalWord("onoff"))
+                    .HandleWith(HandleDebugCommand)
+                .EndSubCommand()
                 .BeginSubCommand("diagonal")
                     .WithDescription("Toggle diagonal spreading (26 directions vs 6 cardinal)")
                     .WithArgs(api.ChatCommands.Parsers.OptionalWord("onoff"))
@@ -2137,6 +2142,40 @@ namespace SpreadingDevastation
                 config.ShowSourceMarkers = false;
                 SaveConfig();
                 return TextCommandResult.Success("Source markers DISABLED");
+            }
+            else
+            {
+                return TextCommandResult.Error("Invalid value. Use: on, off, 1, 0, true, or false");
+            }
+        }
+
+        private TextCommandResult HandleDebugCommand(TextCommandCallingArgs args)
+        {
+            string onOff = args.Parsers[0].GetValue() as string;
+
+            if (string.IsNullOrEmpty(onOff))
+            {
+                string status = config.DebugLogging ? "ON" : "OFF";
+                return SendChatLines(args, new[]
+                {
+                    $"Verbose debug logging: {status}",
+                    "Usage: /devastate debug [on|off]",
+                    "Leave this OFF in normal play. It logs per-chunk and per-particle",
+                    "diagnostics that can fill the server log over time."
+                }, "Debug logging setting sent to chat");
+            }
+
+            if (onOff.Equals("on", StringComparison.OrdinalIgnoreCase) || onOff == "1" || onOff.Equals("true", StringComparison.OrdinalIgnoreCase))
+            {
+                config.DebugLogging = true;
+                SaveConfig();
+                return TextCommandResult.Success("Verbose debug logging ENABLED. Turn it OFF again when done so it does not fill the server log.");
+            }
+            else if (onOff.Equals("off", StringComparison.OrdinalIgnoreCase) || onOff == "0" || onOff.Equals("false", StringComparison.OrdinalIgnoreCase))
+            {
+                config.DebugLogging = false;
+                SaveConfig();
+                return TextCommandResult.Success("Verbose debug logging DISABLED");
             }
             else
             {
