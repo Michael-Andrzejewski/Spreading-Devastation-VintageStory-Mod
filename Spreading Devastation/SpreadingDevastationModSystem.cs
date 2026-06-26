@@ -834,7 +834,7 @@ namespace SpreadingDevastation
             // Always send chunk packet (even if empty) so client has accurate state
             serverNetworkChannel.SendPacket(chunkPacket, player);
 
-            sapi.Logger.VerboseDebug($"SpreadingDevastation: Sent initial sync to player {player.PlayerName} ({chunkPacket.ChunkXs.Count} chunks nearby)");
+            DebugLog($"SpreadingDevastation: Sent initial sync to player {player.PlayerName} ({chunkPacket.ChunkXs.Count} chunks nearby)");
         }
 
         private void LoadConfig()
@@ -877,6 +877,20 @@ namespace SpreadingDevastation
             catch (Exception ex)
             {
                 sapi.Logger.Error($"SpreadingDevastation: Error saving config: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Verbose diagnostic logging, OFF by default and gated behind config.DebugLogging
+        /// (toggle with /devastate debug on). Used for the high-frequency per-chunk and
+        /// per-particle diagnostics that would otherwise fill the server log over time.
+        /// Errors and important warnings do NOT go through this and are always logged.
+        /// </summary>
+        private void DebugLog(string message)
+        {
+            if (config?.DebugLogging == true && sapi != null)
+            {
+                sapi.Logger.Notification(message);
             }
         }
 
@@ -954,7 +968,7 @@ namespace SpreadingDevastation
                 // Save initial spawn completed flag
                 sapi.WorldManager.SaveGame.StoreData("initialSpawnCompleted", SerializerUtil.Serialize(initialSpawnCompleted));
 
-                sapi.Logger.VerboseDebug($"SpreadingDevastation: Saved {devastationSources?.Count ?? 0} sources, {devastatedChunks?.Count ?? 0} devastated chunks, {activeRiftWards?.Count ?? 0} rift wards");
+                DebugLog($"SpreadingDevastation: Saved {devastationSources?.Count ?? 0} sources, {devastatedChunks?.Count ?? 0} devastated chunks, {activeRiftWards?.Count ?? 0} rift wards");
             }
             catch (Exception ex)
             {
@@ -1071,7 +1085,7 @@ namespace SpreadingDevastation
                 if (chunk.DevastationFrontier.Count > 0)
                 {
                     rebuiltCount++;
-                    sapi.Logger.VerboseDebug($"SpreadingDevastation: Rebuilt frontier for chunk ({chunk.ChunkX}, {chunk.ChunkZ}) with {chunk.DevastationFrontier.Count} blocks on load");
+                    DebugLog($"SpreadingDevastation: Rebuilt frontier for chunk ({chunk.ChunkX}, {chunk.ChunkZ}) with {chunk.DevastationFrontier.Count} blocks on load");
                 }
                 else if (!foundAnyConvertible)
                 {
@@ -1180,12 +1194,12 @@ namespace SpreadingDevastation
 
             if (chunk.DevastationFrontier.Count > 0)
             {
-                sapi.Logger.Notification($"SpreadingDevastation: Lazy rebuilt frontier for chunk ({chunk.ChunkX}, {chunk.ChunkZ}) with {chunk.DevastationFrontier.Count} blocks");
+                DebugLog($"SpreadingDevastation: Lazy rebuilt frontier for chunk ({chunk.ChunkX}, {chunk.ChunkZ}) with {chunk.DevastationFrontier.Count} blocks");
             }
             else if (!foundAnyConvertible)
             {
                 chunk.IsFullyDevastated = true;
-                sapi.Logger.VerboseDebug($"SpreadingDevastation: Lazy scan confirmed chunk ({chunk.ChunkX}, {chunk.ChunkZ}) is fully devastated");
+                DebugLog($"SpreadingDevastation: Lazy scan confirmed chunk ({chunk.ChunkX}, {chunk.ChunkZ}) is fully devastated");
             }
 
             return true;
@@ -3297,7 +3311,7 @@ namespace SpreadingDevastation
                             Math.Pow(player.Entity.Pos.X - pos.X, 2) +
                             Math.Pow(player.Entity.Pos.Y - pos.Y, 2) +
                             Math.Pow(player.Entity.Pos.Z - pos.Z, 2));
-                        sapi.Logger.Debug($"[ParticleSpawn] Devastation at ({pos.X}, {pos.Y}, {pos.Z}), Dist: {dist:F1}");
+                        DebugLog($"[ParticleSpawn] Devastation at ({pos.X}, {pos.Y}, {pos.Z}), Dist: {dist:F1}");
                     }
                 }
 
@@ -3342,7 +3356,7 @@ namespace SpreadingDevastation
                             Math.Pow(firstPlayer.Entity.Pos.X - pos.X, 2) +
                             Math.Pow(firstPlayer.Entity.Pos.Y - pos.Y, 2) +
                             Math.Pow(firstPlayer.Entity.Pos.Z - pos.Z, 2));
-                        sapi.Logger.Debug($"[HealingSpawn] Healing at ({pos.X}, {pos.Y}, {pos.Z}), Dist: {dist:F1}");
+                        DebugLog($"[HealingSpawn] Healing at ({pos.X}, {pos.Y}, {pos.Z}), Dist: {dist:F1}");
                     }
                 }
 
@@ -3450,7 +3464,7 @@ namespace SpreadingDevastation
                         farParticleBlackoutUntilTicks = currentTicks + blackoutDurationTicks;
 
                         debugNearBlocked++;
-                        sapi.Logger.Debug($"[Particles] Near particle blocked at ({pos.X}, {pos.Y}, {pos.Z}) - triggering {2.0 * particleLifetimeSeconds:F1}s far blackout");
+                        DebugLog($"[Particles] Near particle blocked at ({pos.X}, {pos.Y}, {pos.Z}) - triggering {2.0 * particleLifetimeSeconds:F1}s far blackout");
                         return false;
                     }
                 }
@@ -3483,7 +3497,7 @@ namespace SpreadingDevastation
                 {
                     lastParticleDebugLogTime = currentTime;
                     bool inBlackout = currentTicks < farParticleBlackoutUntilTicks;
-                    sapi.Logger.Debug($"[Particles] Near:{debugNearAllowed} NearBlk:{debugNearBlocked} FarOK:{debugFarAllowed} FarBlk:{debugFarBlocked} FarBO:{debugFarBlackout} | Limit:{config.MaxParticlesPerSecond} Prox:{proximityBlocks} Blackout:{inBlackout}");
+                    DebugLog($"[Particles] Near:{debugNearAllowed} NearBlk:{debugNearBlocked} FarOK:{debugFarAllowed} FarBlk:{debugFarBlocked} FarBO:{debugFarBlackout} | Limit:{config.MaxParticlesPerSecond} Prox:{proximityBlocks} Blackout:{inBlackout}");
                     debugNearAllowed = 0;
                     debugNearBlocked = 0;
                     debugFarAllowed = 0;
@@ -4031,7 +4045,7 @@ namespace SpreadingDevastation
             // Also try to set the entity's target to nearest player for immediate aggression
             TrySetEntityTargetToNearestPlayer(entity);
 
-            sapi.Logger.Debug($"SpreadingDevastation: {entity.Code.Path} at ({entity.ServerPos.X:F0}, {entity.ServerPos.Y:F0}, {entity.ServerPos.Z:F0}) driven insane by devastation");
+            DebugLog($"SpreadingDevastation: {entity.Code.Path} at ({entity.ServerPos.X:F0}, {entity.ServerPos.Y:F0}, {entity.ServerPos.Z:F0}) driven insane by devastation");
         }
 
         /// <summary>
@@ -4397,7 +4411,7 @@ namespace SpreadingDevastation
                 // Track this region's weather state
                 activeWeatherRegions[regionKey] = (intensity, pattern, weatherEvent, windPattern);
 
-                sapi.Logger.Debug($"SpreadingDevastation: Set weather for region {regionKey}: pattern={pattern}, event={weatherEvent ?? "none"}, wind={windPattern ?? "none"}, intensity={intensity:F2}, tier={newTier}");
+                DebugLog($"SpreadingDevastation: Set weather for region {regionKey}: pattern={pattern}, event={weatherEvent ?? "none"}, wind={windPattern ?? "none"}, intensity={intensity:F2}, tier={newTier}");
             }
         }
 
@@ -4425,7 +4439,7 @@ namespace SpreadingDevastation
             foreach (var regionKey in toRemove)
             {
                 activeWeatherRegions.Remove(regionKey);
-                sapi.Logger.Debug($"SpreadingDevastation: Cleared weather tracking for region {regionKey} - no longer devastated");
+                DebugLog($"SpreadingDevastation: Cleared weather tracking for region {regionKey} - no longer devastated");
             }
         }
 
@@ -4969,7 +4983,7 @@ namespace SpreadingDevastation
                         };
 
                         devastatedChunks[chunkKey] = newChunk;
-                        sapi.Logger.VerboseDebug($"SpreadingDevastation: Temporal storm created new devastated chunk at ({chunkX}, {chunkZ})");
+                        DebugLog($"SpreadingDevastation: Temporal storm created new devastated chunk at ({chunkX}, {chunkZ})");
                     }
 
                     // Add to frontier if chunk already exists
@@ -4985,7 +4999,7 @@ namespace SpreadingDevastation
                 }
 
                 // Successfully spawned devastation for this player
-                sapi.Logger.VerboseDebug($"SpreadingDevastation: Temporal storm spawned devastation at {targetPos} near player {player.PlayerName}");
+                DebugLog($"SpreadingDevastation: Temporal storm spawned devastation at {targetPos} near player {player.PlayerName}");
                 return;
             }
         }
@@ -5129,7 +5143,7 @@ namespace SpreadingDevastation
             foreach (var newChunk in chunksToAdd)
             {
                 devastatedChunks[newChunk.ChunkKey] = newChunk;
-                sapi.Logger.VerboseDebug($"SpreadingDevastation: Chunk ({newChunk.ChunkX}, {newChunk.ChunkZ}) became devastated from spread");
+                DebugLog($"SpreadingDevastation: Chunk ({newChunk.ChunkX}, {newChunk.ChunkZ}) became devastated from spread");
             }
         }
 
@@ -5291,7 +5305,7 @@ namespace SpreadingDevastation
                 EntityProperties entityType = sapi.World.GetEntityType(entityLocation);
                 if (entityType == null)
                 {
-                    sapi.Logger.Debug($"SpreadingDevastation: Entity type '{entityCode}' not found (mod may not be installed)");
+                    DebugLog($"SpreadingDevastation: Entity type '{entityCode}' not found (mod may not be installed)");
                     return;
                 }
 
@@ -5386,7 +5400,7 @@ namespace SpreadingDevastation
                 }
                 else
                 {
-                    sapi.Logger.Debug($"SpreadingDevastation: Spawn pool entity '{entityCode}' not found (mod not installed), skipping");
+                    DebugLog($"SpreadingDevastation: Spawn pool entity '{entityCode}' not found (mod not installed), skipping");
                 }
             }
 
@@ -5618,6 +5632,11 @@ namespace SpreadingDevastation
         private void SpreadDevastationInChunk(DevastatedChunk chunk)
         {
             if (chunk.IsFullyDevastated) return;
+            // Abandoned after failing repair (5 attempts). Re-scanning it every cycle
+            // wastes work and, for a loaded stuck chunk, re-triggered a per-cycle
+            // Warning in the verification scan below. The stuck-chunk detector has
+            // already reported it, so stop processing it.
+            if (chunk.IsUnrepairable) return;
 
             // Initialize frontier if needed (for chunks from older saves without frontier data)
             if (!chunk.FrontierInitialized || chunk.DevastationFrontier == null || chunk.DevastationFrontier.Count == 0)
@@ -5648,7 +5667,7 @@ namespace SpreadingDevastation
                 {
                     // No convertible blocks found - chunk is truly done
                     chunk.IsFullyDevastated = true;
-                    sapi.Logger.VerboseDebug($"SpreadingDevastation: Chunk ({chunk.ChunkX}, {chunk.ChunkZ}) marked fully devastated after verification scan");
+                    DebugLog($"SpreadingDevastation: Chunk ({chunk.ChunkX}, {chunk.ChunkZ}) marked fully devastated after verification scan");
                     return;
                 }
             }
@@ -6357,7 +6376,11 @@ namespace SpreadingDevastation
             var worldChunk = sapi.World.BlockAccessor.GetChunk(chunk.ChunkX, 0, chunk.ChunkZ);
             if (worldChunk == null)
             {
-                sapi.Logger.VerboseDebug($"SpreadingDevastation: Chunk ({chunk.ChunkX}, {chunk.ChunkZ}) not loaded, skipping verification scan");
+                // Chunk isn't loaded, so we can't verify it. Return true so it is NOT
+                // marked fully devastated and gets re-checked once it loads again.
+                // IMPORTANT: do NOT log here. This path runs every processing cycle for
+                // every devastated-but-unloaded chunk, so logging spammed the debug log
+                // and filled server debug folders with 50MB+ files over time.
                 return true; // Assume there could be convertible blocks - don't mark as done
             }
 
@@ -6429,15 +6452,19 @@ namespace SpreadingDevastation
 
             if (foundConvertible && chunk.DevastationFrontier.Count > 0)
             {
-                sapi.Logger.Notification($"SpreadingDevastation: Rebuilt frontier for chunk ({chunk.ChunkX}, {chunk.ChunkZ}) with {chunk.DevastationFrontier.Count} blocks (found {convertibleCount} convertible)");
+                DebugLog($"SpreadingDevastation: Rebuilt frontier for chunk ({chunk.ChunkX}, {chunk.ChunkZ}) with {chunk.DevastationFrontier.Count} blocks (found {convertibleCount} convertible)");
             }
             else if (foundConvertible)
             {
-                sapi.Logger.Warning($"SpreadingDevastation: Found {convertibleCount} convertible blocks in chunk ({chunk.ChunkX}, {chunk.ChunkZ}) but couldn't find adjacent devastated blocks for frontier");
+                // Convertible blocks exist but none are adjacent to devastation, so the
+                // frontier cannot be rebuilt. Do NOT log here: this runs every processing
+                // cycle for such a chunk and spammed the server log. The stuck-chunk
+                // detector reports this condition once (bounded) and queues a repair, and
+                // unrepairable chunks are now skipped entirely in SpreadDevastationInChunk.
             }
             else
             {
-                sapi.Logger.VerboseDebug($"SpreadingDevastation: Thorough scan of chunk ({chunk.ChunkX}, {chunk.ChunkZ}) found no convertible blocks - truly done");
+                DebugLog($"SpreadingDevastation: Thorough scan of chunk ({chunk.ChunkX}, {chunk.ChunkZ}) found no convertible blocks - truly done");
             }
 
             return foundConvertible;

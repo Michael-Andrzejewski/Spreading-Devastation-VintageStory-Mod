@@ -1,53 +1,72 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
+    <!-- VS 1.21.x runs on .NET 8, so the 1.21 backport must target net8.0. -->
     <TargetFramework>net8.0</TargetFramework>
     <RootNamespace>SpreadingDevastation</RootNamespace>
     <AssemblyName>SpreadingDevastation</AssemblyName>
+    <!--
+      Path to a Vintage Story 1.21.x install to compile against. This branch
+      targets 1.21.6, which is NOT the machine's main install (that's 1.22 at
+      %APPDATA%\Vintagestory). Override on the command line if you installed
+      1.21.6 elsewhere:  dotnet build -p:VsRefPath=D:\some\path
+    -->
+    <VsRefPath Condition="'$(VsRefPath)' == ''">C:\vs1216</VsRefPath>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Reference the Vintage Story DLLs (uses APPDATA env var for portability) -->
+    <!-- Reference the VS 1.21.6 DLLs (see VsRefPath above) -->
     <Reference Include="VintagestoryAPI">
-      <HintPath>$(APPDATA)\Vintagestory\VintagestoryAPI.dll</HintPath>
+      <HintPath>$(VsRefPath)\VintagestoryAPI.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="VintagestoryLib">
-      <HintPath>$(APPDATA)\Vintagestory\VintagestoryLib.dll</HintPath>
+      <HintPath>$(VsRefPath)\VintagestoryLib.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="VSSurvivalMod">
-      <HintPath>$(APPDATA)\Vintagestory\Mods\VSSurvivalMod.dll</HintPath>
+      <HintPath>$(VsRefPath)\Mods\VSSurvivalMod.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="VSEssentials">
-      <HintPath>$(APPDATA)\Vintagestory\Mods\VSEssentials.dll</HintPath>
+      <HintPath>$(VsRefPath)\Mods\VSEssentials.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="Newtonsoft.Json">
-      <HintPath>$(APPDATA)\Vintagestory\Lib\Newtonsoft.Json.dll</HintPath>
+      <HintPath>$(VsRefPath)\Lib\Newtonsoft.Json.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="protobuf-net">
-      <HintPath>$(APPDATA)\Vintagestory\Lib\protobuf-net.dll</HintPath>
+      <HintPath>$(VsRefPath)\Lib\protobuf-net.dll</HintPath>
       <Private>False</Private>
     </Reference>
   </ItemGroup>
 
   <Target Name="Package" AfterTargets="PostBuildEvent">
+    <!-- Read the version from modinfo.json so the zip name always matches it. -->
+    <PropertyGroup>
+      <ModInfoContent>$([System.IO.File]::ReadAllText('$(ProjectDir)modinfo.json'))</ModInfoContent>
+      <ModVersion>$([System.Text.RegularExpressions.Regex]::Match($(ModInfoContent), '"version"\s*:\s*"([^"]+)"').Groups[1].Value)</ModVersion>
+      <ModZipName>SpreadingDevastation_v$(ModVersion).zip</ModZipName>
+      <ModOutDir>$(ProjectDir)bin\$(Configuration)\$(TargetFramework)</ModOutDir>
+    </PropertyGroup>
     <ItemGroup>
       <PackageFiles Include="$(TargetPath)" />
       <PackageFiles Include="modinfo.json" />
       <AssetFiles Include="assets\**\*" />
+      <OldZipsBin Include="$(ModOutDir)\SpreadingDevastation_v*.zip" />
     </ItemGroup>
-    <Copy SourceFiles="@(PackageFiles)" DestinationFolder="$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\mod\" />
-    <!-- Copy assets folder preserving directory structure -->
-    <Copy SourceFiles="@(AssetFiles)" DestinationFiles="@(AssetFiles->'$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\mod\%(Identity)')" />
-    <ZipDirectory SourceDirectory="$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\mod\" DestinationFile="$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\SpreadingDevastation_v1.0.13.zip" Overwrite="true" />
-    <!-- Auto-deploy to Vintagestory Mods folder -->
-    <Copy SourceFiles="$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\SpreadingDevastation_v1.0.13.zip" DestinationFolder="$(APPDATA)\VintagestoryData\Mods\" />
-    <Message Importance="high" Text="Deployed SpreadingDevastation_v1.0.13.zip to $(APPDATA)\VintagestoryData\Mods\" />
+    <Delete Files="@(OldZipsBin)" />
+    <Copy SourceFiles="@(PackageFiles)" DestinationFolder="$(ModOutDir)\mod\" />
+    <Copy SourceFiles="@(AssetFiles)" DestinationFiles="@(AssetFiles->'$(ModOutDir)\mod\%(Identity)')" />
+    <ZipDirectory SourceDirectory="$(ModOutDir)\mod\" DestinationFile="$(ModOutDir)\$(ModZipName)" Overwrite="true" />
+    <!--
+      No auto-deploy on this branch. The shared %APPDATA%\VintagestoryData\Mods
+      folder is also used by VS 1.22, which cannot load this net8 build. Grab the
+      zip from bin and place it where you run/test 1.21.6, or upload it to the
+      mod DB as the 1.21.x file.
+    -->
+    <Message Importance="high" Text="Built $(ModZipName) in $(ModOutDir) (1.21.6 build; not auto-deployed)" />
   </Target>
 
 </Project>
-

@@ -8,6 +8,15 @@ namespace SpreadingDevastation
     /// </summary>
     public class SpreadingDevastationConfig
     {
+        /// <summary>
+        /// Enable verbose diagnostic logging (default: false). When OFF, the mod's
+        /// internal per-chunk / per-particle diagnostics are silent so they cannot
+        /// fill the server log/debug folder over time. Turn ON only while
+        /// troubleshooting, via /devastate debug on. Errors and important warnings
+        /// are always logged regardless of this setting.
+        /// </summary>
+        public bool DebugLogging { get; set; } = false;
+
         /// <summary>Global speed multiplier for all devastation spread (default: 1.0)</summary>
         public double SpeedMultiplier { get; set; } = 1.0;
 
